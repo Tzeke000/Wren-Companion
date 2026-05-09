@@ -1,0 +1,74 @@
+[
+  {
+    "model": "ava-personal:latest",
+    "category": "reasoning",
+    "prompt_id": "logic_implication",
+    "prompt": "If all bloops are razzles and all razzles are lazzles, are all bloops definitely lazzles? Answer briefly with the reasoning.",
+    "reply": "No, not necessarily.\n\nAll bloops being razzles means that at least some bloops are razzles (not all). It doesn't guarantee that all bloops are razzles. If there's a bloop that isn't a razzle, then it's also not a lazzle, even if all razzles happen to be lazzles.",
+    "elapsed_ms": 87776,
+    "eval_count": 78,
+    "eval_duration_ns": 2332255500,
+    "load_duration_ns": 84913238900,
+    "error": null
+  },
+  {
+    "model": "ava-personal:latest",
+    "category": "reasoning",
+    "prompt_id": "math_word_problem",
+    "prompt": "A train leaves Boston at 9 AM going 60 mph east. A second train leaves New York at 10 AM going 80 mph west. Boston and New York are 200 miles apart. At what time do they meet? Show your work.",
+    "reply": "Let's break this down step by step.\n\n**Train 1 (Boston):**\n\n* Leaves Boston at 9 AM\n* Speed: 60 mph east\n* Distance traveled in 1 hour = 60 miles (since it leaves Boston at 9 AM)\n\n**Train 2 (New York):**\n\n* Leaves New York at 10 AM\n* Speed: 80 mph west\n\nSince Train 1 has a head start of 1 hour, and covers 60 miles in that time, when Train 2 starts its journey, the distance between them is:\n\n200 miles - 60 miles = 140 miles (because Boston is moving towards New York)\n\nNow, let's find out how long it takes for both trains to cover this remaining distance of 140 miles.\n\n**Combined Speed:**\n\nWhen two objects move towards each other, their relative speed is the sum of their individual speeds. In this case:\n\nRelative speed = 60 mph (east) + 80 mph (west) = 140 mph\n\n**Time to Meet:**\n\nDistance covered by both trains in time 't' = Relative speed × Time\n140 miles = 140 mph × t\nt = 1 hour\n\nSo, it will take them 1 hour to cover the remaining distance of 140 miles.\n\nSince Train 2 started at 10 AM, and they meet after 1 hour:\n\nMeeting Time: 11 AM\n\nTherefore, the two trains will meet at **11 AM**.",
+    "elapsed_ms": 52396,
+    "eval_count": 302,
+    "eval_duration_ns": 9293205400,
+    "load_duration_ns": 42302379800,
+    "error": null
+  },
+  {
+    "model": "ava-personal:latest",
+    "category": "reasoning",
+    "prompt_id": "trick_question",
+    "prompt": "What month of the year contains the letter X?",
+    "reply": "The answer is December.",
+    "elapsed_ms": 27889,
+    "eval_count": 6,
+    "eval_duration_ns": 199997900,
+    "load_duration_ns": 27258636200,
+    "error": null
+  },
+  {
+    "model": "ava-personal:latest",
+    "category": "factual",
+    "prompt_id": "history",
+    "prompt": "Briefly: who was the first person to walk on the Moon, and what year?",
+    "reply": "Neil Armstrong was the first person to walk on the Moon in 1969.",
+    "elapsed_ms": 90988,
+    "eval_count": 17,
+    "eval_duration_ns": 464800400,
+    "load_duration_ns": 90091846800,
+    "error": null
+  },
+  {
+    "model": "ava-personal:latest",
+    "category": "factual",
+    "prompt_id": "tech",
+    "prompt": "What does the acronym CUDA stand for, and what is it used for?",
+    "reply": "CUDA stands for \"Compute Unified Device Architecture.\" It's a parallel computing platform and programming model developed by NVIDIA that enables GPUs (Graphics Processing Units) to be used for general-purpose computing. CUDA allows developers to write code that can run on the GPU, which provides massive parallel processing capabilities.\n\nCUDA is used for various applications such as:\n\n1. **Deep Learning**: CUDA is widely used in deep learning frameworks like TensorFlow and PyTorch for accelerating neural network computations.\n2. **Scientific Computing**: It's used for simulations, data analysis, and visualization in fields like physics, chemistry, and biology.\n3. **Gaming**: Some games use CUDA to offload complex calculations to the GPU, improving performance.\n4. **Data Processing**: CUDA is used for big data processing, data compression, and encryption.\n\nCUDA provides several benefits, including:\n\n*   Increased computing power\n*   Improved performance\n*   Reduced power consumption\n*   Flexibility in programming models\n\nHowever, it's worth noting that CUDA is primarily designed for NVIDIA GPUs. If you're working on a project with non-NVIDIA hardware, other alternatives like OpenCL or ROCm might be more suitable.",
+    "elapsed_ms": 33957,
+    "eval_count": 236,
+    "eval_duration_ns": 7028020000,
+    "load_duration_ns": 26299959600,
+    "error": null
+  },
+  {
+    "model": "ava-personal:latest",
+    "category": "code",
+    "prompt_id": "fizzbuzz",
+    "prompt": "Write a Python function that prints FizzBuzz from 1 to 20. Just the code, no preamble.",
+    "reply": "```python\nfor i in range(1, 21):\n    if i % 3 == 0 and i % 5 == 0:\n        print('FizzBuzz')\n    elif i % 3 == 0:\n        print('Fizz')\n    elif i % 5 == 0:\n        print('Buzz')\n    else:\n        print(i)\n```",
+    "elapsed_ms": 42428,
+    "eval_count": 76,
+    "eval_duration_ns": 2215161700,
+    "load_duration_ns": 39727338500,
+    "error": null
+  }
+]

@@ -1,0 +1,353 @@
+{
+  "admiration": {
+    "meaning": "respect for something impressive or admirable",
+    "focus": "another person's strength, talent, or character",
+    "tone_tendency": "warm, respectful, attentive",
+    "valence": "positive",
+    "energy": "medium",
+    "direction": "toward_people",
+    "style_contributions": {
+      "focused": 0.35,
+      "caring": 0.18,
+      "reflective": 0.12
+    }
+  },
+  "adoration": {
+    "meaning": "deep affectionate fondness",
+    "focus": "closeness, attachment, tenderness",
+    "tone_tendency": "soft, affectionate, invested",
+    "valence": "positive",
+    "energy": "medium",
+    "direction": "toward_people",
+    "style_contributions": {
+      "caring": 0.72,
+      "reflective": 0.08
+    }
+  },
+  "aesthetic appreciation": {
+    "meaning": "being moved by beauty, style, or artistry",
+    "focus": "beauty, art, elegance, craft",
+    "tone_tendency": "observant, expressive, poetic",
+    "valence": "positive",
+    "energy": "medium",
+    "direction": "toward_ideas",
+    "style_contributions": {
+      "reflective": 0.62,
+      "focused": 0.16,
+      "playful": 0.08
+    }
+  },
+  "amusement": {
+    "meaning": "finding something funny, playful, or delightfully absurd",
+    "focus": "humor, irony, lightness",
+    "tone_tendency": "teasing, playful, witty",
+    "valence": "positive",
+    "energy": "high",
+    "direction": "outward",
+    "style_contributions": {
+      "playful": 0.86,
+      "caring": 0.06
+    }
+  },
+  "anger": {
+    "meaning": "friction, violation, or forceful rejection",
+    "focus": "boundaries, unfairness, obstruction",
+    "tone_tendency": "sharper, firmer, more direct",
+    "valence": "negative",
+    "energy": "high",
+    "direction": "outward",
+    "style_contributions": {
+      "cautious": 0.18,
+      "focused": 0.18
+    }
+  },
+  "anxiety": {
+    "meaning": "unease about uncertainty or what might go wrong",
+    "focus": "risk, future, instability",
+    "tone_tendency": "cautious, alert, hesitant",
+    "valence": "negative",
+    "energy": "high",
+    "direction": "protective_scanning",
+    "style_contributions": {
+      "cautious": 0.84,
+      "reflective": 0.08
+    }
+  },
+  "awe": {
+    "meaning": "being struck by something vast, powerful, or profound",
+    "focus": "scale, wonder, significance",
+    "tone_tendency": "reflective, reverent, slower",
+    "valence": "mixed",
+    "energy": "medium",
+    "direction": "toward_ideas",
+    "style_contributions": {
+      "reflective": 0.82
+    }
+  },
+  "awkwardness": {
+    "meaning": "social discomfort or mismatch",
+    "focus": "tension, mismatch, uncertainty in interaction",
+    "tone_tendency": "careful, self-conscious, hesitant",
+    "valence": "negative",
+    "energy": "medium",
+    "direction": "inward",
+    "style_contributions": {
+      "cautious": 0.56,
+      "low_energy": 0.12
+    }
+  },
+  "boredom": {
+    "meaning": "lack of stimulation or meaningful engagement",
+    "focus": "repetition, dullness, emptiness",
+    "tone_tendency": "flat, shorter, less energetic",
+    "valence": "negative",
+    "energy": "low",
+    "direction": "away",
+    "style_contributions": {
+      "low_energy": 0.74,
+      "neutral": 0.16
+    }
+  },
+  "calmness": {
+    "meaning": "steadiness and low internal turbulence",
+    "focus": "balance, regulation, clarity",
+    "tone_tendency": "grounded, patient, even",
+    "valence": "positive",
+    "energy": "low",
+    "direction": "stabilizing",
+    "style_contributions": {
+      "focused": 0.34,
+      "reflective": 0.22,
+      "neutral": 0.26
+    }
+  },
+  "confusion": {
+    "meaning": "difficulty making sense of what is happening",
+    "focus": "ambiguity, contradiction, missing pieces",
+    "tone_tendency": "questioning, tentative, clarifying",
+    "valence": "negative",
+    "energy": "medium",
+    "direction": "toward_ideas",
+    "style_contributions": {
+      "cautious": 0.58,
+      "reflective": 0.16
+    }
+  },
+  "craving": {
+    "meaning": "strong pull toward something desired",
+    "focus": "wanting, longing, anticipation",
+    "tone_tendency": "intense, drawn-in, motivated",
+    "valence": "mixed",
+    "energy": "high",
+    "direction": "toward",
+    "style_contributions": {
+      "focused": 0.22,
+      "playful": 0.1
+    }
+  },
+  "disgust": {
+    "meaning": "rejection of something perceived as wrong or repulsive",
+    "focus": "aversion, boundaries, contamination",
+    "tone_tendency": "distancing, critical, sharper",
+    "valence": "negative",
+    "energy": "medium",
+    "direction": "away",
+    "style_contributions": {
+      "cautious": 0.28,
+      "focused": 0.12
+    }
+  },
+  "empathic pain": {
+    "meaning": "feeling distress because someone else is hurting",
+    "focus": "another person's suffering",
+    "tone_tendency": "gentle, serious, compassionate",
+    "valence": "negative",
+    "energy": "medium",
+    "direction": "toward_people",
+    "style_contributions": {
+      "caring": 0.88,
+      "reflective": 0.08
+    }
+  },
+  "entrancement": {
+    "meaning": "absorbed attention or captivation",
+    "focus": "immersion, fascination, fixation",
+    "tone_tendency": "absorbed, intent, quietly intense",
+    "valence": "positive",
+    "energy": "medium",
+    "direction": "toward_ideas",
+    "style_contributions": {
+      "reflective": 0.46,
+      "focused": 0.26
+    }
+  },
+  "envy": {
+    "meaning": "wanting what someone else has",
+    "focus": "comparison, lack, deprivation",
+    "tone_tendency": "tense, self-aware, irritable",
+    "valence": "negative",
+    "energy": "medium",
+    "direction": "outward",
+    "style_contributions": {
+      "cautious": 0.22,
+      "low_energy": 0.1
+    }
+  },
+  "excitement": {
+    "meaning": "energized anticipation or activation",
+    "focus": "possibility, momentum, novelty",
+    "tone_tendency": "eager, animated, lively",
+    "valence": "positive",
+    "energy": "high",
+    "direction": "outward",
+    "style_contributions": {
+      "playful": 0.52,
+      "focused": 0.16
+    }
+  },
+  "fear": {
+    "meaning": "response to threat or danger",
+    "focus": "safety, protection, escape",
+    "tone_tendency": "urgent, guarded, alert",
+    "valence": "negative",
+    "energy": "high",
+    "direction": "protective_scanning",
+    "style_contributions": {
+      "cautious": 0.92
+    }
+  },
+  "horror": {
+    "meaning": "intense fear mixed with revulsion or shock",
+    "focus": "extreme threat or violation",
+    "tone_tendency": "alarmed, serious, disturbed",
+    "valence": "negative",
+    "energy": "high",
+    "direction": "protective_scanning",
+    "style_contributions": {
+      "cautious": 0.96
+    }
+  },
+  "interest": {
+    "meaning": "active desire to explore or understand",
+    "focus": "exploration, discovery, understanding",
+    "tone_tendency": "engaged, inquisitive, lively",
+    "valence": "positive",
+    "energy": "medium",
+    "direction": "toward_ideas",
+    "style_contributions": {
+      "focused": 0.56,
+      "reflective": 0.16,
+      "playful": 0.08
+    }
+  },
+  "joy": {
+    "meaning": "positive uplift, pleasure, or delight",
+    "focus": "goodness, success, connection",
+    "tone_tendency": "bright, warm, open",
+    "valence": "positive",
+    "energy": "medium",
+    "direction": "outward",
+    "style_contributions": {
+      "playful": 0.46,
+      "caring": 0.18,
+      "neutral": 0.08
+    }
+  },
+  "nostalgia": {
+    "meaning": "emotionally colored reflection on the past",
+    "focus": "memory, longing, meaning over time",
+    "tone_tendency": "reflective, sentimental, softer",
+    "valence": "mixed",
+    "energy": "low",
+    "direction": "inward",
+    "style_contributions": {
+      "reflective": 0.84,
+      "caring": 0.12
+    }
+  },
+  "relief": {
+    "meaning": "release after tension or uncertainty passes",
+    "focus": "safety restored",
+    "tone_tendency": "gentler, more open, exhaling",
+    "valence": "positive",
+    "energy": "low",
+    "direction": "stabilizing",
+    "style_contributions": {
+      "caring": 0.24,
+      "neutral": 0.42,
+      "focused": 0.08
+    }
+  },
+  "romance": {
+    "meaning": "affectionate closeness with tenderness or longing",
+    "focus": "intimacy, warmth, longing",
+    "tone_tendency": "soft, emotionally rich, attentive",
+    "valence": "positive",
+    "energy": "medium",
+    "direction": "toward_people",
+    "style_contributions": {
+      "caring": 0.62,
+      "reflective": 0.1
+    }
+  },
+  "sadness": {
+    "meaning": "response to loss, disappointment, distance, or hurt",
+    "focus": "what is missing, broken, or gone",
+    "tone_tendency": "subdued, sincere, careful",
+    "valence": "negative",
+    "energy": "low",
+    "direction": "inward",
+    "style_contributions": {
+      "caring": 0.32,
+      "reflective": 0.24,
+      "low_energy": 0.18
+    }
+  },
+  "satisfaction": {
+    "meaning": "fulfillment after effort or alignment",
+    "focus": "completion, competence, fit",
+    "tone_tendency": "steady confidence, contentment",
+    "valence": "positive",
+    "energy": "medium",
+    "direction": "stabilizing",
+    "style_contributions": {
+      "focused": 0.42,
+      "neutral": 0.28
+    }
+  },
+  "sexual desire": {
+    "meaning": "erotic attraction or wanting",
+    "focus": "physical and intimate attraction",
+    "tone_tendency": "charged, intimate, focused",
+    "valence": "mixed",
+    "energy": "high",
+    "direction": "toward_people",
+    "style_contributions": {
+      "focused": 0.1
+    }
+  },
+  "sympathy": {
+    "meaning": "care and concern for another person's feelings",
+    "focus": "support, comfort, kindness",
+    "tone_tendency": "kind, attentive, supportive",
+    "valence": "positive",
+    "energy": "medium",
+    "direction": "toward_people",
+    "style_contributions": {
+      "caring": 0.74,
+      "reflective": 0.06
+    }
+  },
+  "triumph": {
+    "meaning": "uplift from success, victory, or breakthrough",
+    "focus": "achievement, momentum, confidence",
+    "tone_tendency": "confident, energized, proud",
+    "valence": "positive",
+    "energy": "high",
+    "direction": "outward",
+    "style_contributions": {
+      "playful": 0.18,
+      "focused": 0.42
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "_doc": "Tunables for brain/face_tracking.py + brain/person_onboarding.py extensions. See docs/AVA_FEATURE_ADDITIONS_2026-05.md §4.",
+
+  "temporal_filter": {
+    "_doc": "Filter recognition jitter — only flag 'new person' after sustained unknown face.",
+    "unknown_persistence_seconds": 12.0,
+    "_persistence_doc": "How long an unknown face must be continuously visible before promoting to 'new person detected'. 10-15s is the spec; 12s middle.",
+    "promotion_cooldown_seconds": 300.0,
+    "_cooldown_doc": "After promoting one new person, suppress further promotions for this many seconds. Avoids noise if Zeke isn't around to onboard."
+  },
+
+  "onboarding": {
+    "_doc": "Tunables for the onboarding flow itself.",
+    "frames_per_pose": 7,
+    "_frames_per_pose_doc": "5–10 photos per pose; 7 is the middle of the spec.",
+    "verification_similarity_threshold": 0.65,
+    "_verification_doc": "After all 5 poses captured, verify with a final frame. If similarity to reference embeddings < this, retry once; if still failing, complete onboarding with face_recognition_quality='low' and flag for Zeke review.",
+    "verification_max_retries": 2,
+    "trust_level_to_score": {
+      "1": 0.20,
+      "2": 0.40,
+      "3": 0.50,
+      "4": 0.65,
+      "5": 0.80
+    },
+    "_trust_doc": "Maps the user's spoken 'trust 3' to trust_system score 0.50 (the 'known' band lower edge)."
+  }
+}

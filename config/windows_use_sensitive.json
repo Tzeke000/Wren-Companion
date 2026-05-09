@@ -1,0 +1,4 @@
+{
+  "_comment": "Additional sensitive-prefix paths for the windows_use Tier 1 navigation guard. The project root (D:\\AvaAgentv2) is always implicitly sensitive — list other paths here that should trigger a confirmation prompt before File Explorer navigation. Paths are normalized at runtime; absolute paths preferred.",
+  "prefixes": []
+}

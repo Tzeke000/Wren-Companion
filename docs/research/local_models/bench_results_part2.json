@@ -1,0 +1,26 @@
+[
+  {
+    "model": "deepseek-r1:8b",
+    "category": "reasoning",
+    "prompt_id": "logic_implication",
+    "prompt": "If all bloops are razzles and all razzles are lazzles, are all bloops definitely lazzles? Answer briefly with the reasoning.",
+    "reply": "Yes, all bloops are definitely lazzles. If all bloops are razzles, and all razzles are lazzles, then by the transitive property of subset relations, all bloops must be lazzles. This is a valid logical deduction.",
+    "elapsed_ms": 155317,
+    "eval_count": 853,
+    "eval_duration_ns": 16343794300,
+    "load_duration_ns": 138231919300,
+    "error": null
+  },
+  {
+    "model": "deepseek-r1:8b",
+    "category": "reasoning",
+    "prompt_id": "math_word_problem",
+    "prompt": "A train leaves Boston at 9 AM going 60 mph east. A second train leaves New York at 10 AM going 80 mph west. Boston and New York are 200 miles apart. At what time do they meet? Show your work.",
+    "reply": "The trains meet at 11 AM.\n\n**Work shown:**\n\n- The first train leaves Boston at 9 AM at 60 mph east.\n- By 10 AM, the first train has traveled 60 miles east, so it is 60 miles from Boston.\n- The distance between the trains at 10 AM is 200 miles - 60 miles = 140 miles.\n- Both trains are moving towards each other, so their relative speed is 60 mph + 80 mph = 140 mph.\n- Time to meet after 10 AM is 140 miles / 140 mph = 1 hour.\n- Therefore, they meet at 10 AM + 1 hour = 11 AM.\n\nAlternatively, using time from 9 AM:\n\n- Let t be time in hours after 9 AM.\n- Position of first train: 60t miles from Boston.\n- Position of second train: 200 - 80(t - 1) miles from Boston (for t ≥ 1).\n- Set positions equal: 60t = 200 - 80(t - 1).\n- Solve: 60t = 200 - 80t + 80, 60t = 280 - 80t, 140t = 280, t = 2 hours.\n- 2 hours after 9 AM is 11 AM.\n\nBoth methods confirm the meeting time is 11 AM.",
+    "elapsed_ms": 139192,
+    "eval_count": 2314,
+    "eval_duration_ns": 46396955600,
+    "load_duration_ns": 91180403400,
+    "error": null
+  }
+]

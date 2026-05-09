@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "host": "127.0.0.1",
+  "port": 5877,
+  "timeout_seconds": 3.0,
+  "auto_ping_interval_seconds": 60.0
+}

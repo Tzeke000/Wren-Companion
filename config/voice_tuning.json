@@ -1,0 +1,13 @@
+{
+  "_comment": "Tunables for brain/voice_loop.py. Reload requires Ava restart.",
+  "_attentive_base_doc": "Grace-period after Ava speaks during which follow-up commands don't need a wake-word. Mirrors Claude mobile / ChatGPT voice mode. Per 2026-05 work order: 60s.",
+  "attentive_base_seconds": 60,
+  "attentive_silence_exit_seconds": 20,
+  "attentive_require_gaze_to_stay": true,
+  "attentive_min_speech_seconds": 1.0,
+  "default_silence_seconds": 2.5,
+  "continue_silence_seconds": 4.0,
+  "long_silence_seconds": 1.5,
+  "short_words": 3,
+  "long_words": 10
+}

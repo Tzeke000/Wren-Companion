@@ -1,0 +1,57 @@
+{
+  "_doc": "Tunable parameters for brain/sleep_mode.py. See docs/AVA_FEATURE_ADDITIONS_2026-05.md §1.",
+
+  "default_duration_seconds": 21600,
+  "_default_duration_doc": "6 hours, used when sleep is requested without an explicit duration.",
+
+  "session_fullness_duration_seconds": 1800,
+  "_session_fullness_duration_doc": "30 minutes, used when session-fullness trigger fires (this is a memory-compile sleep, not full overnight).",
+
+  "fullness_thresholds": {
+    "_doc": "Composite fullness scoring + when to fire the autonomous sleep trigger.",
+    "trigger": 0.70,
+    "suppress_seconds": 60.0,
+    "_suppress_doc": "After firing, suppress retriggering for this many seconds (avoid trigger-flap if sleep entry doesn't drop the score immediately).",
+    "turn_count_cap": 200,
+    "_turn_cap_doc": "Number of conversation turns since last sleep that maps to score=1.0.",
+    "concept_graph_cap": 2000,
+    "mem0_cap": 5000
+  },
+
+  "fullness_weights": {
+    "_doc": "Weights summing to 1.0. Re-tune as wiring matures (Ollama context fill currently a placeholder).",
+    "ollama_context": 0.6,
+    "turn_count": 0.2,
+    "memory": 0.2
+  },
+
+  "schedule": {
+    "_doc": "Default sleep window. Wraps midnight when start>end. Defers on active conversation.",
+    "enabled": true,
+    "start_hour": 23,
+    "end_hour": 5,
+    "min_uptime_seconds": 600,
+    "_min_uptime_doc": "Don't fire schedule trigger within N seconds of process start (avoids sleep-on-boot if user starts late at night)."
+  },
+
+  "decay": {
+    "_doc": "Emotion decay multipliers per state. Applied on top of temporal_sense.passive_decay_per_second.",
+    "sleeping_multiplier": 5.0,
+    "entering_multiplier": 2.5,
+    "waking_multiplier": 2.0
+  },
+
+  "phase2": {
+    "_doc": "Learning-processing phase pacing.",
+    "tick_budget_seconds": 30.0,
+    "_tick_budget_doc": "How long one Phase-2 pass runs before yielding back to the tick loop. Lets the heartbeat check wake target / decay frequently."
+  },
+
+  "wake": {
+    "_doc": "Wake-transition tunables.",
+    "default_estimate_seconds": 5.0,
+    "_default_estimate_doc": "Initial wake-time estimate; tightens as Phase 3 history accumulates via temporal_sense.calibrate_from_history(kind='sleep_phase3').",
+    "wind_down_seconds_default": 300.0,
+    "_wind_down_doc": "Reserve this much before wake_target for Phase 3 + wake transition. Replaced by historical median once 3+ samples exist."
+  }
+}

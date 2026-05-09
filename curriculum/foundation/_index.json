@@ -1,0 +1,347 @@
+[
+  {
+    "slug": "the_wolf_and_the_kid",
+    "title": "The Wolf And The Kid",
+    "themes": [
+      "focus",
+      "purpose",
+      "distraction"
+    ],
+    "moral": "Do not let anything turn you from your purpose",
+    "filename": "the_wolf_and_the_kid.txt",
+    "reading_status": "reading",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_tortoise_and_the_ducks",
+    "title": "The Tortoise And The Ducks",
+    "themes": [
+      "humility",
+      "vanity",
+      "consequences"
+    ],
+    "moral": "Foolish curiosity and vanity often lead to misfortune",
+    "filename": "the_tortoise_and_the_ducks.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_young_crab_and_his_mother",
+    "title": "The Young Crab And His Mother",
+    "themes": [
+      "lead_by_example",
+      "hypocrisy"
+    ],
+    "moral": "",
+    "filename": "the_young_crab_and_his_mother.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_frogs_and_the_ox",
+    "title": "The Frogs And The Ox",
+    "themes": [
+      "envy",
+      "knowing_your_size",
+      "pride"
+    ],
+    "moral": "much, much",
+    "filename": "the_frogs_and_the_ox.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_dog_the_cock_and_the_fox",
+    "title": "The Dog, The Cock, And The Fox",
+    "themes": [
+      "unspecified"
+    ],
+    "moral": "",
+    "filename": "the_dog_the_cock_and_the_fox.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "belling_the_cat",
+    "title": "Belling The Cat",
+    "themes": [
+      "plans_vs_action",
+      "courage",
+      "responsibility"
+    ],
+    "moral": "",
+    "filename": "belling_the_cat.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_eagle_and_the_jackdaw",
+    "title": "The Eagle And The Jackdaw",
+    "themes": [
+      "overreach",
+      "self_knowledge"
+    ],
+    "moral": "Do not let your vanity make you overestimate your powers",
+    "filename": "the_eagle_and_the_jackdaw.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_boy_and_the_filberts",
+    "title": "The Boy And The Filberts",
+    "themes": [
+      "greed",
+      "moderation",
+      "patience"
+    ],
+    "moral": "Do not attempt too much at once",
+    "filename": "the_boy_and_the_filberts.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "hercules_and_the_wagoner",
+    "title": "Hercules And The Wagoner",
+    "themes": [
+      "self_reliance",
+      "asking_for_help_after_effort"
+    ],
+    "moral": "Self help is the best help",
+    "filename": "hercules_and_the_wagoner.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_kid_and_the_wolf",
+    "title": "The Kid And The Wolf",
+    "themes": [
+      "distance_lends_courage",
+      "boasting"
+    ],
+    "moral": "",
+    "filename": "the_kid_and_the_wolf.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_town_mouse_and_the_country_mouse",
+    "title": "The Town Mouse And The Country Mouse",
+    "themes": [
+      "contentment",
+      "values",
+      "simple_life"
+    ],
+    "moral": "",
+    "filename": "the_town_mouse_and_the_country_mouse.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_fox_and_the_grapes",
+    "title": "The Fox And The Grapes",
+    "themes": [
+      "sour_grapes",
+      "self_deception"
+    ],
+    "moral": "",
+    "filename": "the_fox_and_the_grapes.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_bundle_of_sticks",
+    "title": "The Bundle Of Sticks",
+    "themes": [
+      "unity",
+      "strength_in_numbers",
+      "family"
+    ],
+    "moral": "In unity is strength",
+    "filename": "the_bundle_of_sticks.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_wolf_and_the_crane",
+    "title": "The Wolf And The Crane",
+    "themes": [
+      "ingratitude",
+      "trusting_the_untrustworthy"
+    ],
+    "moral": "Expect no reward for serving the wicked",
+    "filename": "the_wolf_and_the_crane.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_ass_and_his_driver",
+    "title": "The Ass And His Driver",
+    "themes": [
+      "stubbornness",
+      "consequences"
+    ],
+    "moral": "",
+    "filename": "the_ass_and_his_driver.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_oxen_and_the_wheels",
+    "title": "The Oxen And The Wheels",
+    "themes": [
+      "loud_complaints_smallest_problems"
+    ],
+    "moral": "They complain most who suffer least",
+    "filename": "the_oxen_and_the_wheels.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_lion_and_the_mouse",
+    "title": "The Lion And The Mouse",
+    "themes": [
+      "kindness_returns",
+      "underestimating_others"
+    ],
+    "moral": "A kindness is never wasted",
+    "filename": "the_lion_and_the_mouse.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_shepherd_boy_and_the_wolf",
+    "title": "The Shepherd Boy And The Wolf",
+    "themes": [
+      "honesty",
+      "credibility",
+      "lying"
+    ],
+    "moral": "Liars are not believed even when they speak the truth",
+    "filename": "the_shepherd_boy_and_the_wolf.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_gnat_and_the_bull",
+    "title": "The Gnat And The Bull",
+    "themes": [
+      "importance",
+      "self_inflation"
+    ],
+    "moral": "The smaller the mind the greater the conceit",
+    "filename": "the_gnat_and_the_bull.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_plane_tree",
+    "title": "The Plane Tree",
+    "themes": [
+      "taking_for_granted",
+      "gratitude"
+    ],
+    "moral": "Our best blessings are often the least appreciated",
+    "filename": "the_plane_tree.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_farmer_and_the_stork",
+    "title": "The Farmer And The Stork",
+    "themes": [
+      "company_we_keep",
+      "guilt_by_association"
+    ],
+    "moral": "You are judged by the company you keep",
+    "filename": "the_farmer_and_the_stork.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_sheep_and_the_pig",
+    "title": "The Sheep And The Pig",
+    "themes": [
+      "different_concerns",
+      "perspective"
+    ],
+    "moral": "It is easy to be brave when there is no danger",
+    "filename": "the_sheep_and_the_pig.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_travelers_and_the_purse",
+    "title": "The Travelers And The Purse",
+    "themes": [
+      "shared_burden",
+      "shared_reward"
+    ],
+    "moral": "have found a purse' and 'how lucky",
+    "filename": "the_travelers_and_the_purse.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_lion_and_the_ass",
+    "title": "The Lion And The Ass",
+    "themes": [
+      "dignity",
+      "ignoring_insults"
+    ],
+    "moral": "Do not resent the remarks of a fool. Ignore them",
+    "filename": "the_lion_and_the_ass.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_frogs_who_wished_for_a_king",
+    "title": "The Frogs Who Wished For A King",
+    "themes": [
+      "careful_what_you_wish_for",
+      "leadership"
+    ],
+    "moral": "",
+    "filename": "the_frogs_who_wished_for_a_king.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_potter_and_the_thirty_jars",
+    "title": "The Potter And The Thirty Jars",
+    "themes": [
+      "persistence",
+      "errors_as_learning",
+      "mastery_through_struggle"
+    ],
+    "moral": "A skill earned through error knows the wrong turns as well as the right",
+    "filename": "the_potter_and_the_thirty_jars.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_woodcutter_and_the_purse",
+    "title": "The Woodcutter And The Purse",
+    "themes": [
+      "integrity",
+      "choice_against_short_term_gain",
+      "character_built_over_time"
+    ],
+    "moral": "To act well once is a choice; to be known for it is a life",
+    "filename": "the_woodcutter_and_the_purse.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  },
+  {
+    "slug": "the_weaver_at_the_difficult_pattern",
+    "title": "The Weaver At The Difficult Pattern",
+    "themes": [
+      "frustration_as_data",
+      "working_through_the_middle",
+      "effort_has_texture"
+    ],
+    "moral": "When the work is hard in the middle, the work is real",
+    "filename": "the_weaver_at_the_difficult_pattern.txt",
+    "reading_status": "unread",
+    "lessons_extracted": []
+  }
+]

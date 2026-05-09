@@ -1,0 +1,15 @@
+{
+  "_doc": "Tunable parameters for brain/curriculum.py. See docs/AVA_FEATURE_ADDITIONS_2026-05.md §3.",
+  "consolidation": {
+    "_doc": "Pacing for consolidation_hook (sleep-mode Phase 2 entry).",
+    "paragraph_seconds": 10.0,
+    "_paragraph_seconds_doc": "Approximate time-per-paragraph budget. Slower = more thorough lesson extraction; faster = more entries per sleep cycle.",
+    "min_lesson_chars": 20,
+    "max_lessons_per_entry": 5
+  },
+  "selection": {
+    "_doc": "How consolidation_hook picks the next entry.",
+    "prefer_in_flight": true,
+    "_prefer_in_flight_doc": "If an entry is mid-read (status=reading), resume it before picking a new one."
+  }
+}

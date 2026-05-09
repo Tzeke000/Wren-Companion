@@ -1,0 +1,71 @@
+{
+  "_doc": "Tunable parameters for brain/temporal_sense.py and brain/temporal_metabolism.py. See docs/TEMPORAL_SENSE.md for the framework. Defaults chosen for verification-friendliness; tune after live observation.",
+
+  "fast_check": {
+    "_doc": "Fast-check ticks ride the existing heartbeat cadence (7-280s mode-dependent in brain/heartbeat.py). No separate timer.",
+    "max_tick_budget_ms": 50,
+    "_max_tick_budget_doc": "Hard performance budget for the fast-check section. If profiling shows we exceed, defer pieces to slow-cycle."
+  },
+
+  "slow_cycle": {
+    "_doc": "Slow-cycle metabolism cadence. Runs the full TRIAGE/CONTEXTUALIZE/DECAY/CONSOLIDATE/AUDIT pass. Yields to the voice loop on _conversation_active OR _turn_in_progress.",
+    "interval_seconds": 600,
+    "_interval_doc": "10 minutes default. Tunable 5-15 min per the design. Hour-or-faster cadence is the metabolism-vs-weekly distinction.",
+    "micro_consolidation_queue_threshold": 20,
+    "_micro_consolidation_queue_doc": "If triage queue at slow-cycle tick has >= this many items, trigger micro-consolidation (subset of weekly consolidation).",
+    "micro_consolidation_min_hours_since_full": 6,
+    "_micro_consolidation_hours_doc": "OR if it's been at least N hours since the last full weekly consolidation."
+  },
+
+  "frustration": {
+    "_doc": "Frustration decay rules. Two modes: passive (idle, linear-ish) and active (calming activity, exponential).",
+    "passive_decay_per_second": 0.0004,
+    "_passive_decay_doc": "Continuous decay of frustration weight per second when state==idle. 0.0004/s = 12% loss per 5 min from a baseline of 0.20 (0.20 * (1 - 0.0004*300) = 0.176). Tune up if frustration accumulates and never resolves; tune down if it always reads near zero.",
+    "active_tau_seconds": 120.0,
+    "_active_tau_doc": "Exponential half-life parameter for calming-activity decay. tau=120 -> half-life ~83s -> 0.20 falls below 0.05 in ~6 min."
+  },
+
+  "boredom": {
+    "_doc": "Boredom growth rules. Active only when is_idle() AND processing_active==False.",
+    "growth_per_second": 0.0001,
+    "_growth_doc": "0.0001/s = +0.18 over 30 min from 0.",
+    "cap": 1.0,
+    "reengage_decay_factor": 0.5,
+    "_reengage_doc": "On first user interaction after a long idle, boredom *= this factor (one-shot)."
+  },
+
+  "idle_detection": {
+    "_doc": "State-aware idle detection. is_idle() requires processing_active==False AND elapsed > threshold AND voice loop in passive/attentive.",
+    "idle_threshold_seconds": 1800,
+    "_idle_threshold_doc": "30 minutes per CONTINUOUS_INTERIORITY.md §2."
+  },
+
+  "estimate_tracking": {
+    "_doc": "Active estimate tracking + self-interrupt rules.",
+    "overrun_pct": 0.25,
+    "_overrun_pct_doc": "Fire interrupt when elapsed > (1 + this) * original_estimate. 0.25 = 25% over.",
+    "overrun_min_seconds": 8.0,
+    "_overrun_min_doc": "AND elapsed - original_estimate must exceed this in absolute seconds. Filters out small-task noise (10s task at 12.5s shouldn't interrupt).",
+    "history_lookup_window": 20,
+    "_history_lookup_doc": "Number of recent rows in task_history_log.jsonl to consider when calibrating a new estimate of the same kind.",
+    "active_estimates_path": "state/active_estimates.json",
+    "task_history_log_path": "state/task_history_log.jsonl"
+  },
+
+  "uncertainty_hook": {
+    "_doc": "Confidence-based interrupt hook. STRUCTURE shipped in B3 but DISABLED by default — see TEMPORAL_SENSE.md §6 'Open question for ROADMAP item 9'. Don't enable until the confidence-source question is answered.",
+    "enabled": false,
+    "low_confidence_threshold": 0.4,
+    "elapsed_fraction_required": 0.5,
+    "_low_conf_doc": "If enabled and a task's confidence drops below threshold AND elapsed > fraction*original_estimate, fire the uncertainty interrupt."
+  },
+
+  "metabolism": {
+    "_doc": "Memory-as-Metabolism slow-cycle pass parameters.",
+    "log_path": "state/metabolism_log.jsonl",
+    "triage_level_drop_threshold": 1,
+    "_triage_level_drop_doc": "Concept graph nodes whose level dropped by >= this since last cycle get triaged.",
+    "triage_recent_activation_seconds": 3600,
+    "_triage_recent_doc": "Nodes activated in the last N seconds also get triaged for contextualization."
+  }
+}
