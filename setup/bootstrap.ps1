@@ -151,6 +151,37 @@ try {
     exit 1
 }
 
+# ----- Step 1.5: Create venv on D: drive so all packages install there -----
+# Without this, pip installs to C:\Users\...\Python311\site-packages by
+# default, which fills C: drive (cu128 torch alone is ~5GB extracted).
+# Per Zeke 2026-05-09: 'can we have everything downloaded in D drive and
+# used there?' Yes - via venv on D:.
+Write-Host "`n[1.5/8] Setting up venv on D: (so packages don't fill C:)..."
+$VenvDir = "$RepoRoot\.venv"
+$VenvPython = "$VenvDir\Scripts\python.exe"
+if (-not (Test-Path $VenvPython)) {
+    Write-Host "  creating venv at $VenvDir..."
+    & py -3.11 -m venv $VenvDir
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $VenvPython)) {
+        Write-Host "  ERROR: venv creation failed."
+        exit 1
+    }
+}
+Write-Host "  OK: venv ready ($VenvPython)"
+
+# Relocate pip cache + temp dir to D: so even download staging stays
+# off C:. Without this, pip downloads 2.7GB cu128 wheel through %TEMP%
+# which is on C: and fills it.
+$PipCacheDir = "$RepoRoot\.pip-cache"
+$TempDir = "$RepoRoot\.tmp"
+New-Item -ItemType Directory -Force -Path $PipCacheDir | Out-Null
+New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+$env:TMP = $TempDir
+$env:TEMP = $TempDir
+$env:PIP_CACHE_DIR = $PipCacheDir
+Write-Host "  pip cache: $PipCacheDir"
+Write-Host "  temp dir:  $TempDir"
+
 # ----- Step 2: Verify NVIDIA driver -----
 Write-Host "`n[2/8] Verifying NVIDIA driver..."
 try {
@@ -165,34 +196,34 @@ try {
     Write-Host "  WARN: nvidia-smi not found. Wren will still run, but Kokoro CUDA will fall back to Piper."
 }
 
-# ----- Step 3: Install pip deps -----
-Write-Host "`n[3/8] Installing pip dependencies (this takes a few minutes)..."
-& py -3.11 -m pip install --upgrade pip 2>&1 | Out-Null
-& py -3.11 -m pip install -r "$RepoRoot\requirements.txt" 2>&1 | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_pip.log"
+# ----- Step 3: Install pip deps INTO VENV (on D:) -----
+Write-Host "`n[3/8] Installing pip dependencies into venv on D: (this takes a few minutes)..."
+& $VenvPython -m pip install --upgrade pip 2>&1 | Out-Null
+& $VenvPython -m pip install -r "$RepoRoot\requirements.txt" 2>&1 | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_pip.log"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  ERROR: pip install failed. See setup\bootstrap_pip.log."
     exit 1
 }
-Write-Host "  OK: requirements.txt installed."
+Write-Host "  OK: requirements.txt installed into venv."
 
-# ----- Step 4: Install CUDA-enabled torch (cu128 for Blackwell) -----
-Write-Host "`n[4/8] Installing PyTorch with CUDA 12.8 (cu128 wheel - required for RTX 50-series sm_120)..."
-& py -3.11 -m pip install --index-url https://download.pytorch.org/whl/cu128 --force-reinstall torch torchaudio 2>&1 | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_torch.log"
+# ----- Step 4: Install CUDA-enabled torch INTO VENV (cu128 for Blackwell) -----
+Write-Host "`n[4/8] Installing PyTorch with CUDA 12.8 into venv (cu128 - works for Ampere/Ada/Blackwell)..."
+& $VenvPython -m pip install --index-url https://download.pytorch.org/whl/cu128 --force-reinstall torch torchaudio 2>&1 | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_torch.log"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  ERROR: torch CUDA install failed. See setup\bootstrap_torch.log."
     Write-Host "  If you don't have a Blackwell GPU, try cu126 or cpu instead."
     exit 1
 }
-& py -3.11 -c "import torch; assert torch.cuda.is_available(); print('torch=' + torch.__version__ + ' cuda_built=' + str(torch.version.cuda) + ' cuda_avail=' + str(torch.cuda.is_available()))"
+& $VenvPython -c "import torch; assert torch.cuda.is_available(); print('torch=' + torch.__version__ + ' cuda_built=' + str(torch.version.cuda) + ' cuda_avail=' + str(torch.cuda.is_available()))"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  ERROR: torch CUDA verification failed."
     exit 1
 }
-Write-Host "  OK: torch CUDA verified."
+Write-Host "  OK: torch CUDA verified in venv."
 
 # ----- Step 5: Verify InsightFace + Kokoro + Piper imports -----
-Write-Host "`n[5/8] Verifying core imports..."
-& py -3.11 -c @'
+Write-Host "`n[5/8] Verifying core imports in venv..."
+& $VenvPython -c @'
 import insightface
 import faster_whisper
 import sounddevice
