@@ -13,7 +13,13 @@
 #
 # Idempotent - safe to re-run if a step fails.
 
-$ErrorActionPreference = "Stop"
+# Continue on stderr writes from native commands. PowerShell 5.1 with
+# ErrorActionPreference=Stop treats *anything* a native command writes
+# to stderr (including pip's PATH WARNING and npm's "npm notice" lines)
+# as a fatal NativeCommandError. Both pip and npm legitimately use stderr
+# for non-fatal info. We check $LASTEXITCODE manually after each native
+# call to detect real failures.
+$ErrorActionPreference = "Continue"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 Write-Host "==================================================="
@@ -24,6 +30,17 @@ Write-Host "==================================================="
 # ----- Helper: refresh PATH after winget installs -----
 function Refresh-Path {
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+}
+
+# ----- Helper: run a native command and check exit code -----
+# Catches stderr noise without killing the script.
+function Invoke-Native {
+    param([string]$Description, [scriptblock]$Block)
+    & $Block
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  ERROR: $Description failed (exit code $LASTEXITCODE)"
+        exit 1
+    }
 }
 
 # ----- Step 0: Auto-install pre-reqs via winget -----
