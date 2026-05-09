@@ -137,6 +137,54 @@ if (-not $claudeAlreadyInstalled) {
 
 Write-Host "  OK: pre-reqs installed."
 
+# ----- Step 0.5: Install MSVC Build Tools to D: (for C++ extensions like insightface) -----
+# Several Python packages have native C++ extensions that need to be
+# compiled at install time (insightface has mesh_core_cython, others may
+# too). Without MSVC compiler installed, pip falls back to source build
+# which fails with "Microsoft Visual C++ 14.0 or greater is required".
+# We install Visual Studio 2022 Build Tools with the C++ workload.
+# --installPath D:\BuildTools redirects the ~3-5 GB install off C:.
+Write-Host "`n[0.5/8] Verifying MSVC Build Tools (for compiling C++ Python extensions)..."
+$vsBuildToolsPath = "D:\BuildTools"
+$clExe = "$vsBuildToolsPath\VC\Tools\MSVC"
+$alreadyHaveBuildTools = $false
+
+# Check 1: did we install to D:\BuildTools previously?
+if (Test-Path $clExe) {
+    $alreadyHaveBuildTools = $true
+    Write-Host "  MSVC Build Tools already installed at $vsBuildToolsPath"
+}
+
+# Check 2: does any VS install exist that setuptools can find?
+if (-not $alreadyHaveBuildTools) {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $vsInstance = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format value -property installationPath 2>&1
+        if ($vsInstance -and (Test-Path $vsInstance)) {
+            $alreadyHaveBuildTools = $true
+            Write-Host "  MSVC Build Tools already installed at $vsInstance"
+        }
+    }
+}
+
+if (-not $alreadyHaveBuildTools) {
+    Write-Host "  Installing MSVC Build Tools to D: (3-5 GB download, takes 5-15 min)..."
+    Write-Host "  Target: $vsBuildToolsPath"
+    # winget --override passes flags directly to the VS installer.
+    # --installPath redirects off C: drive.
+    # --add Microsoft.VisualStudio.Workload.VCTools = C++ build tools workload.
+    # --includeRecommended pulls in MSVC compiler + Windows SDK.
+    & winget install --id Microsoft.VisualStudio.2022.BuildTools --silent --accept-source-agreements --accept-package-agreements --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --installPath $vsBuildToolsPath" 2>&1 | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_msvc.log"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  ERROR: MSVC Build Tools install failed. See setup\bootstrap_msvc.log"
+        Write-Host "         Manual fallback: download vs_BuildTools.exe from"
+        Write-Host "         https://visualstudio.microsoft.com/visual-cpp-build-tools/"
+        Write-Host "         and install with C++ workload + custom path D:\BuildTools"
+        exit 1
+    }
+    Write-Host "  OK: MSVC Build Tools installed."
+}
+
 # ----- Step 1: Verify Python 3.11 (re-check after auto-install) -----
 Write-Host "`n[1/8] Verifying Python 3.11..."
 try {
