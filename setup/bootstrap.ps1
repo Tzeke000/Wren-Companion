@@ -206,6 +206,20 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "  OK: requirements.txt installed into venv."
 
+# ----- Step 3.5: Force-reinstall protobuf 3.20.x (MediaPipe compat) -----
+# Other packages (chromadb, opentelemetry, google-api-core if pulled
+# transitively) want protobuf >=4. MediaPipe requires <4. The dep resolver
+# can't satisfy both, so we install everything else with the resolver's
+# choice, then forcibly override protobuf to 3.20.3 which is what
+# MediaPipe needs at runtime.
+Write-Host "`n[3.5/8] Force-reinstalling protobuf==3.20.3 for MediaPipe compat..."
+& $VenvPython -m pip install --force-reinstall "protobuf>=3.20,<4" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  ERROR: protobuf reinstall failed."
+    exit 1
+}
+Write-Host "  OK: protobuf pinned."
+
 # ----- Step 4: Install CUDA-enabled torch INTO VENV (cu128 for Blackwell) -----
 Write-Host "`n[4/8] Installing PyTorch with CUDA 12.8 into venv (cu128 - works for Ampere/Ada/Blackwell)..."
 & $VenvPython -m pip install --index-url https://download.pytorch.org/whl/cu128 --force-reinstall torch torchaudio 2>&1 | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_torch.log"
