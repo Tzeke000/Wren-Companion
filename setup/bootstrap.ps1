@@ -82,20 +82,39 @@ try {
 }
 
 # Claude Code (the brain)
+# Wrap npm calls in cmd /c so PowerShell 5.1 doesn't treat npm's stderr
+# notices as NativeCommandError. npm legitimately writes "npm notice" lines
+# to stderr that aren't errors, but $ErrorActionPreference="Stop" trips on
+# them. cmd /c isolates the call so PowerShell only sees the exit code.
+$claudeAlreadyInstalled = $false
 try {
-    $claudeVer = & claude --version 2>&1
-    Write-Host "  Claude Code already installed: $claudeVer"
+    $claudeVer = & cmd /c "claude --version 2>&1"
+    if ($LASTEXITCODE -eq 0 -and $claudeVer) {
+        $claudeAlreadyInstalled = $true
+        Write-Host "  Claude Code already installed: $claudeVer"
+    }
 } catch {
-    Write-Host "  Installing Claude Code via npm..."
-    & npm install -g "@anthropic-ai/claude-code" 2>&1 | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_claude.log" | Out-Null
+    # fall through to install
+}
+if (-not $claudeAlreadyInstalled) {
+    Write-Host "  Installing Claude Code via npm (this takes a minute)..."
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & cmd /c "npm install -g @anthropic-ai/claude-code 2>&1" | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_claude.log" | Out-Null
+    $npmExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
     Refresh-Path
     Start-Sleep -Seconds 2
     try {
-        $claudeVer = & claude --version 2>&1
-        Write-Host "  OK: $claudeVer"
+        $claudeVer = & cmd /c "claude --version 2>&1"
+        if ($LASTEXITCODE -eq 0 -and $claudeVer) {
+            Write-Host "  OK: $claudeVer"
+        } else {
+            Write-Host "  WARN: Claude Code install may have failed (npm exit=$npmExit). Check $RepoRoot\setup\bootstrap_claude.log"
+            Write-Host "         Manual fallback: npm install -g @anthropic-ai/claude-code"
+        }
     } catch {
-        Write-Host "  WARN: Claude Code install may have failed. Check $RepoRoot\setup\bootstrap_claude.log"
-        Write-Host "         You can also install manually: npm install -g @anthropic-ai/claude-code"
+        Write-Host "  WARN: claude --version not found. Open a new PowerShell window and try again."
     }
 }
 
