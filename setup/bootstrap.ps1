@@ -1,7 +1,11 @@
 # Wren-Companion bootstrap for a fresh Windows machine.
 #
-# Run from the repo root after manual prereqs are installed
-# (Python 3.11, Git, NVIDIA driver, Claude Code).
+# Auto-installs (via winget): Python 3.11, Git, Node.js, Claude Code.
+# Auto-installs (via pip): all Python deps, CUDA torch (cu128 for Blackwell).
+# Auto-downloads: Piper voice models, Kokoro 82M.
+# Manual still required: NVIDIA driver (already installed if GPU works),
+#                       VB-CABLE (optional, for voice loopback testing),
+#                       Voicemeeter (optional, advanced audio routing).
 #
 # Usage:
 #   cd D:\Wren-Companion
@@ -17,18 +21,97 @@ Write-Host "Wren-Companion bootstrap"
 Write-Host "Repo:   $RepoRoot"
 Write-Host "==================================================="
 
-# ----- Step 1: Verify Python 3.11 -----
+# ----- Helper: refresh PATH after winget installs -----
+function Refresh-Path {
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+}
+
+# ----- Step 0: Auto-install pre-reqs via winget -----
+Write-Host "`n[0/8] Auto-installing prerequisites via winget..."
+try {
+    & winget --version 2>&1 | Out-Null
+} catch {
+    Write-Host "  ERROR: winget not found. Update Windows or install App Installer from Microsoft Store."
+    Write-Host "         Then manually install Python 3.11, Git, Node.js, Claude Code and re-run this script."
+    exit 1
+}
+
+# Python 3.11
+try {
+    $pyVer = & py -3.11 --version 2>&1
+    if ($pyVer -match "Python 3\.11\.") {
+        Write-Host "  Python 3.11 already installed: $pyVer"
+    } else {
+        throw "not 3.11"
+    }
+} catch {
+    Write-Host "  Installing Python 3.11 via winget..."
+    & winget install --id Python.Python.3.11 --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+    Refresh-Path
+    Start-Sleep -Seconds 2
+    try {
+        $pyVer = & py -3.11 --version 2>&1
+        Write-Host "  OK: $pyVer"
+    } catch {
+        Write-Host "  ERROR: Python 3.11 install via winget failed. Install manually:"
+        Write-Host "         https://www.python.org/downloads/release/python-3119/"
+        exit 1
+    }
+}
+
+# Git
+try {
+    $gitVer = & git --version 2>&1
+    Write-Host "  Git already installed: $gitVer"
+} catch {
+    Write-Host "  Installing Git via winget..."
+    & winget install --id Git.Git --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+    Refresh-Path
+    Start-Sleep -Seconds 2
+}
+
+# Node.js (needed for Claude Code install via npm)
+try {
+    $nodeVer = & node --version 2>&1
+    Write-Host "  Node.js already installed: $nodeVer"
+} catch {
+    Write-Host "  Installing Node.js LTS via winget..."
+    & winget install --id OpenJS.NodeJS.LTS --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+    Refresh-Path
+    Start-Sleep -Seconds 2
+}
+
+# Claude Code (the brain)
+try {
+    $claudeVer = & claude --version 2>&1
+    Write-Host "  Claude Code already installed: $claudeVer"
+} catch {
+    Write-Host "  Installing Claude Code via npm..."
+    & npm install -g "@anthropic-ai/claude-code" 2>&1 | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_claude.log" | Out-Null
+    Refresh-Path
+    Start-Sleep -Seconds 2
+    try {
+        $claudeVer = & claude --version 2>&1
+        Write-Host "  OK: $claudeVer"
+    } catch {
+        Write-Host "  WARN: Claude Code install may have failed. Check $RepoRoot\setup\bootstrap_claude.log"
+        Write-Host "         You can also install manually: npm install -g @anthropic-ai/claude-code"
+    }
+}
+
+Write-Host "  OK: pre-reqs installed."
+
+# ----- Step 1: Verify Python 3.11 (re-check after auto-install) -----
 Write-Host "`n[1/8] Verifying Python 3.11..."
 try {
     $pyVer = & py -3.11 --version 2>&1
     if ($pyVer -notmatch "Python 3\.11\.") {
         Write-Host "  ERROR: py -3.11 returned: $pyVer"
-        Write-Host "  Install Python 3.11 from https://www.python.org/downloads/release/python-3110/"
         exit 1
     }
     Write-Host "  OK: $pyVer"
 } catch {
-    Write-Host "  ERROR: py launcher not found. Install Python 3.11 (with py launcher)."
+    Write-Host "  ERROR: py launcher not found despite winget install. Open a new PowerShell window and re-run."
     exit 1
 }
 
