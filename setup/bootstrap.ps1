@@ -171,25 +171,17 @@ if (-not $alreadyHaveBuildTools) {
     Write-Host "  Installing MSVC Build Tools to D: (3-5 GB download, takes 5-15 min)..."
     Write-Host "  Target: $vsBuildToolsPath"
 
-    # First attempt failed with ERROR_DISK_FULL because installPath alone
-    # only redirects the IDE/tools install. The VS Installer ALSO uses C: for:
-    # - Cache (installation files): default %ProgramData%\Microsoft\VisualStudio\Packages
-    # - Shared components: default C:\Program Files (x86)\Microsoft Visual Studio\Shared
-    # - Temp staging: default %TEMP% which is on C: even with our $env:TEMP override
-    #   (the VS Installer is a separate process and resets TEMP)
-    # Redirect ALL three to D: so install fits even when C: is tight.
-    $vsCacheDir = "D:\BuildTools-Cache"
-    $vsSharedDir = "D:\BuildTools-Shared"
-    New-Item -ItemType Directory -Force -Path $vsCacheDir | Out-Null
-    New-Item -ItemType Directory -Force -Path $vsSharedDir | Out-Null
-
+    # Previous attempt with --cache + --shared returned exit 87
+    # (ERROR_INVALID_PARAMETER). --shared is set once per machine (first VS
+    # install on the system); can't be changed after that. --cache may also
+    # conflict with prior VS Installer state. Just use --installPath and
+    # rely on C: having enough headroom for the unredirected pieces (~5 GB
+    # of cache + shared if no prior VS install).
     # winget --override passes flags directly to the VS installer.
-    # --installPath: where MSVC + Build Tools land
-    # --cache: where the installer downloads .vsix package files
-    # --shared: shared components (some packages are shared across VS installs)
+    # --installPath: where MSVC + Build Tools land (saves ~3-4 GB on D:)
     # --add Microsoft.VisualStudio.Workload.VCTools = C++ build tools workload
     # --includeRecommended pulls in MSVC compiler + Windows SDK
-    $vsArgs = "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --installPath $vsBuildToolsPath --cache $vsCacheDir --shared $vsSharedDir"
+    $vsArgs = "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --installPath $vsBuildToolsPath"
     & winget install --id Microsoft.VisualStudio.2022.BuildTools --silent --accept-source-agreements --accept-package-agreements --override $vsArgs 2>&1 | Tee-Object -FilePath "$RepoRoot\setup\bootstrap_msvc.log"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  ERROR: MSVC Build Tools install failed. See setup\bootstrap_msvc.log"
