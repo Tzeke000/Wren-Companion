@@ -342,6 +342,16 @@ def tick_once(g: dict[str, Any], force: bool = False) -> Optional[str]:
     g["_inner_thought"] = thought
     g["_inner_thought_ts"] = time.time()
     g["_inner_thought_trigger"] = trigger
+    # Phase 26: signal-bus event so subscribers (future memory consolidation,
+    # mood-shift detection, etc.) see the thought.
+    try:
+        bus = g.get("_signal_bus")
+        if bus is not None:
+            bus.fire("inner_thought",
+                     data={"trigger": trigger, "thought": thought[:200], "mood": mood_label},
+                     priority="low")
+    except Exception:
+        pass
     print(f"[inner_monologue] tick: trigger={trigger} thought={thought[:80]!r}")
     return thought
 

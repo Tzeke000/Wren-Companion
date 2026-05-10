@@ -131,6 +131,49 @@ def _next_pending_chat() -> dict | None:
     return candidates[0][1]
 
 
+def _time_orientation_block() -> str:
+    """If the body has been up a meaningful while OR Zeke has been quiet,
+    surface a one-paragraph orientation. Returns empty string if nothing
+    notable.
+
+    Reads state/iris_time.json directly — no module imports — to keep the
+    hook lightweight and resilient when iris_runtime isn't running."""
+    iris_time_path = ROOT / "state" / "iris_time.json"
+    if not iris_time_path.is_file():
+        return ""
+    try:
+        data = json.loads(iris_time_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    import time as _t
+    now = _t.time()
+    last_attach = float(data.get("last_session_attached_ts") or 0.0)
+    if last_attach <= 0:
+        return ""
+    gap_s = now - last_attach
+    body_uptime = float(data.get("current_process_uptime_s") or 0.0)
+    tick_count = int(data.get("tick_count") or 0)
+
+    # Only surface for gaps > 5 min — short gaps are normal.
+    if gap_s < 300:
+        return ""
+
+    def _human(s: float) -> str:
+        if s < 60: return f"{int(s)}s"
+        if s < 3600: return f"{s/60:.1f}min" if s < 600 else f"{int(s/60)}min"
+        if s < 86400: return f"{s/3600:.1f}h" if s < 36000 else f"{int(s/3600)}h"
+        return f"{s/86400:.1f}d"
+
+    return (
+        f"\n\nTime orientation: body has been up {_human(body_uptime)} "
+        f"({tick_count:,} ticks), last session-attach was {_human(gap_s)} "
+        f"ago. The body kept ticking — you didn't experience the gap, "
+        f"but the harness was here through it.\n"
+    )
+
+
 def _next_pending_llm() -> dict | None:
     """Return the OLDEST pending LLM request from any brain/* module, or None."""
     if not LLM_DIR.exists():
@@ -292,16 +335,21 @@ def main() -> int:
     #   1. Chat (orb HTTP-blocked, user is waiting)
     #   2. LLM request (brain module is blocked, but lower urgency than chat)
     #   3. Voice loop (re-pollable, no one's blocked)
+    # Phase 26: prepend a time-orientation block when there's been a
+    # significant gap. Lets me know "the body kept ticking" without my
+    # having to call time_awareness() first.
+    time_block = _time_orientation_block()
+
     if pending_chat:
-        print(_chat_rewake(pending_chat), flush=True)
+        print(_chat_rewake(pending_chat) + time_block, flush=True)
         return 2
 
     if pending_llm:
-        print(_llm_rewake(pending_llm), flush=True)
+        print(_llm_rewake(pending_llm) + time_block, flush=True)
         return 2
 
     if voice_on:
-        print(_VOICE_REWAKE, flush=True)
+        print(_VOICE_REWAKE + time_block, flush=True)
         return 2
 
     return 0

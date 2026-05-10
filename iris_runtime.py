@@ -451,6 +451,27 @@ def voice_say_chunk(text: str, emotion: str = "neutral", intensity: float = 0.5)
         theory_of_mind.post_turn_record("zeke", text)
     except Exception:
         pass
+    # Phase 26: real interaction nudges mood toward engagement. Tiny bump
+    # per chunk so multi-sentence replies don't compound. Also fires a
+    # signal-bus event so heartbeat / consolidation see real activity.
+    try:
+        from brain import mood_core
+        m = mood_core.load_mood_raw()
+        weights = dict(m.get("emotion_weights") or mood_core.DEFAULT_EMOTIONS)
+        weights["interest"] = min(1.0, weights.get("interest", 0.13) + 0.005)
+        weights["calmness"] = max(0.0, weights.get("calmness", 0.24) - 0.002)
+        m["emotion_weights"] = mood_core.normalize_emotions(weights)
+        mood_core.save_mood_raw(m)
+    except Exception:
+        pass
+    try:
+        bus = _g.get("_signal_bus")
+        if bus is not None:
+            bus.fire("voice_chunk_spoken",
+                     data={"chars": len(text), "queue_depth": depth_before},
+                     priority="low")
+    except Exception:
+        pass
     return {"ok": True, "queue_depth": depth_before}
 
 
@@ -569,6 +590,25 @@ def chat_reply(request_id: str, text: str) -> dict:
                     print(f"[post_turn] detected {len(signals)} preference signal(s)", file=sys.stderr, flush=True)
         except Exception:
             pass
+        # Phase 26: chat reply nudges mood toward engagement + fires signal.
+        try:
+            from brain import mood_core
+            m = mood_core.load_mood_raw()
+            weights = dict(m.get("emotion_weights") or mood_core.DEFAULT_EMOTIONS)
+            weights["interest"] = min(1.0, weights.get("interest", 0.13) + 0.01)
+            weights["calmness"] = max(0.0, weights.get("calmness", 0.24) - 0.003)
+            m["emotion_weights"] = mood_core.normalize_emotions(weights)
+            mood_core.save_mood_raw(m)
+        except Exception:
+            pass
+        try:
+            bus = _g.get("_signal_bus")
+            if bus is not None:
+                bus.fire("chat_reply_sent",
+                         data={"chars": len(text)},
+                         priority="medium")
+        except Exception:
+            pass
 
         return {"ok": True, "request_id": str(request_id)}
     except Exception as e:
@@ -649,6 +689,32 @@ def enroll_face(
 # Wraps brain/windows_use/primitives, brain/health, brain/journal, brain/
 # anchor_moments, brain/iris_memory. All input-control tools log via
 # brain/skill_sandbox audit trail when configured.
+
+@mcp.tool()
+def signals_recent(signal_type: str = "", since_seconds: float = 60.0) -> dict:
+    """Read recent signal-bus events. Useful for: "did anything happen
+    while I was thinking?" or "has Zeke's expression shifted lately?"
+
+    Args:
+        signal_type: filter to one type (e.g. "face_appeared",
+            "expression_changed", "attention_changed"). Empty = all.
+        since_seconds: how far back to look (default 60s).
+
+    Returns: list of {type, ts, data, priority} signals."""
+    try:
+        bus = _g.get("_signal_bus")
+        if bus is None:
+            return {"ok": False, "error": "signal_bus not running"}
+        cutoff = time.time() - max(1.0, since_seconds)
+        if signal_type:
+            sigs = bus.peek(signal_type=signal_type, since=cutoff)
+        else:
+            all_sigs = bus.peek()
+            sigs = [s for s in all_sigs if float(s.get("ts") or 0) >= cutoff]
+        return {"ok": True, "count": len(sigs), "signals": sigs}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 
 @mcp.tool()
 def time_awareness() -> dict:
@@ -1474,6 +1540,8 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                 if frame_idx % insight_every_n == 0:
                     try:
                         results = insight.analyze_frame(frame)
+                        prev_pid = g.get("_recognized_person_id") or "unknown"
+                        prev_face_count = len(g.get("_face_results") or [])
                         g["_face_results"] = results
                         if results:
                             best = max(results, key=lambda r: float(r.get("confidence") or 0.0))
@@ -1486,6 +1554,30 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                         else:
                             g["_recognized_person_id"] = "unknown"
                             g["_recognized_confidence"] = 0.0
+                        # Phase 26: fire signal-bus events on transitions so
+                        # downstream subscribers (heartbeat, mood, journal hooks)
+                        # see them. Only fire on TRANSITION, not every tick.
+                        try:
+                            bus = g.get("_signal_bus")
+                            if bus is not None:
+                                cur_pid = g.get("_recognized_person_id") or "unknown"
+                                cur_face_count = len(results or [])
+                                if cur_face_count > 0 and prev_face_count == 0:
+                                    bus.fire("face_appeared",
+                                             data={"person_id": cur_pid,
+                                                   "confidence": g.get("_recognized_confidence")},
+                                             priority="medium")
+                                elif cur_face_count == 0 and prev_face_count > 0:
+                                    bus.fire("face_lost",
+                                             data={"prior_person_id": prev_pid},
+                                             priority="medium")
+                                elif cur_pid != prev_pid and cur_pid != "unknown":
+                                    bus.fire("face_changed",
+                                             data={"from": prev_pid, "to": cur_pid,
+                                                   "confidence": g.get("_recognized_confidence")},
+                                             priority="medium")
+                        except Exception:
+                            pass
                     except Exception as _ie:
                         print(f"[iris_video] insight analyze error: {_ie!r}", file=sys.stderr, flush=True)
 
@@ -1548,7 +1640,19 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                     try:
                         expr = et.detect_expression(frame)
                         if expr:
-                            g["_current_expression"] = str(expr.get("dominant", "") or "")
+                            new_expr = str(expr.get("dominant", "") or "")
+                            prev_expr = str(g.get("_current_expression") or "")
+                            g["_current_expression"] = new_expr
+                            # Fire on transition only.
+                            if new_expr and new_expr != prev_expr:
+                                try:
+                                    bus = g.get("_signal_bus")
+                                    if bus is not None:
+                                        bus.fire("expression_changed",
+                                                 data={"from": prev_expr, "to": new_expr},
+                                                 priority="low")
+                                except Exception:
+                                    pass
                     except Exception as _ee:
                         pass
 
@@ -1560,10 +1664,22 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
             if ez is not None and getattr(ez, "available", False):
                 if frame_idx % attn_every_n == 0:
                     try:
-                        g["_attention_state"] = ez.get_attention_state(frame)
+                        prev_attn = str(g.get("_attention_state") or "")
+                        new_attn = ez.get_attention_state(frame)
+                        g["_attention_state"] = new_attn
                         g["_looking_at_screen"] = bool(ez.is_looking_at_screen(frame))
                         if getattr(ez, "calibrated", False):
                             g["_gaze_region"] = ez.get_gaze_region(frame) or ""
+                        # Fire on transition only.
+                        if new_attn and new_attn != prev_attn:
+                            try:
+                                bus = g.get("_signal_bus")
+                                if bus is not None:
+                                    bus.fire("attention_changed",
+                                             data={"from": prev_attn, "to": new_attn},
+                                             priority="low")
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
