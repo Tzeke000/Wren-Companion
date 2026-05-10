@@ -50,6 +50,10 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
 
     # ── L1: pure file-backed singletons ──────────────────────────────────────
+    # Time substrate — 1Hz heartbeat thread that keeps state/iris_time.json
+    # alive. Lets Iris read time-passed honestly when a session resumes.
+    _try("iris_time", lambda: _bootstrap_iris_time(g))
+
     # Mood — provides g["save_mood"], g["load_mood"], etc. that the rest of
     # brain/* expects. Must run BEFORE anything that calls them.
     _try("mood_core", lambda: _bootstrap_mood(g))
@@ -104,6 +108,11 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
 
 
 # ── L1 helpers ──────────────────────────────────────────────────────────────
+
+def _bootstrap_iris_time(g: dict[str, Any]) -> None:
+    from brain.iris_time import bootstrap_iris_time
+    bootstrap_iris_time(g)
+
 
 def _bootstrap_mood(g: dict[str, Any]) -> None:
     from brain.mood_core import bootstrap_mood

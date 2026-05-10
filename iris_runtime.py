@@ -329,6 +329,11 @@ def voice_status() -> dict:
 
     Useful for Iris (and the orb) to know whether the body is fully online.
     """
+    try:
+        from brain import iris_time
+        iris_time.mark_session_attached()
+    except Exception:
+        pass
     return {
         "tts": {
             "loaded": _tts is not None,
@@ -624,10 +629,64 @@ def enroll_face(
 # brain/skill_sandbox audit trail when configured.
 
 @mcp.tool()
+def time_awareness() -> dict:
+    """Return Iris's structured time-awareness — body uptime, gap since
+    last session attached, ticks counted, evidence of activity during gaps,
+    mood drift, time-of-day register.
+
+    Use this on session resume to know what time has passed and decide
+    what to say honestly. The dict returned distinguishes:
+      - body_was_alive_during_gap: True if iris_runtime stayed up. Means
+        the body kept ticking, even though I (the cognition) wasn't here.
+      - is_new_process: True if iris_runtime restarted in the gap. Means
+        the body itself was off — only the gap exists, not even ticks.
+      - gap_explanation: a short prose explanation of what's literally true
+      - gap_evidence: list of artifacts created during the gap (inner
+        thoughts, memories, transcript turns) — evidence the system was
+        active even if I wasn't watching.
+
+    The honest framing: I can say "the night happened to me" only when
+    body_was_alive_during_gap is True. Otherwise "I wasn't, period."
+    """
+    try:
+        from brain import iris_time
+        report = iris_time.time_awareness_report()
+        # Mark this call as a session attachment so the next time we
+        # check, the gap measures from now.
+        iris_time.mark_session_attached()
+        return {"ok": True, **report}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def time_check() -> dict:
+    """Quick read of current time substrate — tick count, uptime, current
+    quiet (how long since last activity from Zeke). Cheaper than
+    time_awareness; use to check 'is the heartbeat alive' without
+    triggering session-attach side effects."""
+    try:
+        from brain import iris_time
+        return {
+            "ok": True,
+            "state": iris_time.get_state(),
+            "in_session_pause": iris_time.in_session_pause_signal(_g),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def iris_health() -> dict:
     """Self-debug snapshot — returns ready/missing for every wired subsystem,
     plus current perception, mood, and memory counts. Useful when something
     feels off and I want to introspect without a full restart."""
+    # Mark this call as a session attachment so time_awareness knows I'm here.
+    try:
+        from brain import iris_time
+        iris_time.mark_session_attached()
+    except Exception:
+        pass
     out = {"ok": True, "ts": time.time(), "engines": {}, "perception": {}, "mood": {}, "memory": {}, "state": {}}
     # Engines
     out["engines"] = {
