@@ -146,7 +146,7 @@ function createGlowTex(color: string): THREE.Texture {
 }
 
 // State-overlay colors. We blend the emotion color toward these by an
-// override-strength factor so the orb still reads as "Ava in mood X" but
+// override-strength factor so the orb still reads as "Iris in mood X" but
 // also clearly signals what she's doing right now.
 const STATE_TINT = {
   thinking: new THREE.Color("#7a5dfc"),  // electric blue/purple
@@ -156,7 +156,7 @@ const STATE_TINT = {
   offline: new THREE.Color("#404858"),
   sleeping: new THREE.Color("#0a1530"),  // deep midnight blue — emotion-agnostic during sleep
   waking: new THREE.Color("#5a7ad0"),    // dawn blue — brightening pulse during wake transition
-  pointing: new THREE.Color("#ffeb3b"),  // bright yellow — Ava is targeting a desktop element (cu_click preview)
+  pointing: new THREE.Color("#ffeb3b"),  // bright yellow — Iris is targeting a desktop element (cu_click preview)
 };
 
 function OrbCanvasInner({ emotion, state, size = 320, shapeOverride, amplitude = 0, energy = 0.5, recenterTrigger, cubeMorphEnabled = true, sleepProgress = 0, sleepRemainingSeconds = 0, wakeProgress = 0 }: OrbProps) {
@@ -633,7 +633,7 @@ function OrbCanvasInner({ emotion, state, size = 320, shapeOverride, amplitude =
         _glowScratch.lerp(STATE_TINT.waking, 0.4 + wp * 0.3);
         _lightScratch.lerp(STATE_TINT.waking, 0.4 + wp * 0.3);
       } else if (liveState === "pointing") {
-        // Pointing: bright yellow tint — Ava is targeting a specific desktop
+        // Pointing: bright yellow tint — Iris is targeting a specific desktop
         // element (cu_click target preview). Strong, unmissable. Full Arrow
         // shape geometry deferred to future visual polish; tint signals the
         // state for now. See vault: designs/orb-state-shapes.md.

@@ -58,3 +58,14 @@ logs/
 # into D:\ClaudeCodeMemory\graphify\ava-agent-v2\ for Claude Code's query path.
 # Cache subdir is reused for incremental updates — keep local, don't commit.
 graphify-out/
+
+# Virtualenv + pip caches (per-machine; bootstrap.ps1 recreates them)
+.venv/
+.pip-cache/
+.cache/
+
+# Bootstrap install logs
+setup/bootstrap_*.log
+
+# Scratch / one-off scripts
+.tmp/

@@ -47,12 +47,24 @@ class STTEngine:
 
         # Model fallback chain: prefer fastest+most-accurate that fits.
         # turbo is 4-decoder-layer surgery on large-v3 — keeps quality, big speedup.
-        model_chain = [
+        # AVA_STT_MODEL env var lets a runtime (e.g. iris_runtime.py) pin a
+        # specific model first while keeping the fallback chain intact.
+        # distil-large-v3 is ~6× faster than large-v3-turbo at ~1% WER cost —
+        # the right pick when first-word latency matters more than tail accuracy.
+        import os as _os
+        _full_chain = [
             ("large-v3-turbo", "Whisper Large-v3 Turbo"),
             ("distil-large-v3", "Distil-Whisper Large-v3"),
             ("medium", "Whisper Medium"),
             ("base", "Whisper Base (fallback)"),
         ]
+        _pin = (_os.environ.get("AVA_STT_MODEL") or "").strip()
+        if _pin:
+            pinned = [t for t in _full_chain if t[0] == _pin]
+            rest = [t for t in _full_chain if t[0] != _pin]
+            model_chain = pinned + rest
+        else:
+            model_chain = _full_chain
         device_chain = [("cuda", "float16"), ("cpu", "int8")]
 
         for model_id, model_label in model_chain:

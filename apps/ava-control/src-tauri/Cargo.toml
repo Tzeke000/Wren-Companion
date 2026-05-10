@@ -1,7 +1,7 @@
 [package]
-name = "ava-control"
+name = "iris-control"
 version = "0.1.0"
-description = "Ava operator console"
+description = "Iris operator console"
 edition = "2021"
 
 [build-dependencies]

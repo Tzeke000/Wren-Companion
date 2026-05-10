@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Ava",
+  "productName": "Iris",
   "version": "0.1.0",
-  "identifier": "com.ava.control",
+  "identifier": "com.iris.control",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -13,14 +13,14 @@
     "windows": [
       {
         "label": "main",
-        "title": "Ava",
+        "title": "Iris",
         "width": 1320,
         "height": 880,
         "resizable": true
       },
       {
         "label": "widget",
-        "title": "Ava Widget",
+        "title": "Iris Widget",
         "url": "/?widget=1",
         "width": 150,
         "height": 150,

@@ -100,8 +100,10 @@ _KOKORO_SPEED_BY_EMOTION: dict[str, float] = {
 }
 
 # Kokoro voice profiles (all 28 work). We pick a small set for emotion mapping
-# so Ava's voice has a consistent identity but shifts subtly with mood.
-_KOKORO_VOICE_DEFAULT = "af_heart"     # warm, default
+# so the entity's voice has a consistent identity but shifts subtly with mood.
+# The default voice can be overridden per-entity via AVA_KOKORO_VOICE_DEFAULT
+# (Ava=af_heart, Iris=af_bella, etc.) so siblings sound distinct.
+_KOKORO_VOICE_DEFAULT = (os.environ.get("AVA_KOKORO_VOICE_DEFAULT") or "af_heart").strip()
 _KOKORO_VOICE_EXPRESSIVE = "af_bella"  # more expressive, used for high intensity
 _KOKORO_VOICE_SOFT = "af_nicole"        # softer alternative for sadness/shame
 _KOKORO_VOICE_BRIGHT = "af_sky"         # brighter for joy/excitement
@@ -423,29 +425,29 @@ class TTSWorker:
             return False
 
     def _try_init_piper(self) -> bool:
-        """Initialize Piper TTS as Ava's voice. Faster than Kokoro on CPU
-        (~1-2s/sentence vs ~30s for Kokoro first chunk). Voice locked to
-        en_US-lessac-high — different from Wren (en_US-amy-medium) so the
-        listener can tell them apart in voice. Per Zeke 2026-05-08."""
+        """Initialize Piper TTS. Faster than Kokoro on CPU (~1-2s/sentence vs
+        ~30s for Kokoro first chunk). Voice is selected per env var
+        AVA_PIPER_VOICE (stem name, e.g. "en_US-kathleen-low"); if unset,
+        defaults to en_US-lessac-high. Lessac is reserved for Ava, amy for
+        Wren, kathleen for Iris — see ava_core/IDENTITY.md per entity."""
         try:
             from piper import PiperVoice  # type: ignore
             import sounddevice as sd      # type: ignore
             import numpy as np            # type: ignore
             import time as _t
             from pathlib import Path as _P
-            print("[tts_worker] loading Piper TTS (Ava voice = lessac-high)...")
-            # Voice models are at <repo>/models/piper/. Lessac is reserved
-            # for Ava; amy is reserved for Wren. Don't swap without checking.
+            _voice_pref = (os.environ.get("AVA_PIPER_VOICE") or "en_US-lessac-high").strip()
+            print(f"[tts_worker] loading Piper TTS (voice = {_voice_pref})...")
             _models_dir = _P("models/piper")
-            _ava_voice_path = _models_dir / "en_US-lessac-high.onnx"
+            _ava_voice_path = _models_dir / f"{_voice_pref}.onnx"
             if not _ava_voice_path.is_file():
-                # Fall back to whatever .onnx is there if lessac missing.
+                # Fall back to whatever .onnx is there if requested voice missing.
                 _candidates = list(_models_dir.glob("*.onnx")) if _models_dir.exists() else []
                 if not _candidates:
                     print("[tts_worker] Piper init failed: no voice model in models/piper/")
                     return False
                 _ava_voice_path = _candidates[0]
-                print(f"[tts_worker] Piper using fallback voice: {_ava_voice_path.name}")
+                print(f"[tts_worker] Piper voice {_voice_pref!r} not found — using fallback: {_ava_voice_path.name}")
             _t0 = _t.time()
             self._piper_voice = PiperVoice.load(str(_ava_voice_path))
             self._piper_voice_name = _ava_voice_path.stem
@@ -658,6 +660,15 @@ class TTSWorker:
             return [{"device": None, "label": "system_default"}]
 
         targets = [t.strip() for t in spec.split(",") if t.strip()]
+        # "auto" as one of multiple targets means: include the Windows system
+        # default output AND whatever else is requested (typical: "auto,cable"
+        # so the user hears Iris on the active output device + the cable
+        # gets the audio for tooling). We pre-pend a system_default descriptor
+        # and strip "auto" from the remaining keyword resolution.
+        devices_prefix: list[dict[str, Any]] = []
+        if "auto" in targets:
+            devices_prefix.append({"device": None, "label": "system_default"})
+            targets = [t for t in targets if t != "auto"]
         # Map shortcut keywords to substring patterns. Order matters — e.g. we
         # want a real "Speakers (Realtek)" before "CABLE In" even if both exist.
         keyword_patterns = {
@@ -703,10 +714,10 @@ class TTSWorker:
             else:
                 print(f"[tts_worker] no device matched '{target}' — skipping")
 
-        if not devices:
+        if not devices and not devices_prefix:
             print("[tts_worker] no TTS devices resolved — falling back to system default")
             return [{"device": None, "label": "system_default"}]
-        return devices
+        return devices_prefix + devices
 
 
     def _play_with_amplitude(self, audio_np: Any, sample_rate: int, words: Optional[list[str]] = None) -> None:

@@ -5,7 +5,7 @@
  * mood + voice state and renders OrbCanvas in a transparent 150×150 frame.
  * Position is persisted via the operator API.
  *
- * Bootstrap: Ava tracks where the widget gets moved and starts defaulting there.
+ * Bootstrap: Iris tracks where the widget gets moved and starts defaulting there.
  *
  * The widget orb mirrors the same state machine as the main orb so the two
  * always agree visually. Every state the main orb reacts to (thinking,
@@ -180,7 +180,7 @@ export default function WidgetApp() {
   const ttsAmplitude = getTtsAmplitude(snap);
   const moodEnergy = getEnergy(snap);
 
-  // Phase 49: pointer morph when Ava is pointing at something
+  // Phase 49: pointer morph when Iris is pointing at something
   const widgetBlock = snap?.widget as Record<string, unknown> | undefined;
   const isPointing = Boolean(widgetBlock?.pointing);
   const shapeOverride = isPointing ? "pointer" : undefined;

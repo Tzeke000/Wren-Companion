@@ -26,8 +26,8 @@ const BRAIN_GRAPH_MAX_NODES = 200;
 const BRAIN_GRAPH_MAX_EDGES = 500;
 
 
-// ── Ava-centric brain layout ────────────────────────────────────────────
-// Per docs/BRAIN_ARCHITECTURE.md: Ava's identity sits at (0,0,0) as the
+// ── Iris-centric brain layout ────────────────────────────────────────────
+// Per docs/BRAIN_ARCHITECTURE.md: Iris's identity sits at (0,0,0) as the
 // gravitational center. Concentric rings around it carry identity anchors
 // closest, then people by trust score, then active concerns, then
 // memories by recency, with regional clusters at the outer edge.
@@ -196,13 +196,13 @@ type BrainGraphRender = {
 };
 
 const BRAIN_NODE_TYPES: Array<{ type: string; color: string; description: string }> = [
-  { type: "person", color: "#ed64a6", description: "People Ava knows" },
+  { type: "person", color: "#ed64a6", description: "People Iris knows" },
   { type: "topic", color: "#4299e1", description: "Subjects and concepts" },
   { type: "emotion", color: "#f5c518", description: "Emotional states" },
   { type: "memory", color: "#9f7aea", description: "Stored memories" },
-  { type: "opinion", color: "#ecc94b", description: "Ava's formed opinions" },
-  { type: "curiosity", color: "#00d4d4", description: "Things Ava wonders about" },
-  { type: "self", color: "#68d391", description: "Ava's self-concept" },
+  { type: "opinion", color: "#ecc94b", description: "Iris's formed opinions" },
+  { type: "curiosity", color: "#00d4d4", description: "Things Iris wonders about" },
+  { type: "self", color: "#68d391", description: "Iris's self-concept" },
   { type: "event", color: "#ff6b00", description: "Events that happened" },
 ];
 
@@ -1406,7 +1406,7 @@ export default function App() {
 
       if (!recovered) {
         const errMsg =
-          "No reply from Ava: the \"reply\" field was empty and chat history did not show an assistant message after your text.";
+          "No reply from Iris: the \"reply\" field was empty and chat history did not show an assistant message after your text.";
         setLastChatErr(errMsg);
         setChatHist((prev) => [
           ...prev,
@@ -1555,7 +1555,7 @@ export default function App() {
   // Backend run_ava thinking flag — overrides everything except offline
   const avaThinking = Boolean((snap as Record<string, unknown> | null)?.thinking);
   // Component 10 of conversational naturalness: thinking_tier from snapshot
-  // drives a stronger thinking-state signal when Ava's coordinator decides
+  // drives a stronger thinking-state signal when Iris's coordinator decides
   // the turn is taking long enough to need a metacognitive cue (Tier 3+).
   // See brain/thinking_tier.py and docs/CONVERSATIONAL_DESIGN.md.
   const thinkingTier = Number((snap as Record<string, unknown> | null)?.thinking_tier ?? 0);
@@ -1581,7 +1581,7 @@ export default function App() {
     : backendShutdownDetected || !online
     ? "offline"
     : avaThinking
-      ? "thinking"  // Ava is processing a chat turn — fast blue pulse
+      ? "thinking"  // Iris is processing a chat turn — fast blue pulse
     : tierForcesThinking
       ? "thinking"  // Tier 3+ from the metacognitive coordinator — sustained thinking visual
     : voiceLoopActive && voiceLoopState === "speaking"
@@ -1606,7 +1606,7 @@ export default function App() {
   // Live speech text (above the orb) and inner-state line (below the orb).
   // Speech text streams word-by-word from /api/v1/snapshot speech.* fields
   // when Kokoro is playing; falls back to the last assistant message if TTS
-  // is disabled/muted but Ava has produced a reply.
+  // is disabled/muted but Iris has produced a reply.
   const speechBlock = (snap as Record<string, unknown> | null)?.speech as
     Record<string, unknown> | undefined;
   const speechSpeaking = Boolean(speechBlock?.speaking);
@@ -1614,7 +1614,7 @@ export default function App() {
   const speechFullReply = String(speechBlock?.full_reply ?? "");
   const ttsEnabled = Boolean(tts?.enabled);
   const speakingTextForUI = backendShutdownDetected
-    ? "Ava has shut down."
+    ? "Iris has shut down."
     : speechSpeaking
       ? speechSpokenSoFar
       : speechFullReply
@@ -1636,7 +1636,7 @@ export default function App() {
   // (the shared state set by the single 5fps poll at line 885+). This
   // matches the orb pattern: one source, mirrored to all tabs. Multiple
   // <img src={frameUrl}> references fire independent HTTP fetches per tab
-  // even though Ava only captures the camera once on the backend — wasteful
+  // even though Iris only captures the camera once on the backend — wasteful
   // bandwidth + browser load. Vault: see 2026-05 work order Phase A2.
   const frameUrl = `${API_BASE}/api/v1/vision/latest_frame?t=${cameraTick}`;
   // Prefer shared state for camera display. Falls back to frameUrl only when
@@ -1725,12 +1725,12 @@ export default function App() {
           const t = String(node.type || "node");
           const lbl = String(node.label || node.id || "");
           const w = Number(node.weight || 0).toFixed(2);
-          if (node._tier === 0) return `Ava — center of mind`;
+          if (node._tier === 0) return `Iris — center of mind`;
           if (node._tier === 1) return `Identity anchor: ${lbl}`;
           return `${t}: ${lbl} (w=${w})`;
         })
         .nodeColor((node: any) => {
-          // Ava-centric color scheme — see AVA_BRAIN_TIER_COLORS.
+          // Iris-centric color scheme — see AVA_BRAIN_TIER_COLORS.
           const tier = classifyAvaBrainTier(node);
           if (tier === 0) return AVA_BRAIN_TIER_COLORS[0];   // ava self — violet
           if (tier === 1) return AVA_BRAIN_TIER_COLORS[1];   // anchors — gold
@@ -1764,7 +1764,7 @@ export default function App() {
           setSelectedBrainNode(node as BrainNode);
         });
       brainGraph3DInstanceRef.current = fg;
-      // Apply Ava-centric radial force layout. 3d-force-graph exposes a
+      // Apply Iris-centric radial force layout. 3d-force-graph exposes a
       // d3Force(name, force) hook; we add a custom radial pull that
       // targets each node's tier-specific ring radius. Strength scales
       // with how well-classified the node is — anchors (tier 1) get a
@@ -2101,7 +2101,7 @@ export default function App() {
     >
       <header className="op-header">
         <div className="op-brand">
-          <span className="op-title">Ava</span>
+          <span className="op-title">Iris</span>
           <span className={`op-status-dot ${online ? "on" : "off"}`} aria-hidden="true" />
           <span className="op-status-text">{online ? "Live" : "Offline"}</span>
         </div>
@@ -2134,9 +2134,9 @@ export default function App() {
       {!online && (
         <div className="op-banner">
           {connecting ? (
-            "Connecting to Ava..."
+            "Connecting to Iris..."
           ) : backendShutdownDetected ? (
-            "Ava has shut down."
+            "Iris has shut down."
           ) : (
             <>
               Backend not responding on :5876. Start <code>avaagent.py</code> (operator HTTP must be enabled).{" "}
@@ -2166,7 +2166,7 @@ export default function App() {
             border: "2px dashed #00d4d4", display: "flex", alignItems: "center",
             justifyContent: "center", pointerEvents: "none", borderRadius: "8px",
           }}>
-            <span style={{ color: "#00d4d4", fontSize: "1.2rem", fontWeight: 600 }}>Drop file for Ava</span>
+            <span style={{ color: "#00d4d4", fontSize: "1.2rem", fontWeight: 600 }}>Drop file for Iris</span>
           </div>
         )}
         {dropProcessing && (
@@ -2190,7 +2190,7 @@ export default function App() {
             flexShrink: 0,
           }} />
           <span style={{ color: !online ? "#6b7280" : connOnline ? "#4ade80" : "#f59e0b", fontFamily: "monospace" }}>
-            {!online ? "AVA OFFLINE" : connOnline ? (connCloudAvailable ? "Cloud active" : "Local only") : "Local only"}
+            {!online ? "IRIS OFFLINE" : connOnline ? (connCloudAvailable ? "Cloud active" : "Local only") : "Local only"}
           </span>
           {connOnline && connQuality === "online_fast" && (
             <span style={{ color: "#4a5568", marginLeft: 4 }}>fast</span>
@@ -2264,7 +2264,7 @@ export default function App() {
             fontSize: "0.95rem", letterSpacing: "0.06em", marginTop: "0.4rem",
             animation: "pulse 1.2s ease-in-out infinite",
           }}>
-            Ava is thinking…
+            Iris is thinking…
           </div>
         )}
         {PRESENCE_V2_ENABLED && (
@@ -2273,7 +2273,7 @@ export default function App() {
             {innerStateLine}
           </div>
         )}
-        {/* Inner monologue — Ava's current thought, rendered under the orb.
+        {/* Inner monologue — Iris's current thought, rendered under the orb.
             Distinct from the spoken reply: this is what she's thinking
             *about*, not what she's saying. Pulled from
             snapshot.inner_life.current_thought (refreshed each tick). */}
@@ -2304,7 +2304,7 @@ export default function App() {
           title={inputMuted ? "Input muted" : "Input on"}
         >
           <span className="mute-input-icon" aria-hidden="true">{inputMuted ? "🎙️✕" : "🎙️"}</span>
-          <span className="mute-input-label">{inputMuted ? "Input muted — Ava can't hear you" : "Input on"}</span>
+          <span className="mute-input-label">{inputMuted ? "Input muted — Iris can't hear you" : "Input on"}</span>
         </button>
         <button className="presence-gear" type="button" onClick={() => setOperatorOpen(true)} aria-label="Open operator panel">
           ⚙
@@ -2474,7 +2474,7 @@ export default function App() {
                     <img
                       className="camera-frame"
                       src={sharedCameraSrc}
-                      alt="Ava camera feed"
+                      alt="Iris camera feed"
                       onLoad={() => setCameraFrameOk(true)}
                       onError={() => setCameraFrameOk(false)}
                       style={{ display: cameraFrameOk ? "block" : "none" }}
@@ -2582,7 +2582,7 @@ export default function App() {
                         <span className="typing-dot" />
                         <span className="typing-dot" />
                         <span className="typing-dot" />
-                        <span className="typing-text">Ava is thinking...</span>
+                        <span className="typing-text">Iris is thinking...</span>
                       </div>
                     )}
                     {/* Inner thought — fades in, holds 8s, fades out. */}
@@ -2609,7 +2609,7 @@ export default function App() {
                       rows={3}
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
-                      placeholder={inputMuted ? "Your input is muted" : "Message Ava…"}
+                      placeholder={inputMuted ? "Your input is muted" : "Message Iris…"}
                       disabled={chatBusy || inputMuted}
                       onKeyDown={(e) => {
                         if (inputMuted) return;
@@ -2813,7 +2813,7 @@ export default function App() {
                   </Section>
                   <Section title="Onboarding">
                     <p className="op-muted" style={{ marginBottom: "0.75rem" }}>
-                      Start a new person onboarding flow. Ava will greet them, take photos, and build a profile.
+                      Start a new person onboarding flow. Iris will greet them, take photos, and build a profile.
                     </p>
                     <button
                       type="button"
@@ -2871,7 +2871,7 @@ export default function App() {
                     )}
                   </Section>
 
-                  <Section title={`Mem0 — what Ava knows about you (${mem0Entries.length})`}>
+                  <Section title={`Mem0 — what Iris knows about you (${mem0Entries.length})`}>
                     <p className="op-muted" style={{ marginTop: 0 }}>
                       Long-term semantic memory. Entries are extracted from conversations by{" "}
                       <code>ava-gemma4</code>. Backed by ChromaDB at <code>memory/mem0_chroma/</code>.
@@ -2902,7 +2902,7 @@ export default function App() {
                       )}
                     </div>
                     {mem0Entries.length === 0 && mem0SearchResults === null ? (
-                      <p className="op-muted">No memories yet — Ava hasn't been told (or learned) anything to remember.</p>
+                      <p className="op-muted">No memories yet — Iris hasn't been told (or learned) anything to remember.</p>
                     ) : (
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                         {(mem0SearchResults ?? mem0Entries).map((entry, i) => {
@@ -2975,9 +2975,9 @@ export default function App() {
                   wakeProgress={wakeProgress}
                 />
               </div>
-              <Section title="What Ava sees">
+              <Section title="What Iris sees">
                 <div className="camera-frame-shell">
-                  <img className="camera-frame" src={sharedCameraSrc} alt="Ava camera feed voice tab" />
+                  <img className="camera-frame" src={sharedCameraSrc} alt="Iris camera feed voice tab" />
                 </div>
                 <p className="op-muted">{sceneSummary}</p>
                 <p className="op-muted">
@@ -3037,11 +3037,11 @@ export default function App() {
               </Section>
               <Section title="TTS output controls">
                 <p className="op-muted" style={{ marginBottom: "0.5rem" }}>
-                  The mic is always listening. Only Ava's voice output can be muted.
+                  The mic is always listening. Only Iris's voice output can be muted.
                 </p>
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
                   <button type="button" className="op-btn" onClick={() => void toggleTts()}>
-                    {Boolean(tts?.enabled) ? "Mute Ava's voice" : "Unmute Ava's voice"}
+                    {Boolean(tts?.enabled) ? "Mute Iris's voice" : "Unmute Iris's voice"}
                   </button>
                   <button
                     type="button"
@@ -3064,7 +3064,7 @@ export default function App() {
           {tab === "tools" && (
             <div className="op-pane">
               <h1 className="op-h1">Tools</h1>
-              <p className="op-lead">Ava can use these tools autonomously (Tier 1) or with verbal check-in (Tier 2).</p>
+              <p className="op-lead">Iris can use these tools autonomously (Tier 1) or with verbal check-in (Tier 2).</p>
               <Section title="Registry">
                 <Kv
                   items={[
@@ -3338,7 +3338,7 @@ export default function App() {
             <div className="op-pane">
               <h1 className="op-h1">Finetune</h1>
               <p className="op-lead">
-                Fine-tuning takes 30-60 minutes and will use significant CPU/GPU. Ava will continue running during this process.
+                Fine-tuning takes 30-60 minutes and will use significant CPU/GPU. Iris will continue running during this process.
               </p>
               <Section title="Status">
                 <Kv
@@ -3450,12 +3450,12 @@ export default function App() {
             <div className="op-pane">
               <h1 className="op-h1">Plans</h1>
               <p className="op-lead">
-                Ava's long-horizon plans — created from her own goals and curiosity.
+                Iris's long-horizon plans — created from her own goals and curiosity.
                 She decides priority, approach, and timing.
               </p>
-              <Section title="Create a plan (Ava-initiated)">
+              <Section title="Create a plan (Iris-initiated)">
                 <p className="op-note">
-                  Ava creates plans from her own goals. You can seed one here as a suggestion.
+                  Iris creates plans from her own goals. You can seed one here as a suggestion.
                 </p>
                 <div style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
                   <input
@@ -3501,7 +3501,7 @@ export default function App() {
                 {!plans ? (
                   <p className="op-muted">Loading…</p>
                 ) : plans.plans.length === 0 ? (
-                  <p className="op-muted">No plans yet. Ava will create them from her goals and curiosity.</p>
+                  <p className="op-muted">No plans yet. Iris will create them from her goals and curiosity.</p>
                 ) : (
                   plans.plans.map((plan) => {
                     const p = plan as Record<string, unknown>;
@@ -3554,7 +3554,7 @@ export default function App() {
           {tab === "journal" && (
             <div className="op-pane">
               <h1 className="op-h1">Journal</h1>
-              <p className="op-lead">Ava's private journal. She decides what to write and what to share.</p>
+              <p className="op-lead">Iris's private journal. She decides what to write and what to share.</p>
               {journalBusy ? (
                 <p className="op-muted">Loading…</p>
               ) : (
@@ -3603,7 +3603,7 @@ export default function App() {
           {tab === "learning" && (
             <div className="op-pane">
               <h1 className="op-h1">Learning</h1>
-              <p className="op-lead">What Ava has learned, from where, and what she's still curious about.</p>
+              <p className="op-lead">What Iris has learned, from where, and what she's still curious about.</p>
               {learningBusy ? <p className="op-muted">Loading…</p> : (
                 <>
                   <Section title="This Week">
@@ -3649,7 +3649,7 @@ export default function App() {
           {tab === "people" && (
             <div className="op-pane">
               <h1 className="op-h1">People</h1>
-              <p className="op-lead">Everyone Ava knows. Recognition confidence and profile status.</p>
+              <p className="op-lead">Everyone Iris knows. Recognition confidence and profile status.</p>
               <Section title="Current at Machine">
                 <Kv items={[
                   { label: "Person", value: String(asRecord(snap?.current_person)?.display_name ?? "Unknown") },
@@ -3707,7 +3707,7 @@ export default function App() {
           {tab === "emil" && (
             <div className="op-pane">
               <h1 className="op-h1">Emil</h1>
-              <p className="op-lead">Emil is Ava's sibling AI on port 5877. They share knowledge, not identity.</p>
+              <p className="op-lead">Emil is Iris's sibling AI on port 5877. They share knowledge, not identity.</p>
               <Section title="Status">
                 <button type="button" className="btn ghost" style={{ marginBottom: "8px" }}
                   onClick={() => {
@@ -3747,13 +3747,13 @@ export default function App() {
           {tab === "proposals" && (
             <div className="op-pane">
               <h1 className="op-h1">Identity Proposals</h1>
-              <p className="op-lead">Ava proposes additions to her own identity. You review and approve or ignore.</p>
+              <p className="op-lead">Iris proposes additions to her own identity. You review and approve or ignore.</p>
               <Section title={`Pending proposals (${proposals?.length ?? 0})`}>
                 <button type="button" className="btn ghost" style={{ marginBottom: "8px" }}
                   onClick={() => void fetchProposals()} disabled={proposalsBusy}>Refresh</button>
                 {proposalMsg && <p className="op-note">{proposalMsg}</p>}
                 {!proposals ? <p className="op-muted">Loading…</p>
-                  : proposals.length === 0 ? <p className="op-muted">No pending proposals yet. Ava will propose identity additions as she learns.</p>
+                  : proposals.length === 0 ? <p className="op-muted">No pending proposals yet. Iris will propose identity additions as she learns.</p>
                   : proposals.map((prop, idx) => {
                     const p = prop as Record<string, unknown>;
                     const ts = Number(p.ts || 0);
@@ -3820,7 +3820,7 @@ export default function App() {
             <div className="op-pane op-pane-debug">
               <h1 className="op-h1">Debug</h1>
               <p className="op-lead">
-                Operator HTTP instrumentation. Paste <strong>Backend Debug Export</strong> for a full Ava handoff.
+                Operator HTTP instrumentation. Paste <strong>Backend Debug Export</strong> for a full Iris handoff.
               </p>
 
               <Section title="1 — Live API response log">
@@ -3946,7 +3946,7 @@ export default function App() {
       {shutdownConfirmOpen && (
         <div className="shutdown-modal-backdrop">
           <div className="shutdown-modal">
-            <h2>Shut down Ava?</h2>
+            <h2>Shut down Iris?</h2>
             <p>She will save her thoughts before closing.</p>
             <div className="shutdown-modal-actions">
               <button type="button" className="btn op-shutdown-btn" onClick={() => void runShutdown()}>
@@ -3962,10 +3962,10 @@ export default function App() {
       {shutdownInProgress && (
         <div className="shutdown-overlay">
           <div className="shutdown-overlay-card">
-            <h2>{shutdownGoodbye ? "Goodnight from Ava" : "Ava is saving her thoughts..."}</h2>
+            <h2>{shutdownGoodbye ? "Goodnight from Iris" : "Iris is saving her thoughts..."}</h2>
             {shutdownGoodbye ? <p className="shutdown-goodbye-text">{shutdownGoodbye}</p> : <p>Please wait.</p>}
-            {shutdownDone ? <p className="shutdown-goodbye-done">Ava has shut down.</p> : null}
-            {shutdownWindowCloseHint ? <p className="shutdown-goodbye-done">Ava has shut down. You can close this window.</p> : null}
+            {shutdownDone ? <p className="shutdown-goodbye-done">Iris has shut down.</p> : null}
+            {shutdownWindowCloseHint ? <p className="shutdown-goodbye-done">Iris has shut down. You can close this window.</p> : null}
             {shutdownError ? <p className="op-error">{shutdownError}</p> : null}
           </div>
         </div>

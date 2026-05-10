@@ -1771,7 +1771,7 @@ body,
   animation: innerStateFadeIn 0.85s ease both;
 }
 
-/* Inner monologue — Ava's current thought, rendered just below the
+/* Inner monologue — Iris's current thought, rendered just below the
    orb's other status lines. Distinct from speaking-text (which shows
    the actual reply). Italic + dimmer + 💭 prefix to make it visually
    subordinate to the spoken response. Wraps to multiple lines if the
