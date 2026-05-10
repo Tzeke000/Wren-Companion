@@ -871,6 +871,27 @@ def journal_write(content: str, mood: str = "", topic: str = "", is_private: boo
 
 
 @mcp.tool()
+def memory_search(query: str, k: int = 5, person_id: str = "") -> dict:
+    """Semantic search over my memory store. Uses ChromaDB + bundled MiniLM
+    ONNX embeddings (CPU). Returns iris_memory entries ordered by relevance.
+
+    Examples:
+      memory_search("Zeke's sleep schedule")
+      memory_search("phase 9 architecture")
+      memory_search("what does Zeke prefer about debugging", person_id="zeke")
+    """
+    try:
+        from brain import iris_semantic_memory
+        results = iris_semantic_memory.search(
+            query, k=int(k),
+            person_id=(person_id or None),
+        )
+        return {"ok": True, "count": len(results), "results": results}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def memory_remember(text: str, tags: list[str] | None = None,
                     person_id: str = "zeke", importance: float = 0.5,
                     category: str = "episodic") -> dict:

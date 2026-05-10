@@ -370,16 +370,27 @@ def memory_mem0() -> dict:
 
 @app.post("/api/v1/memory/mem0/search")
 async def memory_mem0_search(payload: dict = Body(default={})) -> dict:
-    mem = _g.get("_iris_memory")
-    if mem is None:
-        return {"ok": True, "results": []}
+    """Phase 18: prefer semantic search via ChromaDB. Falls back to substring
+    on iris_memory.jsonl if semantic isn't ready."""
     q = str(payload.get("query") or "").strip()
     limit = int(payload.get("limit") or 10)
     if not q:
         return {"ok": True, "results": []}
     try:
+        from brain import iris_semantic_memory
+        if _g.get("_iris_semantic_memory_ready"):
+            rows = iris_semantic_memory.search(q, k=limit)
+            if rows:
+                return {"ok": True, "results": [_project_mem_entry(e) for e in rows], "engine": "semantic"}
+    except Exception:
+        pass
+    # Fallback: substring search via iris_memory
+    mem = _g.get("_iris_memory")
+    if mem is None:
+        return {"ok": True, "results": []}
+    try:
         rows = mem.search(q, limit=limit)
-        return {"ok": True, "results": [_project_mem_entry(e) for e in rows]}
+        return {"ok": True, "results": [_project_mem_entry(e) for e in rows], "engine": "substring"}
     except Exception as e:
         return {"ok": False, "results": [], "error": str(e)}
 

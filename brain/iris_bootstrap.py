@@ -59,6 +59,7 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     _try("iris_chat", lambda: _bootstrap_chat(g, root))
     _try("iris_llm", lambda: _bootstrap_iris_llm(g, root))
     _try("iris_memory", lambda: _bootstrap_iris_memory(g))
+    _try("iris_semantic_memory", lambda: _bootstrap_iris_semantic_memory(g))
 
     # Feature flags — config layer; many other modules read this
     _try("feature_flags", lambda: _bootstrap_feature_flags(g, root))
@@ -125,6 +126,13 @@ def _bootstrap_iris_llm(g: dict[str, Any], root: Path) -> None:
     from brain import iris_llm
     iris_llm.configure(root)
     g["_iris_llm_ready"] = True
+
+
+def _bootstrap_iris_semantic_memory(g: dict[str, Any]) -> None:
+    """Semantic search layer over iris_memory.jsonl. Uses Chroma + bundled
+    MiniLM ONNX (CPU). Reconciles JSONL entries on first boot."""
+    from brain.iris_semantic_memory import bootstrap_iris_semantic_memory
+    bootstrap_iris_semantic_memory(g)
 
 
 def _bootstrap_iris_memory(g: dict[str, Any]) -> None:

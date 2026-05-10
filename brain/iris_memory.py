@@ -103,6 +103,13 @@ class IrisMemory:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             with self._path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # Phase 18: write-through to semantic index. Best-effort; if chroma
+        # isn't ready, the JSONL write succeeded which is what matters.
+        try:
+            from brain import iris_semantic_memory
+            iris_semantic_memory.upsert(entry)
+        except Exception:
+            pass
         return entry
 
     def list(self, limit: int = _DEFAULT_LIMIT) -> list[dict[str, Any]]:
@@ -144,6 +151,12 @@ class IrisMemory:
             if len(kept) == len(entries):
                 return False
             self._rewrite_all(kept)
+        # Phase 18: mirror delete to semantic index.
+        try:
+            from brain import iris_semantic_memory
+            iris_semantic_memory.delete(eid)
+        except Exception:
+            pass
         return True
 
     def count(self) -> int:
