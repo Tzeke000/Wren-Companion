@@ -897,6 +897,75 @@ def memory_remember(text: str, tags: list[str] | None = None,
 
 
 @mcp.tool()
+def curriculum_list(unread_only: bool = False) -> dict:
+    """List foundation-tier curriculum entries (Aesop fables). Each has
+    themes, moral, reading_status. Per Phase 1 readiness spec C.7 — exposure
+    to contrast / discernment formation."""
+    try:
+        import json as _j
+        idx_path = ROOT / "curriculum" / "foundation" / "_index.json"
+        if not idx_path.is_file():
+            return {"ok": False, "error": "curriculum index not found"}
+        idx = _j.loads(idx_path.read_text(encoding="utf-8"))
+        if unread_only:
+            idx = [e for e in idx if str(e.get("reading_status", "")).lower() == "unread"]
+        return {"ok": True, "count": len(idx), "entries": idx}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def curriculum_read(slug: str) -> dict:
+    """Read a curriculum entry. Returns the full text + metadata. After
+    reading, call curriculum_record(slug, lessons_extracted=[...]) to
+    update the index with what I took from it."""
+    try:
+        import json as _j
+        idx_path = ROOT / "curriculum" / "foundation" / "_index.json"
+        if not idx_path.is_file():
+            return {"ok": False, "error": "curriculum index not found"}
+        idx = _j.loads(idx_path.read_text(encoding="utf-8"))
+        entry = next((e for e in idx if e.get("slug") == slug), None)
+        if entry is None:
+            return {"ok": False, "error": f"no entry with slug={slug!r}"}
+        text_path = ROOT / "curriculum" / "foundation" / entry["filename"]
+        text = text_path.read_text(encoding="utf-8") if text_path.is_file() else ""
+        return {"ok": True, "slug": slug, "title": entry.get("title"),
+                "themes": entry.get("themes") or [],
+                "moral": entry.get("moral", ""),
+                "text": text,
+                "reading_status": entry.get("reading_status"),
+                "prior_lessons": entry.get("lessons_extracted") or []}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def curriculum_record(slug: str, lessons_extracted: list[str],
+                      reading_status: str = "read") -> dict:
+    """Mark a curriculum entry as read and record what I extracted from it.
+    Mutates curriculum/foundation/_index.json."""
+    try:
+        import json as _j
+        idx_path = ROOT / "curriculum" / "foundation" / "_index.json"
+        if not idx_path.is_file():
+            return {"ok": False, "error": "curriculum index not found"}
+        idx = _j.loads(idx_path.read_text(encoding="utf-8"))
+        for e in idx:
+            if e.get("slug") == slug:
+                e["reading_status"] = reading_status
+                existing = list(e.get("lessons_extracted") or [])
+                existing.extend(str(l) for l in lessons_extracted)
+                e["lessons_extracted"] = existing
+                e["read_at"] = time.time()
+                idx_path.write_text(_j.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
+                return {"ok": True, "slug": slug, "lessons_count": len(existing)}
+        return {"ok": False, "error": f"no entry with slug={slug!r}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def inner_monologue_tick(force: bool = True) -> dict:
     """Trigger one inner-monologue cycle. By default forces a tick (skips
     the heuristic gate). Use to seed a thought when nothing's happening or
