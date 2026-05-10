@@ -76,6 +76,7 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     _try(g, "iris_llm", lambda: _bootstrap_iris_llm(g, root))
     _try(g, "iris_memory", lambda: _bootstrap_iris_memory(g))
     _try(g, "iris_semantic_memory", lambda: _bootstrap_iris_semantic_memory(g))
+    _try(g, "iris_human_memory", lambda: _bootstrap_iris_human_memory(g))
 
     # Feature flags — config layer; many other modules read this
     _try(g, "feature_flags", lambda: _bootstrap_feature_flags(g, root))
@@ -194,6 +195,14 @@ def _bootstrap_iris_semantic_memory(g: dict[str, Any]) -> None:
     MiniLM ONNX (CPU). Reconciles JSONL entries on first boot."""
     from brain.iris_semantic_memory import bootstrap_iris_semantic_memory
     bootstrap_iris_semantic_memory(g)
+
+
+def _bootstrap_iris_human_memory(g: dict[str, Any]) -> None:
+    """Human-shaped memory dynamics: working memory buffer, episodic split,
+    forgetting curve decay, retrieval strengthening, reconsolidation,
+    idle replay. Layer on top of iris_memory + iris_semantic_memory."""
+    from brain.iris_human_memory import bootstrap_iris_human_memory
+    bootstrap_iris_human_memory(g)
 
 
 def _bootstrap_iris_memory(g: dict[str, Any]) -> None:

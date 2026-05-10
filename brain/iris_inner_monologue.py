@@ -422,6 +422,17 @@ def tick_once(g: dict[str, Any], force: bool = False) -> Optional[str]:
             print(f"[inner_monologue] consolidation done: {result}")
     except Exception as _ce:
         print(f"[inner_monologue] consolidation error: {_ce!r}")
+    # Phase 45: idle replay — pick a few important memories and "touch"
+    # them. Cheap (no LLM); analog to hippocampal sharp-wave-ripple
+    # replay during quiet wake. Keeps important memories durable against
+    # the forgetting curve.
+    try:
+        from brain import iris_human_memory
+        replay_result = iris_human_memory.drain_replay_batch(g, n=3)
+        if replay_result.get("replayed", 0) > 0:
+            print(f"[inner_monologue] replay: {replay_result}")
+    except Exception as _re:
+        print(f"[inner_monologue] replay error: {_re!r}")
     print(f"[inner_monologue] tick: trigger={trigger} thought={thought[:80]!r}")
     return thought
 

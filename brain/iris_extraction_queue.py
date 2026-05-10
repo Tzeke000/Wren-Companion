@@ -132,6 +132,8 @@ def drain_one_batch(g: dict[str, Any], max_turns: int = 8) -> dict[str, Any]:
         print(f"[extraction_queue] iris_llm error: {e!r}")
     # Persist facts to iris_memory if any.
     saved = 0
+    graph_nodes_added = 0
+    graph_edges_added = 0
     if facts:
         try:
             mem = g.get("_iris_memory")
@@ -146,6 +148,47 @@ def drain_one_batch(g: dict[str, Any], max_turns: int = 8) -> dict[str, Any]:
                         pass
         except Exception:
             pass
+        # Phase 45: also populate concept_graph from extracted facts.
+        # The graph is the relational layer mem0 uses internally — we
+        # derive it from the facts using a lightweight keyword extractor
+        # (no extra LLM call). Each fact becomes a "memory" node + topic
+        # nodes for the keywords it contains, with related_to edges
+        # between them.
+        try:
+            cg = g.get("_concept_graph")
+            if cg is not None:
+                from brain.concept_graph import _extract_keywords, _slugify
+                # Person identifiers from the batch — every fact ties to
+                # the person who triggered it via a "told_by" edge.
+                persons_in_batch = {str(e.get("person_id") or "zeke")
+                                    for e in batch}
+                for fact in facts[:20]:
+                    fact_text = fact.strip()
+                    if not fact_text:
+                        continue
+                    # Memory node — short label, full text in notes.
+                    fact_label = fact_text[:80]
+                    mem_id = cg.add_node(
+                        label=f"fact: {fact_label}",
+                        type="memory",
+                        notes=fact_text[:500],
+                    )
+                    if mem_id:
+                        graph_nodes_added += 1
+                    # Person nodes + told_by edges.
+                    for pid in persons_in_batch:
+                        if pid:
+                            person_id = cg.find_or_create(pid, "person")
+                            cg.add_edge(mem_id, person_id, "told_by", 0.7)
+                            graph_edges_added += 1
+                    # Topic nodes from keywords + related_to edges.
+                    kws = _extract_keywords(fact_text, max_items=3)
+                    for kw in kws:
+                        topic_id = cg.find_or_create(kw, "topic")
+                        cg.add_edge(mem_id, topic_id, "related_to", 0.5)
+                        graph_edges_added += 1
+        except Exception as e:
+            print(f"[extraction_queue] concept_graph error: {e!r}")
     # Mark batch as processed.
     with _LOCK:
         batch_ids = {e["id"] for e in batch}
@@ -156,7 +199,13 @@ def drain_one_batch(g: dict[str, Any], max_turns: int = 8) -> dict[str, Any]:
                 e["facts_extracted"] = saved
         _rewrite_all(entries)
     remaining = sum(1 for e in entries if e.get("status") == "pending")
-    return {"processed": len(batch), "facts_extracted": saved, "remaining": remaining}
+    return {
+        "processed": len(batch),
+        "facts_extracted": saved,
+        "graph_nodes_added": graph_nodes_added,
+        "graph_edges_added": graph_edges_added,
+        "remaining": remaining,
+    }
 
 
 def bootstrap_iris_extraction_queue(g: dict[str, Any]) -> None:

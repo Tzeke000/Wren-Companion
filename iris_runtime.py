@@ -336,6 +336,18 @@ def voice_next_input(timeout: float = 300.0) -> dict:
             iris_extraction_queue.enqueue(user_text, person_id="zeke", modality="voice")
     except Exception:
         pass
+    # Phase 45: push the user utterance into working memory.
+    try:
+        from brain import iris_human_memory
+        user_text = str(result.get("text") or "")
+        if user_text:
+            iris_human_memory.working_memory_push({
+                "kind": "user_voice",
+                "content": user_text[:300],
+                "meta": {"confidence": float(result.get("confidence") or 0.0)},
+            })
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -614,11 +626,27 @@ def chat_reply(request_id: str, text: str) -> dict:
             pass
         # Phase 31: enqueue user turn for batched fact extraction at next
         # inner_monologue tick. Cheap append; no LLM call here.
+        user_msg = str((req or {}).get("user_text") or "")
         try:
             from brain import iris_extraction_queue
-            user_msg = str((req or {}).get("user_text") or "")
             if user_msg:
                 iris_extraction_queue.enqueue(user_msg, person_id="zeke", modality="chat")
+        except Exception:
+            pass
+        # Phase 45: push into working memory (user msg + my reply).
+        try:
+            from brain import iris_human_memory
+            if user_msg:
+                iris_human_memory.working_memory_push({
+                    "kind": "user_chat",
+                    "content": user_msg[:300],
+                    "meta": {},
+                })
+            iris_human_memory.working_memory_push({
+                "kind": "iris_reply",
+                "content": str(text)[:300],
+                "meta": {"modality": "chat"},
+            })
         except Exception:
             pass
         # Phase 44: auto-detect anchor moment from this turn (regex, no LLM).
@@ -782,6 +810,77 @@ def signals_recent(signal_type: str = "", since_seconds: float = 60.0) -> dict:
             all_sigs = bus.peek()
             sigs = [s for s in all_sigs if float(s.get("ts") or 0) >= cutoff]
         return {"ok": True, "count": len(sigs), "signals": sigs}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def working_memory() -> dict:
+    """Read what's currently in my working memory — the ~7-item attention
+    buffer. Items expire after 5min without re-attention.
+
+    Use to know "what was I just thinking about" — most-recent-first."""
+    try:
+        from brain import iris_human_memory
+        state = iris_human_memory.working_memory_state()
+        return {"ok": True, **state}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def episode_record(summary: str, mood_label: str = "",
+                   mood_arousal: float = 0.0, mood_valence: float = 0.0,
+                   tags: list[str] | None = None) -> dict:
+    """Record an episodic memory — a specific autobiographical event with
+    time, place, mood. Different from semantic facts (which iris_memory
+    holds). Episodes are time-indexed; encoding-time arousal boosts
+    importance (flashbulb pathway).
+
+    Examples:
+      episode_record("Zeke went to sleep, directed me to personalize the harness",
+                     mood_label="focused", mood_arousal=0.4)
+      episode_record("First time the orb showed real mood instead of hardcoded calm",
+                     mood_label="satisfied", mood_arousal=0.6, tags=["build","milestone"])
+    """
+    try:
+        from brain import iris_human_memory
+        e = iris_human_memory.record_episode(
+            summary=summary, mood_label=mood_label,
+            mood_arousal=mood_arousal, mood_valence=mood_valence,
+            tags=list(tags or []),
+        )
+        return {"ok": True, "id": e["id"], "importance": e["importance"]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def episode_recent(limit: int = 20) -> dict:
+    """List recent episodes, newest first."""
+    try:
+        from brain import iris_human_memory
+        eps = iris_human_memory.recent_episodes(limit=int(limit))
+        return {"ok": True, "count": len(eps), "episodes": eps}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def memory_revisit(memory_id: str, new_text: str, reason: str = "") -> dict:
+    """Reconsolidate a memory — write a new version that supersedes it.
+    Per reconsolidation theory: each retrieval makes a memory briefly
+    labile; re-stabilization can integrate updates without losing the
+    original (audit trail preserved).
+
+    Use when I learn something that updates an existing memory:
+      memory_revisit("abc123", "Zeke prefers React (specifically Hooks era, not class components)")
+    """
+    try:
+        from brain import iris_human_memory
+        return iris_human_memory.record_revisit(
+            memory_id=memory_id, new_text=new_text, reason=reason,
+        )
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

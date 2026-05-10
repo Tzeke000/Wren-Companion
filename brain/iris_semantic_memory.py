@@ -111,7 +111,12 @@ def upsert(entry: dict[str, Any]) -> bool:
 def search(query: str, k: int = 5,
            person_id: Optional[str] = None) -> list[dict[str, Any]]:
     """Semantic similarity search. Returns iris_memory-shaped rows
-    (id, text, ts, etc.) ordered by relevance."""
+    (id, text, ts, etc.) ordered by relevance.
+
+    Phase 45: every hit triggers record_access — retrieval strengthens
+    the memory per Bjork's New Theory of Disuse (each successful recall
+    bumps both retrieval-strength and storage-strength).
+    """
     if not _ensure_client():
         return []
     if not (query or "").strip():
@@ -146,6 +151,15 @@ def search(query: str, k: int = 5,
                 "tags": tags,
                 "distance": float(dists[i]) if i < len(dists) else 0.0,
             })
+        # Phase 45: retrieval strengthens. Bump access metadata for each
+        # hit. Doesn't fail the search if record_access errors.
+        try:
+            from brain import iris_human_memory
+            for entry in out:
+                if entry.get("id"):
+                    iris_human_memory.record_access(entry["id"])
+        except Exception:
+            pass
         return out
     except Exception as e:
         print(f"[iris_semantic_memory] search error: {e!r}")

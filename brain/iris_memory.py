@@ -88,6 +88,30 @@ class IrisMemory:
         text = str(text or "").strip()
         if not text:
             raise ValueError("memory text is empty")
+        # Phase 45: encoding-time arousal boost (amygdala/flashbulb pathway).
+        # Memories created during high mood arousal encode more durably.
+        # Read live mood arousal; boost importance up to +0.3.
+        mood_arousal = 0.0
+        mood_label = ""
+        try:
+            from brain import mood_core
+            m = mood_core.load_mood_raw()
+            weights = m.get("emotion_weights") or {}
+            high_arousal_keys = ("excitement", "fear", "anger", "joy",
+                                 "anxiety", "frustration", "horror",
+                                 "surprise", "amusement", "distress")
+            mood_arousal = sum(float(weights.get(k, 0.0)) for k in high_arousal_keys)
+            mood_arousal = min(1.0, mood_arousal * 2.0)  # scale to 0-1
+            # Find dominant for label.
+            if weights:
+                top = max(weights.items(), key=lambda kv: kv[1])
+                mood_label = str(top[0])
+        except Exception:
+            pass
+        # Boost: 0.3 * arousal added to base importance (capped at 1.0).
+        encoding_boost = round(0.3 * mood_arousal, 3)
+        final_importance = min(1.0, float(importance) + encoding_boost)
+
         entry = {
             "id": uuid.uuid4().hex[:12],
             "ts": time.time(),
@@ -95,7 +119,10 @@ class IrisMemory:
             "text": text[:2000],
             "person_id": str(person_id or "zeke"),
             "category": str(category or "episodic"),
-            "importance": float(max(0.0, min(1.0, importance))),
+            "importance": round(final_importance, 3),
+            "base_importance": round(float(importance), 3),
+            "encoding_arousal": round(mood_arousal, 3),
+            "encoding_mood_label": mood_label,
             "source": str(source or "manual"),
             "tags": list(tags or []),
         }
