@@ -252,6 +252,25 @@ def snapshot() -> dict:
             "tick_loop_alive": bool(_g.get("_iris_time_ready")),
             "inner_thought_ts": float(_g.get("_inner_thought_ts") or 0.0),
         },
+        "models": {
+            # Iris's cognition is Claude (cross-process via Stop hook).
+            # No local model selection — these fields exist for the
+            # orb's reads, populated honestly.
+            "selected_model": "claude (cross-process)",
+            "fallback_model": "none",
+            "routing_reason": "Iris-as-LLM via brain.iris_llm bridge",
+            "cognitive_mode": "iris_llm_bridge",
+            "available_models": ["claude"],
+        },
+        "ribbon": {
+            "vision_status": (
+                "stable" if _g.get("_face_results") is not None else "no_camera"
+            ),
+            "nuance_tone": "",  # populated by conversational_nuance if it runs
+        },
+        "style": {
+            "orb_glow_intensity": 0.8,
+        },
         "speech": {"text": "", "ts": 0.0},
         "onboarding": {"active": False, "step": None},
         "time": _time_block_inline(),
