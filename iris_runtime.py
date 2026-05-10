@@ -430,6 +430,13 @@ def voice_say_chunk(text: str, emotion: str = "neutral", intensity: float = 0.5)
         )
     except Exception:
         pass
+    # Per-chunk theory-of-mind tracking. Each chunk may introduce new topics;
+    # cheap regex match, no LLM.
+    try:
+        from brain import theory_of_mind
+        theory_of_mind.post_turn_record("zeke", text)
+    except Exception:
+        pass
     return {"ok": True, "queue_depth": depth_before}
 
 
@@ -517,6 +524,25 @@ def chat_reply(request_id: str, text: str) -> dict:
             return {"ok": False, "error": "request not found or already answered"}
         _it.append(role="assistant", content=str(text),
                    source="iris", modality="chat")
+
+        # Post-turn hooks — feed signals to per-person modules. No LLM here;
+        # both are pattern-match cheap.
+        person_id = "zeke"  # default for now; multi-person later
+        try:
+            from brain import theory_of_mind
+            theory_of_mind.post_turn_record(person_id, str(text))
+        except Exception:
+            pass
+        try:
+            from brain import preference_learning
+            user_msg = str((req or {}).get("user_text") or "")
+            if user_msg:
+                signals = preference_learning.detect_preference_signals(user_msg)
+                if signals:
+                    print(f"[post_turn] detected {len(signals)} preference signal(s)", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
         return {"ok": True, "request_id": str(request_id)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
