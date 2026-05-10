@@ -897,6 +897,29 @@ def memory_remember(text: str, tags: list[str] | None = None,
 
 
 @mcp.tool()
+def web_search(query: str, max_results: int = 5) -> dict:
+    """Search the web. Goes through DuckDuckGo (no API key required).
+    Returns list of {title, url, snippet} entries."""
+    try:
+        from tools.web.web_search import search
+        results = search(query, max_results=int(max_results))
+        return {"ok": True, "count": len(results), "results": results}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def web_fetch(url: str) -> dict:
+    """Fetch a URL and return cleaned text. Useful for reading articles,
+    docs, or any web content I need to process."""
+    try:
+        from tools.web.web_fetch import fetch_url
+        return fetch_url(url)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def curriculum_list(unread_only: bool = False) -> dict:
     """List foundation-tier curriculum entries (Aesop fables). Each has
     themes, moral, reading_status. Per Phase 1 readiness spec C.7 — exposure
