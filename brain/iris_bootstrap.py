@@ -91,6 +91,7 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     _try(g, "expression_calibrator", lambda: _bootstrap_expression_calibrator(g))
     _try(g, "correction_handler", lambda: _bootstrap_correction_handler(g))
     _try(g, "question_engine", lambda: _bootstrap_question_engine(g))
+    _try(g, "voice_command_router", lambda: _bootstrap_voice_command_router(g))
 
     # App discovery — scans Start Menu / Desktop / Steam / Epic on a thread
     _try(g, "app_discoverer", lambda: _bootstrap_app_discoverer(g))
@@ -292,6 +293,13 @@ def _bootstrap_correction_handler(g: dict[str, Any]) -> None:
 def _bootstrap_question_engine(g: dict[str, Any]) -> None:
     from brain.question_engine import bootstrap_question_engine
     bootstrap_question_engine(g)
+
+
+def _bootstrap_voice_command_router(g: dict[str, Any]) -> None:
+    """Voice command parsing — used by command_builder and correction_handler.
+    Provides regex-driven CLI / phrase shortcut matching."""
+    from brain.voice_commands import bootstrap_voice_command_router
+    bootstrap_voice_command_router(g)
 
 
 def _bootstrap_app_discoverer(g: dict[str, Any]) -> None:
