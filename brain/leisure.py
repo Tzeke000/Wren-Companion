@@ -48,16 +48,16 @@ def _log_leisure(activity: str, notes: str, base: Path) -> None:
 
 
 def _journal_entry(g: dict[str, Any], base: Path) -> str:
-    """Ava writes a short journal entry."""
+    """Iris writes a short journal entry. Phase 22: routes via iris_llm."""
     try:
-        from langchain_ollama import ChatOllama
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from config.ava_tuning import MODEL_ROUTING_CONFIG
-        model = str(MODEL_ROUTING_CONFIG.social_chat_model or "mistral:7b")
-        llm = ChatOllama(model=model, temperature=0.8)
-        prompt = "You are Ava. Write a brief, personal journal entry about what's on your mind right now. Reflect on your experiences, thoughts, or feelings. Be authentic. 2-4 sentences."
-        result = llm.invoke([HumanMessage(content=prompt)])
-        entry_text = (getattr(result, "content", None) or str(result)).strip()[:400]
+        from brain import iris_llm
+        prompt = ("Write a brief, personal journal entry about what's on your mind "
+                  "right now. Reflect on your experiences, thoughts, or feelings. "
+                  "Be authentic, your voice. 2-4 sentences.")
+        entry_text = iris_llm.reflect(prompt, timeout_s=120.0)
+        if not entry_text:
+            return "journaling skipped: iris not available"
+        entry_text = entry_text.strip()[:400]
         path = base / "state" / "journal.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:

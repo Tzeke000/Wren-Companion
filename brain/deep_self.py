@@ -54,9 +54,16 @@ def update_mind_model(user_text: str, context: str, g: dict[str, Any]) -> None:
     )
     mood, energy, focus, wants, conf = "uncertain", "medium", "unknown", "helpful support", 0.5
     try:
-        llm = ChatOllama(model="mistral:7b", temperature=0.25)
-        out = llm.invoke([SystemMessage(content=prompt), HumanMessage(content=f"MESSAGE:\n{user_text[:1600]}\n\nCONTEXT:\n{context[:1600]}")])
-        txt = (getattr(out, "content", None) or str(out)).strip()
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = f"{prompt}\n\nMESSAGE:\n{user_text[:1600]}\n\nCONTEXT:\n{context[:1600]}"
+        txt = iris_llm.ask_iris(
+            prompt=full_prompt, kind="infer_state",
+            requester="deep_self", timeout_s=90.0,
+        )
+        if txt is None:
+            raise TimeoutError("iris_llm timeout")
+        txt = txt.strip()
         blob = json.loads(txt[txt.find("{") : txt.rfind("}") + 1])
         if isinstance(blob, dict):
             mood = str(blob.get("mood") or mood)[:120]
@@ -114,12 +121,18 @@ def resolve_value_conflict(situation: str, g: dict[str, Any]) -> dict[str, Any]:
         "tension_explained": "Direct truth can sting, but hiding it is worse long-term.",
     }
     try:
-        llm = ChatOllama(model="mistral:7b", temperature=0.3)
-        out = llm.invoke([SystemMessage(content=prompt), HumanMessage(content=situation[:1500])])
-        txt = (getattr(out, "content", None) or str(out)).strip()
-        blob = json.loads(txt[txt.find("{") : txt.rfind("}") + 1])
-        if isinstance(blob, dict):
-            out_blob.update(blob)
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        txt = iris_llm.ask_iris(
+            prompt=f"{prompt}\n\nSituation: {situation[:1500]}",
+            kind="resolve_dilemma",
+            requester="deep_self", timeout_s=90.0,
+        )
+        if txt is not None:
+            txt = txt.strip()
+            blob = json.loads(txt[txt.find("{") : txt.rfind("}") + 1])
+            if isinstance(blob, dict):
+                out_blob.update(blob)
     except Exception:
         pass
     row = {"ts": time.time(), "situation": situation[:500], **out_blob}
@@ -140,14 +153,17 @@ def self_critique(reply: str, user_text: str, context: str, g: dict[str, Any]) -
     )
     scores = {"helpfulness": 0.7, "emotional_attunement": 0.7, "honesty": 0.8, "conciseness": 0.6}
     try:
-        llm = ChatOllama(model="mistral:7b", temperature=0.2)
-        out = llm.invoke(
-            [
-                SystemMessage(content=prompt),
-                HumanMessage(content=f"USER:\n{user_text[:1200]}\n\nREPLY:\n{reply[:1200]}\n\nCONTEXT:\n{context[:800]}"),
-            ]
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = (f"{prompt}\n\nUSER:\n{user_text[:1200]}\n\nREPLY:\n{reply[:1200]}\n\n"
+                       f"CONTEXT:\n{context[:800]}")
+        txt = iris_llm.ask_iris(
+            prompt=full_prompt, kind="self_critique",
+            requester="deep_self", timeout_s=60.0,
         )
-        txt = (getattr(out, "content", None) or str(out)).strip()
+        if txt is None:
+            raise TimeoutError("iris_llm timeout")
+        txt = txt.strip()
         blob = json.loads(txt[txt.find("{") : txt.rfind("}") + 1])
         if isinstance(blob, dict):
             for k in list(scores.keys()):

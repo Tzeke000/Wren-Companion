@@ -78,9 +78,16 @@ def form_opinion(topic: str, context: str, g: dict[str, Any]) -> dict[str, Any] 
         "Base it on Ava values: grounded, kind, direct, thoughtful."
     )
     try:
-        llm = ChatOllama(model="mistral:7b", temperature=0.5)
-        out = llm.invoke([SystemMessage(content=prompt), HumanMessage(content=f"Topic: {topic}\nContext: {context[:1200]}")])
-        txt = (getattr(out, "content", None) or str(out)).strip()
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = f"{prompt}\n\nTopic: {topic}\nContext: {context[:1200]}"
+        txt = iris_llm.ask_iris(
+            prompt=full_prompt, kind="form_opinion",
+            requester="opinions", timeout_s=90.0,
+        )
+        if txt is None:
+            raise TimeoutError("iris_llm timeout")
+        txt = txt.strip()
         blob = json.loads(txt[txt.find("{") : txt.rfind("}") + 1])
         op = asdict(
             Opinion(

@@ -322,40 +322,16 @@ def _generate_salient_summary(g: dict[str, Any], base_dir: Path) -> str:
                 f"Your handoff summary (2-3 sentences):"
             )
 
-        # Use the action_tag classifier LLM (cached + pinned via earlier fix)
-        # so we don't pay cold-start. Its temp=0.0 produces clean direct output.
-        from langchain_ollama import ChatOllama
-        from langchain_core.messages import SystemMessage, HumanMessage
-        from brain.ollama_lock import with_ollama
-        # Reuse the cached pinned classifier instance — it's the
-        # ava-personal LLM with keep_alive=-1 already loaded.
-        try:
-            from brain import action_tag_router as _atr
-            llm = getattr(_atr, "_CLASSIFIER_LLM", None)
-            if llm is None:
-                llm = ChatOllama(
-                    model="ava-personal:latest",
-                    temperature=0.4,
-                    num_predict=140,
-                    keep_alive=-1,
-                )
-        except Exception:
-            llm = ChatOllama(
-                model="ava-personal:latest",
-                temperature=0.4,
-                num_predict=140,
-                keep_alive=-1,
-            )
-
-        result = with_ollama(
-            lambda: llm.invoke([
-                SystemMessage(content=prompt_system),
-                HumanMessage(content=prompt_user),
-            ]),
-            label="handoff:salient_summary",
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = f"{prompt_system}\n\n{prompt_user}"
+        text = iris_llm.ask_iris(
+            prompt=full_prompt, kind="handoff_summary",
+            requester="handoff", timeout_s=120.0,
         )
-        text = (getattr(result, "content", None) or str(result or "")).strip()
-        return text[:600]
+        if text:
+            return text.strip()[:600]
+        return ""
     except Exception as e:
         print(f"[handoff] salient summary error: {e!r}")
         return ""

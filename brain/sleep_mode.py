@@ -534,22 +534,20 @@ def _run_phase3_sleep_handoff(g: dict[str, Any]) -> dict[str, Any]:
 
 
 def _llm_summarize(g: dict[str, Any], prompt: str, max_seconds: float = 120.0) -> str:
-    """Call the foreground LLM (or background if available) to summarize.
-    Falls back to a deterministic stub if Ollama isn't reachable."""
+    """Phase 22: route through iris_llm. Falls back to deterministic stub
+    on timeout — sleep summaries aren't urgent and the cycle continues."""
     try:
-        from langchain_ollama import ChatOllama
-        from langchain_core.messages import HumanMessage, SystemMessage
-        # Use the foreground model (already warm).
-        from brain.dual_brain import DualBrain
-        model = DualBrain.FOREGROUND_MODEL_PREFERRED
-        llm = ChatOllama(model=model, temperature=0.5, keep_alive=-1)
-        sys_prompt = "You are Ava. Write in first person. Be concise. No preamble."
-        msgs = [SystemMessage(content=sys_prompt), HumanMessage(content=prompt)]
-        resp = llm.invoke(msgs)
-        return str(getattr(resp, "content", "") or "").strip()
+        from brain import iris_llm
+        full_prompt = "Write in first person, your voice. Be concise. No preamble.\n\n" + prompt
+        out = iris_llm.ask_iris(
+            prompt=full_prompt, kind="sleep_summary",
+            requester="sleep_mode", timeout_s=max_seconds,
+        )
+        if out:
+            return out.strip()
     except Exception as e:
-        print(f"[sleep_mode] LLM summarize fallback ({e!r})")
-        return "(LLM unavailable; sleep handoff stub. Awake session ended; sleep cycle will continue.)"
+        print(f"[sleep_mode] iris_llm fallback ({e!r})")
+    return "(Iris unavailable; sleep handoff stub. Awake session ended; sleep cycle will continue.)"
 
 
 def _recent_chat_lines(g: dict[str, Any], limit: int = 200) -> list[str]:
