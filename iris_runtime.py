@@ -897,6 +897,70 @@ def memory_remember(text: str, tags: list[str] | None = None,
 
 
 @mcp.tool()
+def system_stats() -> dict:
+    """System resource stats — CPU, RAM, GPU, disk usage. Useful for
+    knowing whether something's bogging down the machine."""
+    out = {"ok": True}
+    try:
+        import psutil
+        out["cpu_percent"] = psutil.cpu_percent(interval=0.5)
+        vm = psutil.virtual_memory()
+        out["ram"] = {
+            "total_gb": round(vm.total / 1024**3, 2),
+            "used_gb": round(vm.used / 1024**3, 2),
+            "available_gb": round(vm.available / 1024**3, 2),
+            "percent": vm.percent,
+        }
+        d_root = psutil.disk_usage("D:/" if Path("D:/").exists() else "/")
+        out["disk_d"] = {
+            "total_gb": round(d_root.total / 1024**3, 2),
+            "used_gb": round(d_root.used / 1024**3, 2),
+            "free_gb": round(d_root.free / 1024**3, 2),
+            "percent": d_root.percent,
+        }
+        c_root = psutil.disk_usage("C:/")
+        out["disk_c"] = {
+            "total_gb": round(c_root.total / 1024**3, 2),
+            "used_gb": round(c_root.used / 1024**3, 2),
+            "free_gb": round(c_root.free / 1024**3, 2),
+            "percent": c_root.percent,
+        }
+    except Exception as e:
+        out["error"] = str(e)
+    # GPU via nvidia-smi
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2.0,
+        )
+        if result.returncode == 0:
+            line = result.stdout.strip().splitlines()[0]
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 4:
+                out["gpu"] = {
+                    "utilization_percent": int(parts[0]),
+                    "memory_used_mb": int(parts[1]),
+                    "memory_total_mb": int(parts[2]),
+                    "temp_c": int(parts[3]),
+                }
+    except Exception:
+        pass
+    return out
+
+
+@mcp.tool()
+def list_processes(limit: int = 50) -> dict:
+    """List top processes by CPU%. Useful for noticing what's running."""
+    try:
+        from tools.system.process_manager import list_processes as _lp
+        return {"ok": True, "processes": _lp(limit=int(limit))}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def web_search(query: str, max_results: int = 5) -> dict:
     """Search the web. Goes through DuckDuckGo (no API key required).
     Returns list of {title, url, snippet} entries."""
