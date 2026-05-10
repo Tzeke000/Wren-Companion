@@ -716,14 +716,64 @@ async def images_delete(filename: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/v1/workbench/proposals")
+def workbench_proposals() -> dict:
+    """List current workbench proposals. Builds them on demand from selftest
+    results — proposals are reactive to actual diagnostics, not seeded.
+
+    Empty list means the system is healthy (no proposals to act on)."""
+    try:
+        from brain import selftests, workbench
+        try:
+            sf_result = selftests.run_recurring_selftests(
+                _g.get("camera_manager"), _g, "stable",
+            )
+        except Exception:
+            sf_result = None
+        try:
+            wb_result = workbench.build_workbench_proposals(
+                selftests=sf_result,
+                acquisition_freshness="stable",
+                proactive_trigger=None,
+            )
+            proposals = []
+            for p in (wb_result.proposals or []):
+                proposals.append({
+                    "proposal_id": getattr(p, "proposal_id", ""),
+                    "proposal_type": getattr(p, "proposal_type", ""),
+                    "title": getattr(p, "title", ""),
+                    "problem": getattr(p, "problem", ""),
+                    "action": getattr(p, "action", ""),
+                    "risk": getattr(p, "risk", "low"),
+                    "priority": getattr(p, "priority", "low"),
+                    "confidence": float(getattr(p, "confidence", 0.0) or 0.0),
+                })
+            return {"ok": True, "proposals": proposals, "count": len(proposals)}
+        except Exception as e:
+            return {"ok": False, "proposals": [], "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "proposals": [], "error": str(e)}
+
+
 @app.post("/api/v1/workbench/approve")
-async def workbench_approve() -> dict:
-    return {"ok": True, "message": "approved"}
+async def workbench_approve(payload: dict = Body(default={})) -> dict:
+    """Approve a proposal. Currently logs the approval — full execute path
+    via brain/workbench_execute is heavy (file modifications + rollback)
+    and Iris-side wiring is deferred until needed."""
+    proposal_id = str(payload.get("proposal_id") or "").strip()
+    if not proposal_id:
+        return {"ok": False, "error": "proposal_id required"}
+    print(f"[workbench] approval logged for proposal {proposal_id} "
+          f"(execute path not yet wired)")
+    return {"ok": True, "message": "approved (logged; not executed)",
+            "proposal_id": proposal_id}
 
 
 @app.post("/api/v1/workbench/reject")
-async def workbench_reject() -> dict:
-    return {"ok": True, "message": "rejected"}
+async def workbench_reject(payload: dict = Body(default={})) -> dict:
+    proposal_id = str(payload.get("proposal_id") or "").strip()
+    print(f"[workbench] rejection logged for proposal {proposal_id}")
+    return {"ok": True, "message": "rejected", "proposal_id": proposal_id}
 
 
 @app.post("/api/v1/routing/override")

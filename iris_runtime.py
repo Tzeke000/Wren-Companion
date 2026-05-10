@@ -918,6 +918,46 @@ def memory_remember(text: str, tags: list[str] | None = None,
 
 
 @mcp.tool()
+def workbench_proposals() -> dict:
+    """List current workbench proposals — repair/maintenance suggestions
+    surfaced from selftest results. Proposals are reactive: they exist
+    only when a selftest check actually fails or warns."""
+    try:
+        from brain import selftests, workbench
+        sf = None
+        try:
+            sf = selftests.run_recurring_selftests(
+                _g.get("camera_manager"), _g, "stable",
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"selftests failed: {e}"}
+        try:
+            wb = workbench.build_workbench_proposals(
+                selftests=sf, acquisition_freshness="stable",
+                proactive_trigger=None,
+            )
+            out = []
+            for p in (wb.proposals or []):
+                out.append({
+                    "proposal_id": getattr(p, "proposal_id", ""),
+                    "proposal_type": getattr(p, "proposal_type", ""),
+                    "title": getattr(p, "title", ""),
+                    "problem": getattr(p, "problem", ""),
+                    "action": getattr(p, "action", ""),
+                    "risk": getattr(p, "risk", "low"),
+                    "priority": getattr(p, "priority", "low"),
+                    "confidence": float(getattr(p, "confidence", 0.0) or 0.0),
+                })
+            return {"ok": True, "count": len(out), "proposals": out,
+                    "failed_checks": list(getattr(sf.summary, "failed_checks", []) or []),
+                    "warning_checks": list(getattr(sf.summary, "warning_checks", []) or [])}
+        except Exception as e:
+            return {"ok": False, "error": f"workbench build failed: {e}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def describe_scene_now(monitor: int = 0, prompt: str = "") -> dict:
     """Take a screenshot, describe what I see. Combined screen_grab +
     describe_image flow. Used by my own curiosity ("what's on Zeke's
