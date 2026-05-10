@@ -94,6 +94,22 @@ app.add_middleware(
 )
 
 
+def _inner_life_block() -> dict:
+    """Inner thought block. Phase 41: thoughts older than 1 hour don't surface
+    as "current" — they're history, not present. Lets the orb's UI fade
+    cleanly instead of showing "Iris is thinking about X" forever."""
+    thought = str(_g.get("_inner_thought") or "")
+    ts = float(_g.get("_inner_thought_ts") or 0.0)
+    if thought and ts > 0 and (time.time() - ts) > 3600.0:
+        # Older than an hour — don't claim it's current.
+        return {"current_thought": None, "thought_ts": 0.0, "trigger": ""}
+    return {
+        "current_thought": thought or None,
+        "thought_ts": ts,
+        "trigger": str(_g.get("_inner_thought_trigger") or ""),
+    }
+
+
 def _brain_graph_snapshot_block() -> dict:
     """Concept graph stats for snapshot. Lighter than full /brain/graph
     response — just totals so the orb's status panel can show counts."""
@@ -143,8 +159,20 @@ def health() -> dict:
 def snapshot() -> dict:
     """Top-level state. Polled every 5s by the orb. Fields are best-effort —
     the orb null-checks everything so missing pieces just render empty."""
+    # Phase 41: snapshot a consistent perception state at the top of the
+    # function so face_results, person_id, confidence, expression are all
+    # from the same instant (rather than each read independently).
+    _face_results_snap = list(_g.get("_face_results") or [])
     pid = _g.get("_recognized_person_id") or "unknown"
     conf = float(_g.get("_recognized_confidence") or 0.0)
+    _expr_snap = str(_g.get("_current_expression") or "")
+    _attn_snap = str(_g.get("_attention_state") or "")
+    _looking_snap = bool(_g.get("_looking_at_screen") or False)
+    # Cross-validate: if face_results is empty but pid is set, we caught a
+    # write-in-progress. Demote to unknown.
+    if not _face_results_snap and pid != "unknown":
+        pid = "unknown"
+        conf = 0.0
     current_person: dict | None = None
     if pid != "unknown" and conf > 0.0:
         # Phase 36: include fields the orb actually reads (display_name,
@@ -172,7 +200,7 @@ def snapshot() -> dict:
             "confidence": conf,
             "age": int(_g.get("_face_age") or 0),
             "gender": str(_g.get("_face_gender") or "?"),
-            "expression": str(_g.get("_current_expression") or ""),
+            "expression": _expr_snap,
             "time_at_machine": int(time_at_machine),
         }
     insight = _g.get("_insight_face")
@@ -228,17 +256,11 @@ def snapshot() -> dict:
         "connectivity": {"online": True, "wan": True, "lan": True},
         "current_person": current_person,
         "attention": {
-            "state": str(_g.get("_attention_state") or ""),
-            "looking_at_screen": bool(_g.get("_looking_at_screen") or False),
+            "state": _attn_snap,
+            "looking_at_screen": _looking_snap,
             "gaze_region": str(_g.get("_gaze_region") or ""),
         },
-        "inner_life": {
-            "current_thought": (
-                str(_g.get("_inner_thought") or "") or None
-            ),
-            "thought_ts": float(_g.get("_inner_thought_ts") or 0.0),
-            "trigger": str(_g.get("_inner_thought_trigger") or ""),
-        },
+        "inner_life": _inner_life_block(),
         "tts": {
             "tts_speaking": bool(_g.get("_tts_speaking")),
             "engine": getattr(_tts_ref, "_engine_type", None),
@@ -260,31 +282,24 @@ def snapshot() -> dict:
             "say_queue_depth": int(_g.get("_say_queue_depth") or 0),
         },
         "vision": {
-            "camera_active": _g.get("_face_results") is not None,
-            "face_count": len(_g.get("_face_results") or []),
-            "current_expression": str(_g.get("_current_expression") or ""),
-            "attention_state": str(_g.get("_attention_state") or ""),
-            "looking_at_screen": bool(_g.get("_looking_at_screen") or False),
+            "camera_active": _face_results_snap is not None,
+            "face_count": len(_face_results_snap),
+            "current_expression": _expr_snap,
+            "attention_state": _attn_snap,
+            "looking_at_screen": _looking_snap,
             "insight_provider": (
                 str(getattr(insight, "_provider", "")) if insight else ""
             ),
             "perception": {
-                "resolved_face_identity": (
-                    str(_g.get("_recognized_person_id") or "")
-                    if _g.get("_recognized_person_id") not in (None, "unknown") else ""
-                ),
-                "stable_face_identity": (
-                    str(_g.get("_recognized_person_id") or "")
-                    if (_g.get("_recognized_person_id") not in (None, "unknown")
-                        and float(_g.get("_recognized_confidence") or 0) > 0.7) else ""
-                ),
-                "identity_confidence": float(_g.get("_recognized_confidence") or 0.0),
+                "resolved_face_identity": pid if pid != "unknown" else "",
+                "stable_face_identity": pid if (pid != "unknown" and conf > 0.7) else "",
+                "identity_confidence": conf,
                 "face_status": (
-                    "recognized" if _g.get("_recognized_person_id") not in (None, "unknown")
-                    else ("face_unresolved" if (_g.get("_face_results") or []) else "no_face")
+                    "recognized" if pid != "unknown"
+                    else ("face_unresolved" if _face_results_snap else "no_face")
                 ),
                 "scene_compact_summary": str(_g.get("_llava_scene_description") or ""),
-                "interpretation_confidence": float(_g.get("_recognized_confidence") or 0.0),
+                "interpretation_confidence": conf,
                 "recognized_text": "",
             },
         },
@@ -511,15 +526,24 @@ async def stt_listen() -> dict:
 @app.get("/api/v1/stt/result")
 def stt_result() -> dict:
     """Last STT result from voice_next_input. Polled by the orb when it
-    wants to show the most recent transcript."""
+    wants to show the most recent transcript.
+
+    Phase 41: TTL of 5 minutes. Results older than that don't show — the
+    orb shouldn't claim "Zeke just said X" two hours later."""
     last = _g.get("_last_stt_result") or {}
     text = str(last.get("text") or "")
+    ts = float(last.get("ts") or 0.0)
+    if text and ts > 0 and (time.time() - ts) > 300.0:
+        # Stale — don't surface.
+        return {"ok": True, "ready": False, "processing": False,
+                "text": "", "ts": 0.0, "confidence": 0.0, "duration_seconds": 0.0,
+                "stale_seconds": int(time.time() - ts)}
     return {
         "ok": True,
         "ready": bool(text),
         "processing": False,
         "text": text,
-        "ts": float(last.get("ts") or 0.0),
+        "ts": ts,
         "confidence": float(last.get("confidence") or 0.0),
         "duration_seconds": float(last.get("duration_seconds") or 0.0),
     }

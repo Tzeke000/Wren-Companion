@@ -33,7 +33,7 @@ _LOCK = threading.Lock()
 _BASE: Path | None = None
 _DIR_NAME = "state/iris_chat"
 _FLAG_NAME = ".pending"
-_REQUEST_TTL_S = 300.0  # requests older than this are considered abandoned
+_REQUEST_TTL_S = 600.0  # requests older than this are considered abandoned (10x HTTP timeout)
 
 
 def configure(base_dir: Path | str) -> None:
@@ -150,16 +150,23 @@ def next_pending() -> Optional[dict[str, Any]]:
 
 
 def mark_answered(request_id: str, reply: str) -> bool:
-    """Flip the request to answered and write the reply. Atomic via tmp+rename."""
+    """Flip the request to answered and write the reply. Atomic via tmp+rename.
+
+    Phase 41: existence check is now INSIDE the lock to prevent the race where
+    two concurrent mark_answered calls on the same id both succeed.
+    """
     path = _request_path(request_id)
-    if not path.exists():
-        return False
     with _LOCK:
+        if not path.exists():
+            return False
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return False
         if not isinstance(data, dict):
+            return False
+        # Idempotency — if already answered, return False so caller knows.
+        if data.get("status") == "answered":
             return False
         data["status"] = "answered"
         data["reply"] = str(reply or "")
@@ -173,15 +180,24 @@ def mark_answered(request_id: str, reply: str) -> bool:
 
 def wait_for_reply(request_id: str, timeout_s: float = 60.0) -> Optional[str]:
     """Block up to timeout_s for the request to flip to answered. Returns
-    the reply string on success, None on timeout."""
+    the reply string on success, None on timeout or expired.
+
+    Phase 41: also returns None immediately if the request status flips
+    to expired (e.g. iris_runtime down, or stale-cleanup ran). Avoids
+    the waiter blocking the full timeout when the answer will never come.
+    """
     deadline = time.time() + max(0.5, float(timeout_s))
     path = _request_path(request_id)
     while time.time() < deadline:
         if path.is_file():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and data.get("status") == "answered":
-                    return str(data.get("reply") or "")
+                if isinstance(data, dict):
+                    status = data.get("status")
+                    if status == "answered":
+                        return str(data.get("reply") or "")
+                    if status == "expired":
+                        return None
             except Exception:
                 pass
         time.sleep(0.2)

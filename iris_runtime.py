@@ -445,6 +445,12 @@ def voice_say_chunk(text: str, emotion: str = "neutral", intensity: float = 0.5)
     """
     if not text or not text.strip():
         return {"ok": False, "error": "empty text"}
+    # Phase 41: voice chunks count as session activity.
+    try:
+        from brain import iris_time
+        iris_time.mark_session_attached()
+    except Exception:
+        pass
     _ensure_say_worker()
     depth_before = _say_queue.qsize()
     _say_queue.put((text, emotion, intensity))
@@ -670,6 +676,12 @@ def enroll_face(
         {ok, pid, saved_paths, known_count_before, known_count_after,
          duration_s, error?}
     """
+    # Phase 41: enrollment counts as session activity.
+    try:
+        from brain import iris_time
+        iris_time.mark_session_attached()
+    except Exception:
+        pass
     engine = _g.get("_insight_face")
     if engine is None:
         return {"ok": False, "error": "InsightFace engine not running — vision phase 1 not initialized yet"}

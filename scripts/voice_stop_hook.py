@@ -122,7 +122,11 @@ def _next_pending_chat() -> dict | None:
         if data.get("status") != "pending":
             continue
         ts = float(data.get("ts") or 0.0)
-        if (_t.time() - ts) > 300.0:
+        # Phase 41: TTL bumped 300→600s. Orb's HTTP long-poll is 60s; a
+        # 5min cap meant a request could expire from the hook before the
+        # orb's poll naturally gives up, causing silent drops. 10x the
+        # HTTP timeout gives proper slack.
+        if (_t.time() - ts) > 600.0:
             continue
         candidates.append((ts, data))
     if not candidates:

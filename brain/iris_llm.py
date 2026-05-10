@@ -188,16 +188,22 @@ def next_pending() -> Optional[dict[str, Any]]:
 
 
 def mark_answered(request_id: str, reply: str) -> bool:
-    """Flip the request to answered. Atomic via tmp+rename."""
+    """Flip the request to answered. Atomic via tmp+rename.
+
+    Phase 41: existence check is now INSIDE the lock to prevent the race
+    where two concurrent mark_answered calls on the same id both succeed.
+    """
     path = _request_path(request_id)
-    if not path.exists():
-        return False
     with _LOCK:
+        if not path.exists():
+            return False
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return False
         if not isinstance(data, dict):
+            return False
+        if data.get("status") == "answered":
             return False
         data["status"] = "answered"
         data["reply"] = str(reply or "")
