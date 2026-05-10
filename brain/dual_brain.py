@@ -488,13 +488,18 @@ class DualBrain:
     def _task_journal_entry(self, g: dict[str, Any], topic: str) -> str:
         try:
             from brain.journal import compose_journal_entry, write_entry
-            mood_path = Path(g.get("BASE_DIR") or ".") / "ava_mood.json"
+            base = Path(g.get("BASE_DIR") or ".")
             mood = "reflective"
             try:
                 import json
-                if mood_path.is_file():
-                    d = json.loads(mood_path.read_text(encoding="utf-8"))
-                    mood = str(d.get("current_mood") or "reflective")
+                # Phase 30: prefer iris_mood, fall back to ava_mood.
+                for candidate in ("state/iris_mood.json", "ava_mood.json"):
+                    p = base / candidate
+                    if p.is_file():
+                        d = json.loads(p.read_text(encoding="utf-8"))
+                        if isinstance(d, dict):
+                            mood = str(d.get("current_mood") or "reflective")
+                            break
             except Exception:
                 pass
             content = compose_journal_entry(topic or "stream_b reflection", "background_idle", g)

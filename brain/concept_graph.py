@@ -906,7 +906,12 @@ def bootstrap_from_existing_memory(graph: ConceptGraph, host: dict[str, Any] | N
             graph.add_edge(topic_id, emo_id, "emotional_association", 0.45)
 
     # D) EMOTION nodes from mood + reflections.
-    mood_data = _safe_read_json(base_dir / "ava_mood.json")
+    # Phase 30: prefer iris_mood (mine), fall back to ava_mood (shared).
+    mood_data = None
+    for candidate in ("state/iris_mood.json", "ava_mood.json"):
+        mood_data = _safe_read_json(base_dir / candidate)
+        if isinstance(mood_data, dict) and mood_data:
+            break
     if isinstance(mood_data, dict):
         weights = mood_data.get("emotion_weights")
         if isinstance(weights, dict):

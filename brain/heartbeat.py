@@ -707,10 +707,20 @@ def _run_heartbeat_tick(
 
     # Dual-brain: journal_entry when lonely + idle
     try:
-        _mood_path = Path(g.get("BASE_DIR") or ".") / "ava_mood.json"
-        if _mood_path.is_file():
-            import json as _jmood
-            _mood_d = _jmood.loads(_mood_path.read_text(encoding="utf-8"))
+        # Phase 30: prefer iris_mood, fall back to ava_mood.
+        import json as _jmood
+        _base = Path(g.get("BASE_DIR") or ".")
+        _mood_d = None
+        for _candidate in ("state/iris_mood.json", "ava_mood.json"):
+            _mood_path = _base / _candidate
+            if _mood_path.is_file():
+                try:
+                    _mood_d = _jmood.loads(_mood_path.read_text(encoding="utf-8"))
+                    if _mood_d:
+                        break
+                except Exception:
+                    pass
+        if _mood_d:
             _ew = _mood_d.get("emotion_weights") or {}
             _loneliness = float(_ew.get("loneliness") or 0.0)
             _last_interact = float(g.get("_last_user_interaction_ts") or 0)

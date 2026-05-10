@@ -321,6 +321,14 @@ def voice_next_input(timeout: float = 300.0) -> dict:
     except Exception:
         pass
 
+    # Phase 30: surface for /api/v1/stt/result orb endpoint
+    _g["_last_stt_result"] = {
+        "ts": time.time(),
+        "text": str(result.get("text") or ""),
+        "confidence": float(result.get("confidence") or 0.0),
+        "duration_seconds": float(result.get("duration_seconds") or 0.0),
+    }
+
     return {
         "ok": True,
         "timed_out": False,

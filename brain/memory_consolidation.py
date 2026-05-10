@@ -183,13 +183,17 @@ def consolidate(g: dict[str, Any]) -> dict[str, Any]:
             "mood_snapshot": {},
         }
         try:
-            mood_file = base / "ava_mood.json"
-            if mood_file.is_file():
-                mood_data = json.loads(mood_file.read_text(encoding="utf-8"))
-                entry["mood_snapshot"] = {
-                    "primary": str(mood_data.get("current_mood") or ""),
-                    "weights": dict(mood_data.get("emotion_weights") or {}),
-                }
+            # Phase 30: prefer iris_mood, fall back to ava_mood.
+            for candidate in ("state/iris_mood.json", "ava_mood.json"):
+                mood_file = base / candidate
+                if mood_file.is_file():
+                    mood_data = json.loads(mood_file.read_text(encoding="utf-8"))
+                    if isinstance(mood_data, dict) and mood_data:
+                        entry["mood_snapshot"] = {
+                            "primary": str(mood_data.get("current_mood") or ""),
+                            "weights": dict(mood_data.get("emotion_weights") or {}),
+                        }
+                        break
         except Exception:
             pass
         with journal_path.open("a", encoding="utf-8") as f:

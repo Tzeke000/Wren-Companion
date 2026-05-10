@@ -190,10 +190,20 @@ def auto_journal_if_warranted(g: dict[str, Any], trigger: str, topic: str = "") 
     Returns entry content if written, else None.
     """
     try:
-        mood_path = Path(g.get("BASE_DIR") or ".") / "ava_mood.json"
-        if not mood_path.is_file():
+        # Phase 30: prefer iris_mood, fall back to ava_mood.
+        base = Path(g.get("BASE_DIR") or ".")
+        mood_data = None
+        for candidate in ("state/iris_mood.json", "ava_mood.json"):
+            p = base / candidate
+            if p.is_file():
+                try:
+                    mood_data = json.loads(p.read_text(encoding="utf-8"))
+                    if mood_data:
+                        break
+                except Exception:
+                    pass
+        if not mood_data:
             return None
-        mood_data = json.loads(mood_path.read_text(encoding="utf-8"))
         ew = mood_data.get("emotion_weights") or {}
         primary = str(mood_data.get("current_mood") or "neutral")
         intensity = float(ew.get(primary) or 0.0)

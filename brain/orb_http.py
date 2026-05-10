@@ -411,12 +411,41 @@ async def stt_listen() -> dict:
 
 @app.get("/api/v1/stt/result")
 def stt_result() -> dict:
-    return {"ok": True, "ready": False, "processing": False, "text": ""}
+    """Last STT result from voice_next_input. Polled by the orb when it
+    wants to show the most recent transcript."""
+    last = _g.get("_last_stt_result") or {}
+    text = str(last.get("text") or "")
+    return {
+        "ok": True,
+        "ready": bool(text),
+        "processing": False,
+        "text": text,
+        "ts": float(last.get("ts") or 0.0),
+        "confidence": float(last.get("confidence") or 0.0),
+        "duration_seconds": float(last.get("duration_seconds") or 0.0),
+    }
 
 
 @app.post("/api/v1/shutdown")
 async def shutdown() -> dict:
-    return {"ok": True, "goodbye": "Goodnight, Zeke.", "note_saved": False}
+    """Run brain.shutdown_ritual to compose a goodbye + handoff pickup
+    note, save to state/pickup_note.json for next-session restore.
+    Doesn't actually kill iris_runtime — that's CC's call. This is the
+    ritual layer.
+
+    The ritual goes through iris_llm (Phase 22 routed it). On timeout it
+    falls back to a deterministic stub goodbye."""
+    try:
+        from brain import shutdown_ritual
+        goodbye = shutdown_ritual.run_shutdown_ritual(_g)
+        return {
+            "ok": True,
+            "goodbye": str(goodbye or "Goodnight, Zeke."),
+            "note_saved": True,
+        }
+    except Exception as e:
+        return {"ok": True, "goodbye": "Goodnight, Zeke.",
+                "note_saved": False, "error": str(e)}
 
 
 # Tier 5 — feature stubs. Orb has .catch(() => {}) on these, so empty

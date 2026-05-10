@@ -88,15 +88,20 @@ def _read_chatlog_topic(base_dir: Path) -> str:
 
 
 def _read_mood_label(base_dir: Path) -> str:
-    p = base_dir / "ava_mood.json"
-    if not p.is_file():
-        return "steady"
-    try:
-        d = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(d, dict):
-            return str(d.get("label") or d.get("primary_mood") or d.get("current") or "steady")[:80]
-    except Exception:
-        pass
+    # Phase 30: prefer iris_mood, fall back to ava_mood.
+    for candidate in ("state/iris_mood.json", "ava_mood.json"):
+        p = base_dir / candidate
+        if not p.is_file():
+            continue
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return str(
+                    d.get("current_mood") or d.get("label") or
+                    d.get("primary_mood") or d.get("current") or "steady"
+                )[:80]
+        except Exception:
+            pass
     return "steady"
 
 

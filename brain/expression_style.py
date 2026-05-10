@@ -120,12 +120,19 @@ def apply_emotional_style(reply: str, g: dict[str, Any]) -> str:
         mood = ""
         mood_data = g.get("_mood_data") or {}
         if not mood_data:
-            # Try loading from file
+            # Phase 30: prefer iris_mood, fall back to ava_mood.
             from pathlib import Path
-            mood_path = Path(g.get("BASE_DIR") or ".") / "ava_mood.json"
-            if mood_path.is_file():
-                import json
-                mood_data = json.loads(mood_path.read_text(encoding="utf-8"))
+            import json
+            base = Path(g.get("BASE_DIR") or ".")
+            for candidate in ("state/iris_mood.json", "ava_mood.json"):
+                p = base / candidate
+                if p.is_file():
+                    try:
+                        mood_data = json.loads(p.read_text(encoding="utf-8"))
+                        if mood_data:
+                            break
+                    except Exception:
+                        pass
         mood = str(mood_data.get("current_mood") or "")
         if not mood:
             return reply
