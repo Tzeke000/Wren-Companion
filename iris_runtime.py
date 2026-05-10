@@ -328,6 +328,14 @@ def voice_next_input(timeout: float = 300.0) -> dict:
         "confidence": float(result.get("confidence") or 0.0),
         "duration_seconds": float(result.get("duration_seconds") or 0.0),
     }
+    # Phase 31: enqueue for batched fact extraction.
+    try:
+        from brain import iris_extraction_queue
+        user_text = str(result.get("text") or "")
+        if user_text and len(user_text.strip()) >= 4:
+            iris_extraction_queue.enqueue(user_text, person_id="zeke", modality="voice")
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -596,6 +604,15 @@ def chat_reply(request_id: str, text: str) -> dict:
                 signals = preference_learning.detect_preference_signals(user_msg)
                 if signals:
                     print(f"[post_turn] detected {len(signals)} preference signal(s)", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        # Phase 31: enqueue user turn for batched fact extraction at next
+        # inner_monologue tick. Cheap append; no LLM call here.
+        try:
+            from brain import iris_extraction_queue
+            user_msg = str((req or {}).get("user_text") or "")
+            if user_msg:
+                iris_extraction_queue.enqueue(user_msg, person_id="zeke", modality="chat")
         except Exception:
             pass
         # Phase 26: chat reply nudges mood toward engagement + fires signal.

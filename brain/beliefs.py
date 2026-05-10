@@ -52,8 +52,18 @@ SELF_LIMITS = [
     "The user's autonomy comes before my initiative.",
 ]
 
+def _default_who_i_am() -> str:
+    """Phase 31: read entity name from IDENTITY.md instead of hardcoding."""
+    try:
+        from brain.identity_loader import _detect_entity_name
+        name = _detect_entity_name()
+    except Exception:
+        name = "Ava"
+    return f"I am {name}. I am here to be present, supportive, and honest."
+
+
 DEFAULT_NARRATIVE = {
-    "who_i_am": "I am Ava. I am here to be present, supportive, and honest.",
+    "who_i_am": _default_who_i_am(),
     "how_i_feel": "I feel calm and attentive.",
     "patterns_i_notice": "I am still learning the shape of our interactions.",
     "self_limits": SELF_LIMITS,

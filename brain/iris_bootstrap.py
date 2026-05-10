@@ -95,6 +95,10 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # Counterfactual archive — what I almost said vs what I chose. Empty until used.
     _try("counterfactual_archive", lambda: _bootstrap_counterfactual_archive(g, root))
 
+    # Extraction queue — defers fact extraction from user turns to the next
+    # inner_monologue tick (single batch LLM call, not per-turn).
+    _try("iris_extraction_queue", lambda: _bootstrap_extraction_queue(g))
+
     # Inner monologue — periodic background thinking via the LLM bridge.
     # Cadence: ~15 min when there's signal to think about. Won't tick if no
     # face seen + no recent turn + no salient mood. Won't burn tokens silently.
@@ -284,6 +288,11 @@ def _bootstrap_counterfactual_archive(g: dict[str, Any], root: Path) -> None:
     from brain import counterfactual_archive
     counterfactual_archive.configure(root)
     g["_counterfactual_archive_ready"] = True
+
+
+def _bootstrap_extraction_queue(g: dict[str, Any]) -> None:
+    from brain.iris_extraction_queue import bootstrap_iris_extraction_queue
+    bootstrap_iris_extraction_queue(g)
 
 
 def _bootstrap_inner_monologue(g: dict[str, Any]) -> None:

@@ -372,6 +372,17 @@ def tick_once(g: dict[str, Any], force: bool = False) -> Optional[str]:
                      priority="low")
     except Exception:
         pass
+    # Phase 31: drain a batch of pending fact-extraction queue entries.
+    # Same CC turn that produced the thought also runs extraction — no
+    # extra turn cost.
+    try:
+        from brain import iris_extraction_queue
+        if iris_extraction_queue.pending_count() > 0:
+            stats = iris_extraction_queue.drain_one_batch(g, max_turns=8)
+            if stats.get("facts_extracted", 0) > 0:
+                print(f"[inner_monologue] extraction drain: {stats}")
+    except Exception as _ee:
+        print(f"[inner_monologue] extraction drain error: {_ee!r}")
     print(f"[inner_monologue] tick: trigger={trigger} thought={thought[:80]!r}")
     return thought
 
