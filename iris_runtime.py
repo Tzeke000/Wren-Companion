@@ -838,7 +838,12 @@ def iris_health() -> dict:
         "identity_stability": bool(_g.get("_identity_stability_ready")),
         "daily_practice": bool(_g.get("_daily_practice_ready")),
         "counterfactual_archive": bool(_g.get("_counterfactual_archive_ready")),
+        "extraction_queue": bool(_g.get("_iris_extraction_queue_ready")),
     }
+    # Surface any bootstrap failures so I can see what didn't wire.
+    failures = _g.get("_bootstrap_failures") or {}
+    if failures:
+        out["bootstrap_failures"] = dict(failures)
     # Perception
     out["perception"] = {
         "face_count": len(_g.get("_face_results") or []),

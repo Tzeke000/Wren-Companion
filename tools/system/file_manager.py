@@ -6,7 +6,10 @@ from typing import Any
 
 from tools.tool_registry import register_tool
 
-PROJECT_ROOT = Path("D:/AvaAgentv2").resolve()
+# Phase 36: module-relative repo root, not hardcoded D:/AvaAgentv2.
+# tools/system/file_manager.py is at tools/system/, so .parent.parent.parent
+# is the repo root. Works for Ava, Iris, and Wren.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _safe(path: str) -> Path:

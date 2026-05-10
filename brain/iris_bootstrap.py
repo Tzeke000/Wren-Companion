@@ -32,13 +32,18 @@ def _log(msg: str) -> None:
     print(f"[iris_bootstrap] {msg}", file=sys.stderr, flush=True)
 
 
-def _try(name: str, fn) -> bool:
-    """Run fn(); log success/failure. Returns True iff fn() didn't raise."""
+def _try(g: dict[str, Any], name: str, fn) -> bool:
+    """Run fn(); log success/failure. Captures failures into
+    g["_bootstrap_failures"] so iris_health can surface them. Returns
+    True iff fn() didn't raise."""
     try:
         fn()
         return True
     except Exception as e:
         _log(f"{name} skipped: {e!r}")
+        if "_bootstrap_failures" not in g:
+            g["_bootstrap_failures"] = {}
+        g["_bootstrap_failures"][name] = repr(e)
         return False
 
 
@@ -46,71 +51,72 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     """Hook every wireable subsystem into g. Idempotent (each module is itself
     idempotent on bootstrap). Safe to call multiple times."""
     g["BASE_DIR"] = root
+    g["_bootstrap_failures"] = {}  # reset each call
     state_dir = root / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
 
     # ── L0: paths (must come first — other modules import `paths`) ──────────
-    _try("iris_paths", lambda: _bootstrap_paths(g, root))
+    _try(g, "iris_paths", lambda: _bootstrap_paths(g, root))
 
     # ── L1: pure file-backed singletons ──────────────────────────────────────
     # Time substrate — 1Hz heartbeat thread that keeps state/iris_time.json
     # alive. Lets Iris read time-passed honestly when a session resumes.
-    _try("iris_time", lambda: _bootstrap_iris_time(g))
+    _try(g, "iris_time", lambda: _bootstrap_iris_time(g))
 
     # Mood — provides g["save_mood"], g["load_mood"], etc. that the rest of
     # brain/* expects. Must run BEFORE anything that calls them.
-    _try("mood_core", lambda: _bootstrap_mood(g))
+    _try(g, "mood_core", lambda: _bootstrap_mood(g))
 
     # Transcript + chat — already wired by iris_runtime, idempotent
-    _try("iris_transcript", lambda: _bootstrap_transcript(g, root))
-    _try("iris_chat", lambda: _bootstrap_chat(g, root))
-    _try("iris_llm", lambda: _bootstrap_iris_llm(g, root))
-    _try("iris_memory", lambda: _bootstrap_iris_memory(g))
-    _try("iris_semantic_memory", lambda: _bootstrap_iris_semantic_memory(g))
+    _try(g, "iris_transcript", lambda: _bootstrap_transcript(g, root))
+    _try(g, "iris_chat", lambda: _bootstrap_chat(g, root))
+    _try(g, "iris_llm", lambda: _bootstrap_iris_llm(g, root))
+    _try(g, "iris_memory", lambda: _bootstrap_iris_memory(g))
+    _try(g, "iris_semantic_memory", lambda: _bootstrap_iris_semantic_memory(g))
 
     # Feature flags — config layer; many other modules read this
-    _try("feature_flags", lambda: _bootstrap_feature_flags(g, root))
+    _try(g, "feature_flags", lambda: _bootstrap_feature_flags(g, root))
 
     # Skill sandbox — gates all input control; needs base_dir for audit log
-    _try("skill_sandbox", lambda: _bootstrap_skill_sandbox(g, root))
+    _try(g, "skill_sandbox", lambda: _bootstrap_skill_sandbox(g, root))
 
     # ── L2: signal bus (used by perception + heartbeat) ──────────────────────
-    _try("signal_bus", lambda: _bootstrap_signal_bus(g))
+    _try(g, "signal_bus", lambda: _bootstrap_signal_bus(g))
 
     # ── L3: relational + personhood ──────────────────────────────────────────
-    _try("anchor_moments", lambda: _bootstrap_anchor_moments(g, root))
-    _try("identity_stability", lambda: _bootstrap_identity_stability(g, root))
-    _try("connectivity", lambda: _bootstrap_connectivity(g))
-    _try("voice_mood_detector", lambda: _bootstrap_voice_mood(g))
-    _try("expression_calibrator", lambda: _bootstrap_expression_calibrator(g))
-    _try("correction_handler", lambda: _bootstrap_correction_handler(g))
-    _try("question_engine", lambda: _bootstrap_question_engine(g))
+    _try(g, "anchor_moments", lambda: _bootstrap_anchor_moments(g, root))
+    _try(g, "identity_stability", lambda: _bootstrap_identity_stability(g, root))
+    _try(g, "connectivity", lambda: _bootstrap_connectivity(g))
+    _try(g, "voice_mood_detector", lambda: _bootstrap_voice_mood(g))
+    _try(g, "expression_calibrator", lambda: _bootstrap_expression_calibrator(g))
+    _try(g, "correction_handler", lambda: _bootstrap_correction_handler(g))
+    _try(g, "question_engine", lambda: _bootstrap_question_engine(g))
 
     # App discovery — scans Start Menu / Desktop / Steam / Epic on a thread
-    _try("app_discoverer", lambda: _bootstrap_app_discoverer(g))
+    _try(g, "app_discoverer", lambda: _bootstrap_app_discoverer(g))
 
     # Daily practice — durable practices Iris keeps. Empty until I register some.
-    _try("daily_practice", lambda: _bootstrap_daily_practice(g, root))
+    _try(g, "daily_practice", lambda: _bootstrap_daily_practice(g, root))
 
     # Counterfactual archive — what I almost said vs what I chose. Empty until used.
-    _try("counterfactual_archive", lambda: _bootstrap_counterfactual_archive(g, root))
+    _try(g, "counterfactual_archive", lambda: _bootstrap_counterfactual_archive(g, root))
 
     # Extraction queue — defers fact extraction from user turns to the next
     # inner_monologue tick (single batch LLM call, not per-turn).
-    _try("iris_extraction_queue", lambda: _bootstrap_extraction_queue(g))
+    _try(g, "iris_extraction_queue", lambda: _bootstrap_extraction_queue(g))
 
     # Concept graph — semantic graph of ideas/people/topics. Loads on demand
     # from state/concept_graph.json + state/concept_edges.jsonl. Empty until
     # _extract_concepts_with_mistral / iris_llm fills it.
-    _try("concept_graph", lambda: _bootstrap_concept_graph(g, root))
+    _try(g, "concept_graph", lambda: _bootstrap_concept_graph(g, root))
 
     # Inner monologue — periodic background thinking via the LLM bridge.
     # Cadence: ~15 min when there's signal to think about. Won't tick if no
     # face seen + no recent turn + no salient mood. Won't burn tokens silently.
-    _try("iris_inner_monologue", lambda: _bootstrap_inner_monologue(g))
+    _try(g, "iris_inner_monologue", lambda: _bootstrap_inner_monologue(g))
 
     # ── L4: heartbeat + tick threads ─────────────────────────────────────────
-    _try("heartbeat_thread", lambda: _start_heartbeat_thread(g))
+    _try(g, "heartbeat_thread", lambda: _start_heartbeat_thread(g))
 
     # ── L5: HTTP shim's snapshot data exposure (read-side) ───────────────────
     # The orb_http shim is started elsewhere in iris_runtime; mood + state
