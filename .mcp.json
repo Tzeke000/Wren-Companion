@@ -3,7 +3,10 @@
     "iris": {
       "type": "stdio",
       "command": "D:\\Wren-Companion\\.venv\\Scripts\\python.exe",
-      "args": ["D:\\Wren-Companion\\iris_runtime.py"]
+      "args": ["D:\\Wren-Companion\\iris_runtime.py"],
+      "env": {
+        "AVA_STT_STREAMING": "1"
+      }
     }
   }
 }
