@@ -125,12 +125,33 @@ def snapshot() -> dict:
     conf = float(_g.get("_recognized_confidence") or 0.0)
     current_person: dict | None = None
     if pid != "unknown" and conf > 0.0:
+        # Phase 36: include fields the orb actually reads (display_name,
+        # is_zeke, time_at_machine). Track time_at_machine via
+        # _person_present_since_ts in _g.
+        present_since = float(_g.get("_person_present_since_ts") or 0.0)
+        time_at_machine = (
+            (time.time() - present_since) if present_since > 0 else 0.0
+        )
+        # Display name: try profile first, fall back to person_id capitalized.
+        display_name = pid.capitalize() if pid else "Unknown"
+        try:
+            import json as _j
+            prof_path = _root / "state" / "profiles" / f"{pid}.json"
+            if prof_path.is_file():
+                pdata = _j.loads(prof_path.read_text(encoding="utf-8"))
+                if isinstance(pdata, dict) and pdata.get("name"):
+                    display_name = str(pdata.get("name"))
+        except Exception:
+            pass
         current_person = {
             "person_id": pid,
+            "display_name": display_name,
+            "is_zeke": pid == "zeke",
             "confidence": conf,
             "age": int(_g.get("_face_age") or 0),
             "gender": str(_g.get("_face_gender") or "?"),
             "expression": str(_g.get("_current_expression") or ""),
+            "time_at_machine": int(time_at_machine),
         }
     insight = _g.get("_insight_face")
 

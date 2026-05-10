@@ -1599,21 +1599,31 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                         # Phase 26: fire signal-bus events on transitions so
                         # downstream subscribers (heartbeat, mood, journal hooks)
                         # see them. Only fire on TRANSITION, not every tick.
+                        # Phase 36: track _person_present_since_ts for
+                        # current_person.time_at_machine in orb snapshot.
                         try:
                             bus = g.get("_signal_bus")
-                            if bus is not None:
-                                cur_pid = g.get("_recognized_person_id") or "unknown"
-                                cur_face_count = len(results or [])
-                                if cur_face_count > 0 and prev_face_count == 0:
+                            cur_pid = g.get("_recognized_person_id") or "unknown"
+                            cur_face_count = len(results or [])
+                            if cur_face_count > 0 and prev_face_count == 0:
+                                # Just appeared — start the present-since clock.
+                                g["_person_present_since_ts"] = time.time()
+                                if bus is not None:
                                     bus.fire("face_appeared",
                                              data={"person_id": cur_pid,
                                                    "confidence": g.get("_recognized_confidence")},
                                              priority="medium")
-                                elif cur_face_count == 0 and prev_face_count > 0:
+                            elif cur_face_count == 0 and prev_face_count > 0:
+                                # Lost — clear the clock.
+                                g["_person_present_since_ts"] = 0.0
+                                if bus is not None:
                                     bus.fire("face_lost",
                                              data={"prior_person_id": prev_pid},
                                              priority="medium")
-                                elif cur_pid != prev_pid and cur_pid != "unknown":
+                            elif cur_pid != prev_pid and cur_pid != "unknown":
+                                # Different person — restart the clock.
+                                g["_person_present_since_ts"] = time.time()
+                                if bus is not None:
                                     bus.fire("face_changed",
                                              data={"from": prev_pid, "to": cur_pid,
                                                    "confidence": g.get("_recognized_confidence")},
