@@ -42,10 +42,36 @@ from typing import Any, Optional
 
 _BASE: Path | None = None
 _LOCK = threading.Lock()
-_TICK_INTERVAL_S = 900.0  # 15 min nominal cadence
-_MIN_INTERVAL_S = 600.0   # 10 min min between thoughts even on rich signal
-_MAX_QUIET_S = 3600.0     # never go silent for >1h while system is awake
+# Phase 43: defaults — read live from iris_tune so changes take effect
+# without restart. _DEFAULT_* preserved as fallback when tune isn't ready.
+_DEFAULT_TICK_INTERVAL_S = 900.0  # 15 min nominal cadence
+_DEFAULT_MIN_INTERVAL_S = 600.0   # 10 min min between thoughts even on rich signal
+_DEFAULT_MAX_QUIET_S = 3600.0     # never go silent for >1h while system is awake
 _TICK_THREAD_STARTED = False
+
+
+def _tick_interval_s() -> float:
+    try:
+        from brain.iris_tune import get as _tune
+        return float(_tune("cadence", "inner_monologue_interval_s", _DEFAULT_TICK_INTERVAL_S))
+    except Exception:
+        return _DEFAULT_TICK_INTERVAL_S
+
+
+def _min_interval_s() -> float:
+    try:
+        from brain.iris_tune import get as _tune
+        return float(_tune("cadence", "inner_monologue_min_interval_s", _DEFAULT_MIN_INTERVAL_S))
+    except Exception:
+        return _DEFAULT_MIN_INTERVAL_S
+
+
+def _max_quiet_s() -> float:
+    try:
+        from brain.iris_tune import get as _tune
+        return float(_tune("cadence", "inner_monologue_max_quiet_s", _DEFAULT_MAX_QUIET_S))
+    except Exception:
+        return _DEFAULT_MAX_QUIET_S
 
 
 def configure(base_dir: Path | str) -> None:
@@ -146,12 +172,12 @@ def _has_signal_to_think_about(g: dict[str, Any]) -> tuple[bool, str]:
     now = time.time()
     elapsed = now - last_ts
 
-    # Hard floor — don't tick more often than _MIN_INTERVAL_S
-    if elapsed < _MIN_INTERVAL_S:
+    # Hard floor — don't tick more often than the min interval.
+    if elapsed < _min_interval_s():
         return (False, "too_recent")
 
-    # Soft floor — if we've been totally silent for >_MAX_QUIET_S, force a tick
-    if elapsed > _MAX_QUIET_S:
+    # Soft floor — if we've been totally silent too long, force a tick.
+    if elapsed > _max_quiet_s():
         return (True, "quiet_too_long")
 
     # First thought after a long gap (resumption signal) — pre-empts other
@@ -388,7 +414,8 @@ def tick_once(g: dict[str, Any], force: bool = False) -> Optional[str]:
 
 
 def _tick_thread(g: dict[str, Any]) -> None:
-    """Background thread — runs tick_once on _TICK_INTERVAL_S cadence."""
+    """Background thread — runs tick_once on the live tune cadence so a
+    Iris's iris_tune_set call takes effect on the next sleep cycle."""
     # Wait briefly so other engines finish coming up before the first tick.
     time.sleep(60.0)
     while True:
@@ -396,7 +423,7 @@ def _tick_thread(g: dict[str, Any]) -> None:
             tick_once(g, force=False)
         except Exception as e:
             print(f"[inner_monologue] thread error: {e}")
-        time.sleep(_TICK_INTERVAL_S)
+        time.sleep(_tick_interval_s())
 
 
 def start_inner_monologue(g: dict[str, Any]) -> None:
@@ -410,7 +437,8 @@ def start_inner_monologue(g: dict[str, Any]) -> None:
             name="iris-inner-monologue",
         ).start()
         _TICK_THREAD_STARTED = True
-        print(f"[inner_monologue] tick thread started ({_TICK_INTERVAL_S/60:.0f} min cadence)")
+        interval = _tick_interval_s()
+        print(f"[inner_monologue] tick thread started ({interval/60:.0f} min cadence)")
 
 
 def bootstrap_iris_inner_monologue(g: dict[str, Any]) -> None:

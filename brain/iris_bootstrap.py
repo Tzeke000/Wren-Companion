@@ -58,6 +58,9 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # ── L0: paths (must come first — other modules import `paths`) ──────────
     _try(g, "iris_paths", lambda: _bootstrap_paths(g, root))
 
+    # Tunable knobs — load early so other bootstraps can read defaults.
+    _try(g, "iris_tune", lambda: _bootstrap_iris_tune(g))
+
     # ── L1: pure file-backed singletons ──────────────────────────────────────
     # Time substrate — 1Hz heartbeat thread that keeps state/iris_time.json
     # alive. Lets Iris read time-passed honestly when a session resumes.
@@ -92,6 +95,12 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     _try(g, "correction_handler", lambda: _bootstrap_correction_handler(g))
     _try(g, "question_engine", lambda: _bootstrap_question_engine(g))
     _try(g, "voice_command_router", lambda: _bootstrap_voice_command_router(g))
+
+    # Tool registry — Ava's hot-reload tool registry. Loads ~50 tools from
+    # tools/system, tools/web, tools/creative, tools/games. Registers them
+    # in _REGISTRY by name. Iris exposes these via the iris_tool_call MCP
+    # tool (one bridge instead of 50 wrapper decorators).
+    _try(g, "tool_registry", lambda: _bootstrap_tool_registry(g))
 
     # App discovery — scans Start Menu / Desktop / Steam / Epic on a thread
     _try(g, "app_discoverer", lambda: _bootstrap_app_discoverer(g))
@@ -144,6 +153,12 @@ def _bootstrap_paths(g: dict[str, Any], root: Path) -> None:
     from brain.iris_paths import paths
     paths.configure(root)
     g["_iris_paths_ready"] = True
+
+
+def _bootstrap_iris_tune(g: dict[str, Any]) -> None:
+    """Tunable harness knobs — runtime-mutable preferences, persisted."""
+    from brain.iris_tune import bootstrap_iris_tune
+    bootstrap_iris_tune(g)
 
 
 def _bootstrap_iris_time(g: dict[str, Any]) -> None:
@@ -300,6 +315,21 @@ def _bootstrap_voice_command_router(g: dict[str, Any]) -> None:
     Provides regex-driven CLI / phrase shortcut matching."""
     from brain.voice_commands import bootstrap_voice_command_router
     bootstrap_voice_command_router(g)
+
+
+def _bootstrap_tool_registry(g: dict[str, Any]) -> None:
+    """Load Ava's hot-reload tool registry. Each tool file in tools/* gets
+    imported, register_tool() calls populate the registry. Iris invokes
+    them via mcp__iris__iris_tool_call(name, params)."""
+    from tools import tool_registry
+    tool_registry.load_builtin_tools()
+    g["_tool_registry_ready"] = True
+    # Stash a snapshot count so iris_health can show how many tools loaded.
+    try:
+        from tools.tool_registry import _REGISTRY
+        g["_tool_registry_count"] = len(_REGISTRY)
+    except Exception:
+        g["_tool_registry_count"] = 0
 
 
 def _bootstrap_app_discoverer(g: dict[str, Any]) -> None:

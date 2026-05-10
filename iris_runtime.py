@@ -766,6 +766,126 @@ def signals_recent(signal_type: str = "", since_seconds: float = 60.0) -> dict:
 
 
 @mcp.tool()
+def iris_tune_list() -> dict:
+    """Show every tunable harness knob with current value, default, and
+    whether it's been overridden. Categories: cadence, thresholds, voice,
+    perception, behavior, identity.
+
+    Use to see what's adjustable. Then iris_tune_set(category, key, value)
+    to change a knob — persisted to state/iris_tune.json across restarts."""
+    try:
+        from brain import iris_tune
+        return {"ok": True, "tune": iris_tune.list_all()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def iris_tune_set(category: str, key: str, value: object) -> dict:
+    """Adjust a harness knob. Validates the key exists in defaults; coerces
+    value to the default's type. Persists to state/iris_tune.json.
+
+    Examples (Iris fine-tuning herself):
+      iris_tune_set("cadence", "inner_monologue_interval_s", 600)
+        → tick every 10min instead of 15
+      iris_tune_set("behavior", "auto_engage_on_face", True)
+        → enable proactive greetings
+      iris_tune_set("thresholds", "salient_emotion_floor", 0.10)
+        → surface salient emotions sooner
+      iris_tune_set("voice", "filler_enabled", False)
+        → no filler audio while I think
+    """
+    try:
+        from brain import iris_tune
+        return iris_tune.set_(category, key, value)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def iris_tune_reset(category: str = "", key: str = "") -> dict:
+    """Reset tunable knobs to defaults. No args = reset everything.
+    category only = reset that category. category+key = reset just one."""
+    try:
+        from brain import iris_tune
+        return iris_tune.reset(
+            category=category if category else None,
+            key=key if key else None,
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def iris_tool_list(tier_max: int = 3) -> dict:
+    """List every tool in the hot-reload registry (tools/system, tools/web,
+    tools/creative, tools/games). Each entry: name, description, tier.
+    Tier 1 = read-only/safe. Tier 2 = mutating (verbal check-in).
+    Tier 3 = explicit external action.
+
+    Use to discover what's available before calling iris_tool_call."""
+    try:
+        from tools.tool_registry import _REGISTRY
+        out = []
+        for name, td in sorted(_REGISTRY.items()):
+            if td.tier > int(tier_max):
+                continue
+            out.append({
+                "name": td.name,
+                "description": td.description[:240],
+                "tier": td.tier,
+            })
+        return {"ok": True, "count": len(out), "tools": out}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def iris_tool_call(name: str, params: dict | None = None) -> dict:
+    """Invoke any tool from the registry by name. Single bridge for ~50
+    tools instead of 50 wrapper decorators.
+
+    Examples:
+      iris_tool_call("get_active_window")
+      iris_tool_call("type_text", {"text": "hello"})
+      iris_tool_call("press_key", {"key": "ctrl+t"})
+      iris_tool_call("get_gpu_usage")
+      iris_tool_call("list_processes", {"limit": 30})
+      iris_tool_call("get_browser_url")
+      iris_tool_call("read_file", {"path": "..."})
+
+    Tier 2+ tools may run safety/sandbox checks. Discover tools via
+    iris_tool_list."""
+    try:
+        from tools.tool_registry import _REGISTRY
+        td = _REGISTRY.get(str(name))
+        if td is None:
+            return {"ok": False, "error": f"no tool named {name!r}"}
+        try:
+            result = td.handler(dict(params or {}), _g)
+            if isinstance(result, dict):
+                return {"ok": True, "tool": name, "result": result}
+            return {"ok": True, "tool": name, "result": {"value": result}}
+        except Exception as e:
+            return {"ok": False, "tool": name, "error": f"handler error: {e!r}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def iris_tool_reload() -> dict:
+    """Re-scan tools/ and reload any changed files. Hot-reload. Useful
+    when I want to add/edit a tool mid-session — drop a new .py in
+    tools/system/ and call this."""
+    try:
+        from tools.tool_registry import reload_all_tools, _REGISTRY
+        log = reload_all_tools()
+        return {"ok": True, "tools_loaded": len(_REGISTRY), "reload_log": log[-20:]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def time_awareness() -> dict:
     """Return Iris's structured time-awareness — body uptime, gap since
     last session attached, ticks counted, evidence of activity during gaps,
