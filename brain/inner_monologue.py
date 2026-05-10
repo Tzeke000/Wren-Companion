@@ -254,20 +254,35 @@ def current_thought(base_dir: Path) -> str | None:
     with _LOCK:
         st = load_state(base_dir)
     rows = list(st.get("thoughts") or [])
-    if not rows:
+    if rows:
+        last = rows[-1]
+        ts = float(last.get("ts") or 0.0)
+        if time.time() - ts <= 30 * 60:
+            txt = str(last.get("thought") or "").strip()
+            if txt:
+                return txt
+    # Phase 32: fall through to iris_inner_monologue (the Iris-side
+    # cadenced thinker writes to state/iris_inner_monologue.jsonl). Lets
+    # any consumer that imports brain.inner_monologue.current_thought
+    # see Iris's thoughts without code change.
+    try:
+        from brain.iris_inner_monologue import current_thought as _iris_ct
+        return _iris_ct(g=None)
+    except Exception:
         return None
-    last = rows[-1]
-    ts = float(last.get("ts") or 0.0)
-    if time.time() - ts > 30 * 60:
-        return None
-    txt = str(last.get("thought") or "").strip()
-    return txt or None
 
 
 def thought_count(base_dir: Path) -> int:
     with _LOCK:
         st = load_state(base_dir)
-    return len(list(st.get("thoughts") or []))
+    n = len(list(st.get("thoughts") or []))
+    # Phase 32: also count iris_inner_monologue entries.
+    try:
+        from brain.iris_inner_monologue import recent_thoughts
+        n += len(recent_thoughts(n=10000))
+    except Exception:
+        pass
+    return n
 
 
 def get_conversation_starter(base_dir: Path, *, idle_seconds: float) -> str | None:

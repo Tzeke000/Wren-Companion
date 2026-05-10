@@ -196,6 +196,16 @@ def _bootstrap_iris_memory(g: dict[str, Any]) -> None:
         return rows[:limit]
 
     def _search_memories(query, person_id=None, k=5, **kwargs):
+        # Phase 32: prefer semantic search via Chroma (better recall),
+        # fall back to substring on iris_memory if semantic isn't ready.
+        try:
+            from brain import iris_semantic_memory
+            if g.get("_iris_semantic_memory_ready"):
+                rows = iris_semantic_memory.search(query, k=k, person_id=person_id)
+                if rows:
+                    return rows[:k]
+        except Exception:
+            pass
         rows = mem.search(query, limit=k)
         if person_id:
             rows = [r for r in rows if r.get("person_id") == person_id]
