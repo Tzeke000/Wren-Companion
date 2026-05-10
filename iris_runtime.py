@@ -299,6 +299,19 @@ def voice_next_input(timeout: float = 300.0) -> dict:
             "note": "wake fired but no speech captured",
         }
 
+    # Phase 4 — append the captured user utterance to the shared transcript so
+    # the orb's chat history view shows voice turns alongside chat turns.
+    try:
+        from brain import iris_transcript
+        iris_transcript.append(
+            role="user",
+            content=str(result.get("text") or ""),
+            source="zeke",
+            modality="voice",
+        )
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "timed_out": False,
@@ -405,7 +418,68 @@ def voice_say_chunk(text: str, emotion: str = "neutral", intensity: float = 0.5)
     _ensure_say_worker()
     depth_before = _say_queue.qsize()
     _say_queue.put((text, emotion, intensity))
+    # Phase 4 — log this chunk to the shared transcript. The orb groups by
+    # adjacent role+source so multi-chunk replies render as one bubble.
+    try:
+        from brain import iris_transcript
+        iris_transcript.append(
+            role="assistant",
+            content=text,
+            source="iris",
+            modality="voice",
+        )
+    except Exception:
+        pass
     return {"ok": True, "queue_depth": depth_before}
+
+
+@mcp.tool()
+def chat_reply(request_id: str, text: str) -> dict:
+    """Answer a pending chat request from the orb (Phase 4).
+
+    The orb's POST /api/v1/chat is long-polling on disk for the response file
+    to flip to status=answered. Calling this tool writes that file and unblocks
+    the HTTP request. Also appends the user message and the reply to the
+    shared transcript (state/transcript.jsonl) so the orb's history view
+    stays unified across voice and chat modalities.
+
+    Use this when a system-reminder tells you a chat request is pending —
+    the rewake message includes the request_id and user_text. Generate one
+    response and pass it here as plain text (no markdown ceremony — the orb
+    renders monospace).
+
+    Args:
+        request_id: From the rewake system-reminder.
+        text: Your full reply.
+
+    Returns:
+        {ok, request_id} on success, {ok: False, error} if the request was
+        not found or already answered.
+    """
+    if not request_id or not str(request_id).strip():
+        return {"ok": False, "error": "empty request_id"}
+    if not text or not str(text).strip():
+        return {"ok": False, "error": "empty text"}
+    try:
+        from brain import iris_chat as _ic
+        from brain import iris_transcript as _it
+        # If the request still has pending status, log the user side first
+        # (we may not have logged it earlier — submit() doesn't write to the
+        # transcript, so chat turns appear together when iris answers).
+        req = _ic.get(str(request_id))
+        if req and req.get("status") == "pending":
+            user_text = str(req.get("user_text") or "")
+            if user_text:
+                _it.append(role="user", content=user_text,
+                           source="zeke", modality="chat")
+        ok = _ic.mark_answered(str(request_id), str(text))
+        if not ok:
+            return {"ok": False, "error": "request not found or already answered"}
+        _it.append(role="assistant", content=str(text),
+                   source="iris", modality="chat")
+        return {"ok": True, "request_id": str(request_id)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @mcp.tool()
@@ -715,6 +789,17 @@ def _eager_init_engines() -> None:
             print("[iris_runtime] journal ready (state/journal.jsonl)", file=sys.stderr, flush=True)
         except Exception as _je:
             print(f"[iris_runtime] journal dir setup failed: {_je!r}", file=sys.stderr, flush=True)
+
+        # Phase 4 — chat + shared transcript. Configure the on-disk paths so
+        # all writers (HTTP shim, voice tools, chat_reply) hit the same files.
+        try:
+            from brain import iris_transcript as _it
+            from brain import iris_chat as _ic
+            _it.configure(ROOT)
+            _ic.configure(ROOT)
+            print("[iris_runtime] chat + transcript ready", file=sys.stderr, flush=True)
+        except Exception as _ce:
+            print(f"[iris_runtime] chat setup failed: {_ce!r}", file=sys.stderr, flush=True)
 
         # Filler audio clips — pre-rendered Kokoro phrases played via direct
         # sounddevice on the voice_next_input return path. Perceived-latency

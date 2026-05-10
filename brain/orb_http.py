@@ -175,25 +175,61 @@ async def identity_proposals_approve() -> dict:
     return {"ok": True}
 
 
-# Tier 2 — chat (stub: brain not wired yet)
+# Tier 2 — chat (Phase 4) — cross-process bridge to Iris's CC session.
 @app.get("/api/v1/chat/history")
 def chat_history() -> dict:
-    return {"ok": True, "messages": list(_chat_history)}
+    """Reads the shared transcript (state/transcript.jsonl) so voice and chat
+    turns appear in one stream."""
+    try:
+        from brain import iris_transcript
+        rows = iris_transcript.recent(n=200)
+        # Project to the orb's expected shape: role + content + source.
+        messages = [
+            {
+                "role": e.get("role"),
+                "content": e.get("content"),
+                "source": e.get("source"),
+                "modality": e.get("modality"),
+                "ts": e.get("ts"),
+            }
+            for e in rows
+        ]
+        return {"ok": True, "messages": messages}
+    except Exception as e:
+        return {"ok": False, "messages": [], "error": str(e)}
 
 
 @app.post("/api/v1/chat")
 async def chat(payload: dict | None = None) -> dict:
-    msg = (payload or {}).get("message", "")
-    _chat_history.append({"role": "user", "content": str(msg), "source": "zeke"})
-    reply = (
-        "I'm online but the brain isn't wired to the orb chat yet — "
-        "talk to me through voice (say hey jarvis) for now."
-    )
-    _chat_history.append({"role": "assistant", "content": reply, "source": "iris"})
-    # Keep history bounded.
-    if len(_chat_history) > 200:
-        del _chat_history[: len(_chat_history) - 200]
-    return {"ok": True, "reply": reply, "engine": "stub"}
+    """Submit a chat request, then long-poll up to 60s for Iris to answer
+    via mcp__iris__chat_reply. Iris's CC session sees the pending request
+    via the Stop hook and rewakes to handle it."""
+    msg = str((payload or {}).get("message") or "").strip()
+    if not msg:
+        return {"ok": False, "error": "empty message"}
+    try:
+        from brain import iris_chat
+        request_id = iris_chat.submit(msg)
+        # Run wait_for_reply on a worker thread — it polls disk for up to 60s.
+        loop = asyncio.get_event_loop()
+        reply = await loop.run_in_executor(
+            None, iris_chat.wait_for_reply, request_id, 60.0
+        )
+        if reply is None:
+            return {
+                "ok": False,
+                "request_id": request_id,
+                "error": "timeout — Iris did not answer within 60s",
+                "engine": "iris-cc",
+            }
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "reply": reply,
+            "engine": "iris-cc",
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # Tier 2 — connectivity

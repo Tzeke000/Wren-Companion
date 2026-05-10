@@ -1,23 +1,29 @@
-"""Claude Code Stop hook -> Kokoro TTS bridge.
+"""Claude Code Stop hook -> Iris bridge.
 
-Fires after every assistant turn ends. Only acts when D:\\Wren-Companion\\.tmp\\
-voice_session.flag exists (the guard so text-only replies aren't spoken).
+Fires after every assistant turn ends. Decides whether to rewake the model,
+and what to tell it via the rewake message. Two triggers:
 
-Reads the CC session transcript (JSONL, one message per line), grabs the last
-assistant message's text content blocks (ignoring tool_use blocks), strips
-basic markdown, and POSTs to the iris_runtime orb_http shim's
-/api/v1/tts/speak endpoint. The shim then drives Kokoro CUDA in a daemon
-thread.
+1. **Voice mode** — D:\\Wren-Companion\\.tmp\\voice_session.flag exists.
+   Reads the last assistant text block, POSTs it to Kokoro for TTS, then
+   rewakes with the voice-loop directive.
 
-Settings.json registers this with `asyncRewake: true`. After the hook POSTs
-the reply to Kokoro, it exits code 2 to rewake the model into a fresh CC
-turn with a system-reminder telling it to call mcp__iris__voice_next_input
-again. That creates the voice loop without the model ever needing to call
-voice_speak — every voice reply goes through this hook.
+2. **Pending chat request** — state/iris_chat/.pending exists. Rewakes with
+   a chat-handle directive that includes the request_id and user_text. The
+   model calls chat_reply(id, text) which writes the response file and
+   unblocks the orb's POST /api/v1/chat long-poll. No TTS — chat is text.
+
+If both are active, **chat goes first** (FIFO across modalities). After
+answering chat, the next Stop fires with voice still flagged and resumes
+the voice loop.
+
+If neither is active, exit 0 (no rewake — return to manual control).
+
+Settings.json registers this with `asyncRewake: true`. Exit code 2 carries
+the rewake message via stdout.
 
 Exit codes:
-  0 — flag absent (voice mode off) OR error path (don't loop on failure)
-  2 — flag present AND text was spoken (or skipped via dedup) — rewake loop
+  0 — neither voice nor chat active OR error path (don't loop on failure)
+  2 — rewake — message printed to stdout
 """
 from __future__ import annotations
 
@@ -28,10 +34,14 @@ import sys
 from pathlib import Path
 from urllib import request as _req
 
-FLAG = Path(r"D:\Wren-Companion\.tmp\voice_session.flag")
+ROOT = Path(r"D:\Wren-Companion")
+VOICE_FLAG = ROOT / ".tmp" / "voice_session.flag"
+CHAT_PENDING_FLAG = ROOT / "state" / "iris_chat" / ".pending"
+CHAT_DIR = ROOT / "state" / "iris_chat"
+
 TTS_URL = "http://127.0.0.1:5876/api/v1/tts/speak"
 HTTP_TIMEOUT_S = 2.0
-LAST_SPOKEN_PATH = Path(r"D:\Wren-Companion\.tmp\last_spoken_uuid.txt")
+LAST_SPOKEN_PATH = ROOT / ".tmp" / "last_spoken_uuid.txt"
 
 
 def _strip_markdown(text: str) -> str:
@@ -48,13 +58,6 @@ def _strip_markdown(text: str) -> str:
 
 
 def _last_assistant_text(transcript_path: str) -> tuple[str, str]:
-    """Return (uuid, joined_text) of the most recent assistant message in
-    the transcript that contains at least one text block. Walks the file in
-    reverse so trailing tool_use-only entries (mid-turn artifacts) are
-    skipped — Stop would normally fire after a text reply, but defensive
-    against edge cases (compact, rewind, subagent stop).
-    Returns ("", "") if no text-bearing entry found.
-    """
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
             entries = [ln for ln in f if ln.strip()]
@@ -85,7 +88,32 @@ def _last_assistant_text(transcript_path: str) -> tuple[str, str]:
     return "", ""
 
 
-_REWAKE_MSG = (
+def _next_pending_chat() -> dict | None:
+    """Return the OLDEST pending chat request (FIFO across modalities), or None."""
+    if not CHAT_DIR.exists():
+        return None
+    candidates: list[tuple[float, dict]] = []
+    import time as _t
+    for path in CHAT_DIR.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("status") != "pending":
+            continue
+        ts = float(data.get("ts") or 0.0)
+        if (_t.time() - ts) > 300.0:
+            continue
+        candidates.append((ts, data))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda kv: kv[0])
+    return candidates[0][1]
+
+
+_VOICE_REWAKE = (
     "Voice mode active. Call mcp__iris__voice_next_input(timeout=300) to "
     "listen for the next utterance. Then reply by calling "
     "mcp__iris__voice_say_chunk(text=...) ONCE PER SENTENCE as you generate "
@@ -98,59 +126,84 @@ _REWAKE_MSG = (
 )
 
 
+def _chat_rewake(req: dict) -> str:
+    rid = str(req.get("id") or "")
+    user_text = str(req.get("user_text") or "").replace('"', "'")[:1500]
+    return (
+        f"Pending chat request from the orb (request_id={rid!r}).\n"
+        f"User said: \"{user_text}\"\n\n"
+        "Generate ONE response and call mcp__iris__chat_reply(request_id, text) "
+        "with your full reply as plain text — that tool writes the response "
+        "file and unblocks the orb's HTTP long-poll. Do NOT emit plain text "
+        "outside the tool call; the orb only sees what chat_reply receives. "
+        "Keep your reply conversational; the orb renders it monospace, no "
+        "markdown ceremony needed. After chat_reply returns, just stop — if "
+        "more chat requests are pending or voice mode is active, the next "
+        "rewake will tell you."
+    )
+
+
 def main() -> int:
-    if not FLAG.exists():
-        return 0  # voice mode off — no TTS, no rewake
+    voice_on = VOICE_FLAG.exists()
+    pending_chat = _next_pending_chat()
+
+    if not voice_on and not pending_chat:
+        return 0  # nothing to do
 
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return 0
-
     transcript_path = payload.get("transcript_path")
-    if not transcript_path or not os.path.exists(transcript_path):
-        return 0
 
-    last_uuid, raw_text = _last_assistant_text(transcript_path)
-    text = _strip_markdown(raw_text) if raw_text else ""
-
-    # Idempotency — Stop can fire twice per logical turn (rewinds, subagent
-    # stops). Skip the TTS POST if we already spoke this uuid, but still
-    # rewake so the loop continues.
-    already_spoken = False
-    try:
-        if LAST_SPOKEN_PATH.exists():
-            prev = LAST_SPOKEN_PATH.read_text(encoding="utf-8").strip()
-            if prev and prev == last_uuid:
-                already_spoken = True
-    except Exception:
-        pass
-
-    if text and not already_spoken:
+    # Voice TTS leg — fires when voice mode is on, regardless of whether a
+    # chat request also queued. We speak the last assistant *text* turn (which
+    # is the last manual-text reply, not a tool-call-only reply). Idempotent
+    # via uuid dedup so multi-Stop-fire turns don't double-speak.
+    if voice_on and transcript_path and os.path.exists(transcript_path):
+        last_uuid, raw_text = _last_assistant_text(transcript_path)
+        text = _strip_markdown(raw_text) if raw_text else ""
+        already_spoken = False
         try:
-            body = json.dumps({"text": text}).encode("utf-8")
-            req = _req.Request(
-                TTS_URL,
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with _req.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
-                resp.read()
-            try:
-                LAST_SPOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-                LAST_SPOKEN_PATH.write_text(last_uuid, encoding="utf-8")
-            except Exception:
-                pass
+            if LAST_SPOKEN_PATH.exists():
+                prev = LAST_SPOKEN_PATH.read_text(encoding="utf-8").strip()
+                if prev and prev == last_uuid:
+                    already_spoken = True
         except Exception:
-            # TTS endpoint unreachable (iris_runtime down). Don't rewake — that
-            # would loop calls into a broken state. Treat as voice-mode-off.
-            return 0
+            pass
+        if text and not already_spoken:
+            try:
+                body = json.dumps({"text": text}).encode("utf-8")
+                req = _req.Request(
+                    TTS_URL,
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with _req.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
+                    resp.read()
+                try:
+                    LAST_SPOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    LAST_SPOKEN_PATH.write_text(last_uuid, encoding="utf-8")
+                except Exception:
+                    pass
+            except Exception:
+                # TTS endpoint unreachable — don't rewake into a broken state.
+                if not pending_chat:
+                    return 0
 
-    # Print the rewake hint to stdout so it lands in the system-reminder body
-    # when CC handles exit code 2 -> asyncRewake.
-    print(_REWAKE_MSG, flush=True)
-    return 2
+    # Chat takes priority over voice when both are active. Rationale: the
+    # orb is HTTP-blocked waiting on us; voice can re-poll on the next loop.
+    if pending_chat:
+        print(_chat_rewake(pending_chat), flush=True)
+        return 2
+
+    # Voice-only path
+    if voice_on:
+        print(_VOICE_REWAKE, flush=True)
+        return 2
+
+    return 0
 
 
 if __name__ == "__main__":
