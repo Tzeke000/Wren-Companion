@@ -263,7 +263,21 @@ def voice_next_input(timeout: float = 300.0) -> dict:
     # (2026-05-09 voice test). silence_seconds dropped 2.0 -> 0.8 to shave ~1.2s
     # off every reply's perceived latency. Per Zeke's spec: listen as long as
     # he's speaking, not on a fixed timer.
-    result = stt.listen_session(max_seconds=60.0, silence_seconds=0.8)
+    #
+    # Lever 4: if AVA_STT_STREAMING=1, use WhisperLiveKit incremental decoder
+    # so transcript starts emerging while Zeke is still speaking. Falls back
+    # to single-shot listen_session() on any failure (returns None).
+    result = None
+    if os.environ.get("AVA_STT_STREAMING", "").strip() == "1":
+        try:
+            result = stt.listen_session_streaming(max_seconds=60.0, silence_seconds=0.8)
+            if result is None:
+                print("[voice_next_input] streaming returned None — falling back to single-shot", file=sys.stderr, flush=True)
+        except Exception as _se:
+            print(f"[voice_next_input] streaming error: {_se!r} — falling back", file=sys.stderr, flush=True)
+            result = None
+    if result is None:
+        result = stt.listen_session(max_seconds=60.0, silence_seconds=0.8)
 
     # Filler audio cover — fires the moment STT finishes, before this tool
     # call returns to Claude Code. Audio plays during CC's turn-startup +

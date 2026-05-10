@@ -16,6 +16,10 @@ class STTEngine:
         self._lock = threading.Lock()
         self._vad_model: Any = None
         self._vad_available: bool = False
+        # WhisperLiveKit streaming engine (lazy, gated by AVA_STT_STREAMING=1).
+        # Singleton — once built, reused for every listen_session_streaming call.
+        self._wlk_engine: Any = None
+        self._wlk_init_attempted: bool = False
         self._init_model()
         self._init_vad()
 
@@ -408,3 +412,281 @@ class STTEngine:
             return None
         text = str(r.get("text") or "").strip().lower()
         return text or None
+
+    # ── streaming (Lever 4 — WhisperLiveKit + LocalAgreement-2) ────
+
+    def _ensure_wlk_engine(self) -> Any:
+        """Lazy-build the WhisperLiveKit TranscriptionEngine. Singleton — once
+        built it can't be reconfigured (WLK enforces this internally). Heavy:
+        loads its own copy of distil-large-v3 weights, separate from
+        self._model. Returns None on failure (caller should fall back)."""
+        if self._wlk_engine is not None:
+            return self._wlk_engine
+        if self._wlk_init_attempted:
+            return None
+        self._wlk_init_attempted = True
+        try:
+            import os as _os
+            from whisperlivekit import WhisperLiveKitConfig, TranscriptionEngine
+            # WLK validates model_size against its own list — distil-large-v3
+            # is rejected by simulstreaming backend. AVA_WLK_MODEL lets us pin
+            # a WLK-compatible model independent of the AVA_STT_MODEL used by
+            # the single-shot faster-whisper path.
+            cfg = WhisperLiveKitConfig(
+                model_size=_os.environ.get("AVA_WLK_MODEL", "large-v3-turbo"),
+                backend="auto",
+                vac=True,
+                vad=False,
+                pcm_input=True,
+                min_chunk_size=0.1,
+                model_cache_dir=_os.environ.get("HF_HOME") or None,
+                transcription=True,
+                diarization=False,
+                lan="en",
+                target_language="",
+            )
+            self._wlk_engine = TranscriptionEngine(config=cfg)
+            print(f"[stt_engine] WhisperLiveKit engine ready (model={cfg.model_size})")
+            return self._wlk_engine
+        except Exception as e:
+            print(f"[stt_engine] WhisperLiveKit init failed: {e!r}")
+            self._wlk_engine = None
+            return None
+
+    def listen_session_streaming(
+        self,
+        max_seconds: float = 60.0,
+        silence_seconds: float = 0.8,
+        sample_rate: int = 16000,
+        rms_threshold: float = 0.008,
+    ) -> dict | None:
+        """Streaming variant of listen_session using WhisperLiveKit's
+        LocalAgreement-2 incremental decoder. Captures live PCM, ships it to
+        WLK in 100ms chunks, runs Silero VAD inline to detect EOU. On EOU:
+        flushes WLK and returns the final committed transcript.
+
+        Returns dict same shape as listen_session: {text, confidence,
+        duration_seconds, speech_detected}, or None on hard failure (caller
+        should fall back to listen_session).
+        """
+        if not self.is_available():
+            return None
+        engine = self._ensure_wlk_engine()
+        if engine is None:
+            return None
+
+        import asyncio
+        import numpy as np
+        import sounddevice as sd
+        from whisperlivekit import AudioProcessor
+
+        BLOCK = int(sample_rate * 0.1)  # 100ms
+        # Mailbox shared between the audio callback (sounddevice thread) and
+        # the asyncio loop thread. callback pushes int16 bytes; loop thread
+        # forwards to processor.process_audio().
+        pcm_q: "_queue_mod.Queue[bytes]" = _queue_mod_sentinel()
+        # Mailbox for accumulated transcription state from create_tasks().
+        result_holder: dict = {"lines": [], "buffer": "", "error": None}
+        # Mailbox for raw audio so we can run Silero post-hoc as a sanity
+        # check on no-speech detections.
+        raw_audio_chunks: list = []
+
+        speech_started = False
+        last_speech_t: float | None = None
+        t0 = time.monotonic()
+        stop_requested = threading.Event()
+
+        def _audio_callback(indata, frames, time_info, status):
+            nonlocal speech_started, last_speech_t
+            # indata for RawInputStream is a cffi buffer of raw bytes.
+            raw_bytes = bytes(indata)
+            arr = np.frombuffer(raw_bytes, dtype=np.int16)
+            raw_audio_chunks.append(arr.copy())
+            rms = float(np.sqrt(np.mean((arr.astype(np.float32) / 32768.0) ** 2)))
+            now = time.monotonic()
+            if rms > rms_threshold:
+                speech_started = True
+                last_speech_t = now
+            elif speech_started and last_speech_t is not None:
+                if (now - last_speech_t) >= silence_seconds:
+                    stop_requested.set()
+            if (now - t0) >= max_seconds:
+                stop_requested.set()
+            try:
+                pcm_q.put_nowait(raw_bytes)
+            except Exception:
+                pass
+
+        # Run the async pipeline in a worker thread with its own event loop.
+        # We bridge the sounddevice callback (sync) into the loop via the
+        # pcm_q mailbox.
+        def _async_worker() -> None:
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(_run_pipeline())
+                finally:
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+            except Exception as e:
+                result_holder["error"] = repr(e)
+
+        async def _run_pipeline() -> None:
+            processor = AudioProcessor(transcription_engine=engine)
+            # create_tasks is `async def` returning an AsyncGenerator — must
+            # await the call to get the generator object, THEN async-for it.
+            results_gen = await processor.create_tasks()
+
+            async def _consume_results():
+                try:
+                    async for front in results_gen:
+                        # front.lines is list[Segment]; commit accumulator.
+                        try:
+                            committed = " ".join(
+                                (seg.text or "").strip()
+                                for seg in (front.lines or [])
+                                if getattr(seg, "text", None)
+                            ).strip()
+                            buffer_text = (front.buffer_transcription or "").strip()
+                            result_holder["lines"] = committed
+                            result_holder["buffer"] = buffer_text
+                        except Exception:
+                            continue
+                except Exception as e:
+                    result_holder["error"] = f"consumer: {e!r}"
+
+            consumer_task = asyncio.create_task(_consume_results())
+
+            async def _feed_pcm():
+                while not stop_requested.is_set():
+                    try:
+                        chunk = pcm_q.get(timeout=0.1)
+                    except Exception:
+                        await asyncio.sleep(0)
+                        continue
+                    try:
+                        await processor.process_audio(chunk)
+                    except Exception as e:
+                        result_holder["error"] = f"feed: {e!r}"
+                        return
+                    await asyncio.sleep(0)
+
+            feeder_task = asyncio.create_task(_feed_pcm())
+
+            # Park until stop_requested fires (Silero EOU or max timeout).
+            while not stop_requested.is_set():
+                await asyncio.sleep(0.05)
+
+            # Drain remaining PCM in the queue, then send empty to flush.
+            try:
+                while True:
+                    chunk = pcm_q.get_nowait()
+                    await processor.process_audio(chunk)
+            except Exception:
+                pass
+            try:
+                await processor.process_audio(b"")
+            except Exception:
+                pass
+
+            # Wait briefly for the consumer to drain final results.
+            try:
+                await asyncio.wait_for(consumer_task, timeout=3.0)
+            except asyncio.TimeoutError:
+                consumer_task.cancel()
+            except Exception:
+                pass
+            try:
+                feeder_task.cancel()
+            except Exception:
+                pass
+            try:
+                await processor.cleanup()
+            except Exception:
+                pass
+
+        worker = threading.Thread(target=_async_worker, daemon=True, name="stt-streaming")
+        worker.start()
+
+        with self._lock:
+            try:
+                stream = sd.RawInputStream(
+                    samplerate=sample_rate,
+                    channels=1,
+                    dtype="int16",
+                    blocksize=BLOCK,
+                    callback=_audio_callback,
+                )
+                stream.start()
+                self._backend = f"whisperlivekit-streaming"
+                # Wait until stop_requested fires (callback drives it) OR
+                # max_seconds, whichever first.
+                deadline = t0 + max_seconds
+                while not stop_requested.is_set() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                stream.stop()
+                stream.close()
+            except Exception as e:
+                print(f"[stt_engine] streaming capture error: {e!r}")
+                stop_requested.set()
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+
+        # Tell worker to stop and let it drain.
+        stop_requested.set()
+        worker.join(timeout=5.0)
+
+        # Compose final text: committed lines + any leftover buffer.
+        final_text = result_holder.get("lines") or ""
+        leftover = result_holder.get("buffer") or ""
+        if leftover and leftover not in final_text:
+            final_text = (final_text + " " + leftover).strip()
+        final_text = self._normalize_transcript(final_text).strip()
+
+        # Compute duration + speech_detected from captured raw audio.
+        duration = 0.0
+        speech_detected = False
+        try:
+            if raw_audio_chunks:
+                full = np.concatenate(raw_audio_chunks).astype(np.float32) / 32768.0
+                duration = float(len(full) / sample_rate)
+                speech_detected = self._has_speech(full, sample_rate, rms_threshold)
+        except Exception:
+            pass
+
+        if not speech_detected and not final_text:
+            return {
+                "text": None,
+                "confidence": 0.0,
+                "duration_seconds": duration,
+                "speech_detected": False,
+            }
+        if not final_text:
+            # Speech detected but WLK produced nothing — fall back to None
+            # so caller can choose to retry with single-shot.
+            return None
+        if result_holder.get("error"):
+            print(f"[stt_engine] streaming had error (returning best-effort): {result_holder['error']}")
+
+        return {
+            "text": final_text,
+            "confidence": 0.85,  # WLK doesn't expose avg_logprob; placeholder
+            "duration_seconds": duration,
+            "speech_detected": True,
+        }
+
+
+# ── module-level helper: shared queue used by streaming path ────────────────
+
+def _queue_mod_sentinel():
+    """Build a fresh thread-safe queue (Queue is not at module top to avoid
+    polluting the existing namespace; this isolates it inside the streaming
+    code path)."""
+    import queue as _q
+    return _q.Queue()
