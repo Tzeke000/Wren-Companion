@@ -647,11 +647,42 @@ async def emil_send() -> dict:
 
 @app.get("/api/v1/ui/tab")
 def ui_tab() -> dict:
+    """Optionally let the backend suggest which tab the orb should open.
+    State at state/orb_active_tab.txt — Iris can write to it via the
+    orb_focus_tab MCP tool when she wants to direct attention."""
+    p = _root / "state" / "orb_active_tab.txt"
+    if p.is_file():
+        try:
+            tab = p.read_text(encoding="utf-8").strip() or None
+            return {"tab": tab}
+        except Exception:
+            pass
     return {"tab": None}
+
+
+@app.post("/api/v1/ui/tab")
+async def ui_tab_set(payload: dict = Body(default={})) -> dict:
+    """Iris's setter — call when she wants the orb to switch tab."""
+    tab = str(payload.get("tab") or "").strip()
+    p = _root / "state" / "orb_active_tab.txt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(tab, encoding="utf-8")
+    return {"ok": True, "tab": tab}
 
 
 @app.get("/api/v1/ui/custom_tabs")
 def ui_custom_tabs() -> dict:
+    """Custom tabs from state/orb_custom_tabs.json — Iris can register
+    her own tabs that show iframes or arbitrary content."""
+    p = _root / "state" / "orb_custom_tabs.json"
+    if p.is_file():
+        try:
+            import json as _j
+            tabs = _j.loads(p.read_text(encoding="utf-8"))
+            if isinstance(tabs, list):
+                return {"ok": True, "tabs": tabs}
+        except Exception:
+            pass
     return {"ok": True, "tabs": []}
 
 

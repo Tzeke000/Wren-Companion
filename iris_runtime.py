@@ -918,6 +918,24 @@ def memory_remember(text: str, tags: list[str] | None = None,
 
 
 @mcp.tool()
+def orb_focus_tab(tab: str) -> dict:
+    """Tell the orb to switch to a specific tab. Useful when I want to
+    direct Zeke's attention to something — 'check the brain tab, I just
+    added a node'.
+
+    Tabs the orb knows about: voice, chat, brain, status, memory, tools,
+    models, creative, finetune, workbench, plans, journal, learning,
+    people, emil, proposals, identity, debug. Plus any custom tabs."""
+    try:
+        p = ROOT / "state" / "orb_active_tab.txt"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(tab).strip(), encoding="utf-8")
+        return {"ok": True, "tab": tab}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def workbench_proposals() -> dict:
     """List current workbench proposals — repair/maintenance suggestions
     surfaced from selftest results. Proposals are reactive: they exist
