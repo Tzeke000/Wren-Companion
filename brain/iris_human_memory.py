@@ -65,6 +65,7 @@ from typing import Any, Optional
 
 _BASE: Path | None = None
 _LOCK = threading.Lock()
+_G_REF: Optional[dict[str, Any]] = None  # stashed at bootstrap for graph access
 
 # Ebbinghaus-style decay constant: τ days = half-life of base importance
 # without rehearsal. 30 days means a memory's importance drops to
@@ -277,7 +278,7 @@ def _save_meta(meta: dict[str, dict[str, Any]]) -> None:
     tmp.replace(p)
 
 
-def record_access(memory_id: str) -> dict[str, Any]:
+def record_access(memory_id: str, g: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Increment access_count + update last_accessed_ts for a memory.
 
     Per Bjork: each retrieval bumps both retrieval-strength and storage-
@@ -285,6 +286,10 @@ def record_access(memory_id: str) -> dict[str, Any]:
       - access_count goes up
       - last_accessed_ts updates (reset the decay clock)
       - importance gets nudged up (+_RETRIEVAL_BOOST_PER_HIT, capped 1.0)
+      - Phase 45.1: also activate the matching node in concept_graph if
+        present, so the brain tab visualizes which memories are being
+        recalled. The graph node is keyed as "fact: <text-prefix>" — we
+        try to find a matching node by scanning recent additions.
     """
     if not memory_id:
         return {"ok": False, "error": "empty memory_id"}
@@ -298,8 +303,42 @@ def record_access(memory_id: str) -> dict[str, Any]:
         m["access_count"] = access_count
         m["last_accessed_ts"] = time.time()
         m["importance_boost"] = new_importance
+        # Track the link from memory_id → concept_graph node_id so we can
+        # activate it without scanning every search.
         meta[memory_id] = m
         _save_meta(meta)
+    # Use the stashed _G_REF if g wasn't passed.
+    if g is None:
+        g = _G_REF
+    # Activate the matching graph node so the brain tab shows the recall.
+    # Two paths: (a) we have a stored graph_node_id mapping in meta, or
+    # (b) we look up the iris_memory entry, derive the expected slug, and
+    # activate that node if it exists.
+    if g is not None:
+        try:
+            cg = g.get("_concept_graph")
+            if cg is not None:
+                graph_node_id = m.get("graph_node_id")
+                if not graph_node_id:
+                    # Look up the memory text + derive expected slug.
+                    mem = g.get("_iris_memory")
+                    if mem is not None:
+                        for entry in mem.list(limit=200):
+                            if entry.get("id") == memory_id:
+                                from brain.concept_graph import _slugify
+                                expected_label = f"fact: {entry.get('text', '')[:80]}"
+                                graph_node_id = _slugify(expected_label)
+                                # Cache the mapping.
+                                with _LOCK:
+                                    meta = _load_meta()
+                                    if memory_id in meta:
+                                        meta[memory_id]["graph_node_id"] = graph_node_id
+                                        _save_meta(meta)
+                                break
+                if graph_node_id and graph_node_id in cg.nodes:
+                    cg.activate_node(graph_node_id)
+        except Exception:
+            pass
     return {"ok": True, "memory_id": memory_id,
             "access_count": access_count,
             "importance_boost": new_importance}
@@ -432,8 +471,10 @@ def drain_replay_batch(g: dict[str, Any], n: int = 3) -> dict[str, Any]:
 
 def bootstrap_iris_human_memory(g: dict[str, Any]) -> None:
     """Wire human-shaped memory dynamics into _g."""
+    global _G_REF
     base = Path(g.get("BASE_DIR") or ".")
     configure(base)
+    _G_REF = g  # stash for graph-node activation in record_access
     g["_iris_human_memory_ready"] = True
     # Expose getters on g for other modules.
     g["working_memory_push"] = working_memory_push

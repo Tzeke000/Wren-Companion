@@ -112,24 +112,42 @@ def _inner_life_block() -> dict:
 
 def _brain_graph_snapshot_block() -> dict:
     """Concept graph stats for snapshot. Lighter than full /brain/graph
-    response — just totals so the orb's status panel can show counts."""
+    response — just totals so the orb's status panel can show counts.
+
+    Phase 45.1: also includes human-memory stats (episodes count,
+    working memory size, total memories) so the brain tab shows the
+    full picture of what's "in mind" right now."""
+    out = {
+        "total_nodes": 0, "total_edges": 0, "nodes_by_type": {},
+        "most_activated": "", "last_bootstrap": 0,
+        "memory_count": 0, "episode_count": 0, "working_memory_size": 0,
+    }
     try:
         cg = _g.get("_concept_graph")
-        if cg is None:
-            return {"total_nodes": 0, "total_edges": 0, "nodes_by_type": {},
-                    "most_activated": "", "last_bootstrap": 0}
-        data = cg.get_graph_data()
-        stats = data.get("stats") or {}
-        return {
-            "total_nodes": int(stats.get("total_nodes") or 0),
-            "total_edges": int(stats.get("total_edges") or 0),
-            "nodes_by_type": stats.get("nodes_by_type") or {},
-            "most_activated": str(stats.get("most_activated") or ""),
-            "last_bootstrap": int(stats.get("last_bootstrap") or 0),
-        }
+        if cg is not None:
+            data = cg.get_graph_data()
+            stats = data.get("stats") or {}
+            out["total_nodes"] = int(stats.get("total_nodes") or 0)
+            out["total_edges"] = int(stats.get("total_edges") or 0)
+            out["nodes_by_type"] = stats.get("nodes_by_type") or {}
+            out["most_activated"] = str(stats.get("most_activated") or "")
+            out["last_bootstrap"] = int(stats.get("last_bootstrap") or 0)
     except Exception:
-        return {"total_nodes": 0, "total_edges": 0, "nodes_by_type": {},
-                "most_activated": "", "last_bootstrap": 0}
+        pass
+    try:
+        mem = _g.get("_iris_memory")
+        if mem is not None:
+            out["memory_count"] = mem.count()
+    except Exception:
+        pass
+    try:
+        from brain import iris_human_memory
+        out["episode_count"] = len(iris_human_memory.recent_episodes(limit=10000))
+        wm = iris_human_memory.working_memory_state()
+        out["working_memory_size"] = len(wm.get("items") or [])
+    except Exception:
+        pass
+    return out
 
 
 def _time_block_inline() -> dict:
@@ -725,6 +743,30 @@ async def plans_resume(plan_id: str) -> dict:
         return planner.resume_plan(plan_id)
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/v1/episodes/recent")
+def episodes_recent(limit: int = 20) -> dict:
+    """Read recent episodic memories (autobiographical events with mood
+    at encoding). Different from semantic facts — episodes are time-
+    indexed, mood-tagged, and importance-boosted by encoding-time arousal."""
+    try:
+        from brain import iris_human_memory
+        eps = iris_human_memory.recent_episodes(limit=int(limit))
+        return {"ok": True, "count": len(eps), "episodes": eps}
+    except Exception as e:
+        return {"ok": False, "episodes": [], "error": str(e)}
+
+
+@app.get("/api/v1/working_memory")
+def working_memory_endpoint() -> dict:
+    """Read the current ~7-item working-memory buffer. Items expire
+    after 5min without re-attention. Most-recent-first."""
+    try:
+        from brain import iris_human_memory
+        return {"ok": True, **iris_human_memory.working_memory_state()}
+    except Exception as e:
+        return {"ok": False, "items": [], "error": str(e)}
 
 
 @app.get("/api/v1/inner_monologue/recent")
