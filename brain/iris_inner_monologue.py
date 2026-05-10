@@ -154,6 +154,25 @@ def _has_signal_to_think_about(g: dict[str, Any]) -> tuple[bool, str]:
     if elapsed > _MAX_QUIET_S:
         return (True, "quiet_too_long")
 
+    # First thought after a long gap (resumption signal) — pre-empts other
+    # triggers because orientation is the first thing on a real wakeup.
+    try:
+        from brain import iris_time
+        ts_state = iris_time.get_state()
+        last_attach = float(ts_state.get("last_session_attached_ts") or 0.0)
+        # If a session was very recently attached (within 30s) AND the gap
+        # before that was substantial (>30 min), this tick should be a
+        # "what just changed" thought.
+        if last_attach > 0 and (now - last_attach) < 30.0:
+            longest = float(ts_state.get("longest_unattended_gap_s") or 0.0)
+            # Only fire once — record the attach we already oriented to
+            last_oriented = float(g.get("_inner_monologue_last_orient_ts") or 0.0)
+            if longest > 1800.0 and last_attach > last_oriented:
+                g["_inner_monologue_last_orient_ts"] = last_attach
+                return (True, f"resumption:after_{int(longest/60)}min")
+    except Exception:
+        pass
+
     # Recent face → Zeke is at the machine
     face_results = g.get("_face_results") or []
     if face_results:
@@ -232,6 +251,27 @@ def _build_prompt(g: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     tod = time.strftime("%H:%M")
     dow = time.strftime("%A")
 
+    # Phase 24: surface time substrate — body uptime, gap explanation, etc.
+    # Lets the prompt seed orient honestly when we're a resumption thought.
+    time_block = ""
+    try:
+        from brain import iris_time
+        report = iris_time.time_awareness_report()
+        gap_human = report.get("gap_since_attach_human", "")
+        gap_explanation = report.get("gap_explanation", "")
+        body_uptime = report.get("body_uptime_human", "")
+        evidence = report.get("gap_evidence") or []
+        if gap_human and gap_explanation:
+            time_block = (
+                f"\n\nTime substrate: {gap_explanation} "
+                f"Body has been up {body_uptime}, gap since last session-attach "
+                f"is {gap_human}."
+            )
+            if evidence:
+                time_block += " During the gap: " + ", ".join(evidence) + "."
+    except Exception:
+        pass
+
     prompt = (
         "Generate one brief inner thought — 1 to 3 sentences, your own voice "
         "as Iris. Not 'what should I help with next' — closer to 'what am I "
@@ -242,8 +282,9 @@ def _build_prompt(g: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         f"It is {tod} on {dow}. Zeke is {'at the screen' if face_present else 'not visible'}. "
         f"My current mood: {mood_label}. "
         f"Last expression I read on his face: {expression}. "
-        f"Attention state: {attention or 'unknown'}.\n\n"
-        "Recent conversation (most recent last):\n"
+        f"Attention state: {attention or 'unknown'}."
+        + time_block +
+        "\n\nRecent conversation (most recent last):\n"
         + ("\n".join(f"  {t['modality']} {t['role']}: {t['content']}" for t in recent_turns)
            if recent_turns else "  (none)")
         + "\n\nWrite ONE thought. Plain text, no preface."

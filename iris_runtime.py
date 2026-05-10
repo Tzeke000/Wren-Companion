@@ -249,6 +249,15 @@ def voice_next_input(timeout: float = 300.0) -> dict:
     _ensure_wake()
     stt = _ensure_stt()
 
+    # Phase 23: voice_next_input is the most-fired tool in voice mode.
+    # Marking session attached here keeps the time substrate honest about
+    # whether a CC session is actually here, vs the body running solo.
+    try:
+        from brain import iris_time
+        iris_time.mark_session_attached()
+    except Exception:
+        pass
+
     _wake_event.clear()
     fired = _wake_event.wait(timeout=timeout)
     if not fired:
@@ -470,6 +479,13 @@ def llm_reply(request_id: str, text: str) -> dict:
         return {"ok": False, "error": "empty request_id"}
     if text is None:
         text = ""
+    # Phase 23: llm_reply means a brain/* module asked me something and I
+    # answered — counts as session activity.
+    try:
+        from brain import iris_time
+        iris_time.mark_session_attached()
+    except Exception:
+        pass
     try:
         from brain import iris_llm
         req = iris_llm.get(str(request_id))
@@ -508,6 +524,12 @@ def chat_reply(request_id: str, text: str) -> dict:
         {ok, request_id} on success, {ok: False, error} if the request was
         not found or already answered.
     """
+    # Phase 23: chat replies count as session activity.
+    try:
+        from brain import iris_time
+        iris_time.mark_session_attached()
+    except Exception:
+        pass
     if not request_id or not str(request_id).strip():
         return {"ok": False, "error": "empty request_id"}
     if not text or not str(text).strip():
@@ -731,8 +753,25 @@ def iris_health() -> dict:
         "last_heartbeat_ts": float(_g.get("_last_heartbeat_ts") or 0.0),
         "voice_session_flag": (ROOT / ".tmp" / "voice_session.flag").exists(),
         "chat_pending": (ROOT / "state" / "iris_chat" / ".pending").exists(),
+        "llm_pending": (ROOT / "state" / "iris_llm" / ".pending").exists(),
         "orb_window_state": str(_g.get("_orb_window_state") or "unknown"),
     }
+    # Time substrate — the core "am I oriented in time" answer
+    try:
+        from brain import iris_time
+        ts = iris_time.get_state()
+        pause = iris_time.in_session_pause_signal(_g)
+        out["time"] = {
+            "body_uptime_human": iris_time._human_duration(ts.get("current_process_uptime_s", 0)),
+            "tick_count": ts.get("tick_count", 0),
+            "last_session_iso": ts.get("last_session_iso"),
+            "session_attach_count": ts.get("session_attach_count", 0),
+            "tick_loop_alive": ts.get("tick_loop_alive", False),
+            "current_quiet": pause.get("quiet_human"),
+            "quiet_note": pause.get("note"),
+        }
+    except Exception as e:
+        out["time"] = {"error": str(e)}
     return out
 
 

@@ -94,6 +94,23 @@ app.add_middleware(
 )
 
 
+def _time_block_inline() -> dict:
+    """Time substrate state for snapshot. Defined at module level so the
+    main snapshot can include it without forward-reference."""
+    try:
+        from brain import iris_time
+        ts = iris_time.get_state()
+        return {
+            "tick_count": ts.get("tick_count", 0),
+            "tick_loop_alive": ts.get("tick_loop_alive", False),
+            "body_uptime_s": ts.get("current_process_uptime_s", 0),
+            "session_attach_count": ts.get("session_attach_count", 0),
+            "last_session_iso": ts.get("last_session_iso"),
+        }
+    except Exception:
+        return {}
+
+
 # Tier 0 — must answer for the "Backend not responding" banner to clear
 @app.get("/api/v1/health")
 def health() -> dict:
@@ -185,6 +202,7 @@ def snapshot() -> dict:
         },
         "speech": {"text": "", "ts": 0.0},
         "onboarding": {"active": False, "step": None},
+        "time": _time_block_inline(),
         "subsystem_health": {
             "sleep": {"state": "awake"},
             "insightface": {
@@ -945,6 +963,7 @@ def debug_full() -> dict:
         },
         "last_heartbeat_ts": float(_g.get("_last_heartbeat_ts") or 0.0),
         "orb_window_state": str(_g.get("_orb_window_state") or "unknown"),
+        "time": _time_block_inline(),
     }
 
 
