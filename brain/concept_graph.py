@@ -656,19 +656,20 @@ def _extract_turn_topics_batch_with_mistral(turns: list[dict[str, Any]]) -> list
         prompt_rows.append(f"{idx}. {role}: {content}")
     prompt = "\n".join(prompt_rows)
     try:
-        llm = ChatOllama(model="mistral:7b", temperature=0.1)
-        result = llm.invoke(
-            [
-                SystemMessage(
-                    content=(
-                        "Return ONLY JSON array, one object per turn in order: "
-                        "{main_topic, sub_topics:[...], people:[...], emotions:[...]}."
-                    )
-                ),
-                HumanMessage(content=prompt[-7500:]),
-            ]
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = (
+            "Return ONLY JSON array, one object per turn in order: "
+            "{main_topic, sub_topics:[...], people:[...], emotions:[...]}.\n\n"
+            + prompt[-7500:]
         )
-        txt = (getattr(result, "content", None) or str(result)).strip()
+        txt = iris_llm.ask_iris(
+            prompt=full_prompt, kind="extract_topics_batch",
+            requester="concept_graph", timeout_s=120.0,
+        )
+        if txt is None:
+            raise TimeoutError("iris_llm timeout")
+        txt = txt.strip()
         left, right = txt.find("["), txt.rfind("]")
         if left < 0 or right <= left:
             raise ValueError("no json array")
@@ -711,19 +712,20 @@ def _extract_concepts_with_mistral(corpus: str) -> list[dict[str, str]]:
     if not corpus.strip():
         return []
     try:
-        llm = ChatOllama(model="mistral:7b", temperature=0.2)
-        result = llm.invoke(
-            [
-                SystemMessage(
-                    content=(
-                        "List the key concepts, people, topics, and themes from this conversation as a JSON array of "
-                        "{label, type, relationship_to_previous} objects."
-                    )
-                ),
-                HumanMessage(content=corpus[-6000:]),
-            ]
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = (
+            "List the key concepts, people, topics, and themes from this conversation as a JSON array of "
+            "{label, type, relationship_to_previous} objects.\n\n"
+            + corpus[-6000:]
         )
-        txt = (getattr(result, "content", None) or str(result)).strip()
+        txt = iris_llm.ask_iris(
+            prompt=full_prompt, kind="extract_concepts",
+            requester="concept_graph", timeout_s=120.0,
+        )
+        if txt is None:
+            return []
+        txt = txt.strip()
         left, right = txt.find("["), txt.rfind("]")
         if left < 0 or right <= left:
             return []

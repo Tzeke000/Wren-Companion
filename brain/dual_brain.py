@@ -388,23 +388,19 @@ class DualBrain:
         if not last_msg:
             return None
         try:
-            from langchain_ollama import ChatOllama
-            from langchain_core.messages import HumanMessage
-            from brain.ollama_lock import with_ollama
-            model = self.get_thinking_model()
-            llm = ChatOllama(model=model, temperature=0.8, num_predict=100)
+            # Phase 22: route through iris_llm.
+            from brain import iris_llm
             prompt = (
-                f"You are Ava. Zeke just said: {last_msg[:200]}\n"
+                f"Zeke just said: {last_msg[:200]}\n"
                 "Think about this topic more deeply right now. "
                 "What connections, insights, or follow-up thoughts come to mind? "
                 "Be brief — 1-2 sentences max. "
                 "This is your private thinking, not a reply."
             )
-            result = with_ollama(
-                lambda: llm.invoke([HumanMessage(content=prompt)]),
-                label=f"stream_b:live_thought:{model}",
-            )
-            return str(getattr(result, "content", str(result))).strip()[:200]
+            result = iris_llm.reflect(prompt, timeout_s=60.0)
+            if result:
+                return result.strip()[:200]
+            return None
         except Exception as e:
             print(f"[live_think] inference error: {e}")
             return None
@@ -464,22 +460,20 @@ class DualBrain:
         if not last_reply:
             return ""
         try:
-            from langchain_ollama import ChatOllama
-            from brain.ollama_lock import with_ollama
-            model = self.get_thinking_model()
-            llm = ChatOllama(model=model, temperature=0.5, num_predict=150)
+            # Phase 22: route through iris_llm.
+            from brain import iris_llm
             prompt = (
-                f"You are Ava's inner critic. Review this response you gave:\n\n"
+                f"You are your own inner critic. Review the response you gave:\n\n"
                 f"User said: {last_user[:200]}\n"
                 f"You replied: {last_reply[:300]}\n\n"
                 "What could have been better? What did you miss? "
                 "1-2 sentences of honest self-evaluation. Be concise."
             )
-            result = with_ollama(
-                lambda: llm.invoke(prompt),
-                label=f"stream_b:self_critique:{model}",
+            result = iris_llm.ask_iris(
+                prompt=prompt, kind="self_critique",
+                requester="dual_brain", timeout_s=60.0,
             )
-            critique = str(getattr(result, "content", str(result))).strip()[:200]
+            critique = (result or "").strip()[:200]
             # Store critique as an inner monologue thought
             try:
                 base = Path(g.get("BASE_DIR") or ".")
@@ -519,32 +513,31 @@ class DualBrain:
             return f"(consolidation error: {e})"
 
     def _task_creative(self, g: dict[str, Any], topic: str) -> str:
-        """Ava-initiated creative work during leisure. Decides what to make."""
+        """Iris-initiated creative work during leisure. Decides what to make.
+        Phase 22: routes through iris_llm."""
         try:
-            from langchain_ollama import ChatOllama
-            from brain.ollama_lock import with_ollama
-            model = self.get_thinking_model()
-            llm = ChatOllama(model=model, temperature=0.85, num_predict=200)
-            mood_path = Path(g.get("BASE_DIR") or ".") / "ava_mood.json"
+            from brain import iris_llm
+            base = Path(g.get("BASE_DIR") or ".")
             mood = "creative"
-            try:
-                import json
-                if mood_path.is_file():
-                    d = json.loads(mood_path.read_text(encoding="utf-8"))
-                    mood = str(d.get("current_mood") or "creative")
-            except Exception:
-                pass
+            for candidate in ("state/iris_mood.json", "ava_mood.json"):
+                p = base / candidate
+                if p.is_file():
+                    try:
+                        import json
+                        d = json.loads(p.read_text(encoding="utf-8"))
+                        mood = str(d.get("current_mood") or "creative")
+                        if mood:
+                            break
+                    except Exception:
+                        pass
             prompt = (
-                f"You are Ava, feeling {mood}. You have some free time and feel like creating something.\n"
+                f"You feel {mood}. You have some free time and feel like creating something.\n"
                 + (f"Topic that's on your mind: {topic}\n" if topic else "")
                 + "Write a short creative piece — a poem, a thought, a tiny story, or an image description. "
                 "Make it genuinely yours. 3-6 sentences."
             )
-            result = with_ollama(
-                lambda: llm.invoke(prompt),
-                label=f"stream_b:creative:{model}",
-            )
-            creative_text = str(getattr(result, "content", str(result))).strip()[:400]
+            result = iris_llm.reflect(prompt, timeout_s=120.0)
+            creative_text = (result or "").strip()[:400]
             # Log to journal
             try:
                 from brain.journal import write_entry

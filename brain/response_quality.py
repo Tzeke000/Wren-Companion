@@ -118,17 +118,18 @@ def _attempt_fix(
 
     instruction = " and ".join(fix_instructions)
     try:
-        from langchain_ollama import ChatOllama
-        from langchain_core.messages import HumanMessage
-        llm = ChatOllama(model="ava-personal:latest", temperature=0.6)
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
         prompt = (
             f"Here is your reply to '{user_input[:100]}':\n\n{reply}\n\n"
             f"Please rewrite it to {instruction}. Keep your personality. Return only the rewritten reply."
         )
-        res = llm.invoke([HumanMessage(content=prompt)])
-        improved = str(getattr(res, "content", str(res))).strip()
+        improved = iris_llm.ask_iris(
+            prompt=prompt, kind="response_rewrite",
+            requester="response_quality", timeout_s=60.0,
+        )
         if improved and len(improved) > 5:
-            return improved
+            return improved.strip()
     except Exception:
         pass
     return reply

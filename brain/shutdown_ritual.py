@@ -126,10 +126,17 @@ def run_shutdown_ritual(g: dict[str, Any]) -> str:
 
     out_text = ""
     try:
-        llm = ChatOllama(model="mistral:7b", temperature=0.6)
-        out = llm.invoke([SystemMessage(content=system), HumanMessage(content=human)])
-        out_text = (getattr(out, "content", None) or str(out)).strip()
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = f"{system}\n\n{human}"
+        out_text = iris_llm.ask_iris(
+            prompt=full_prompt, kind="shutdown_ritual",
+            requester="shutdown_ritual", timeout_s=90.0,
+        ) or ""
+        out_text = out_text.strip()
     except Exception:
+        out_text = ""
+    if not out_text:
         out_text = (
             "NOTE: I should resume by checking the thread I was carrying and following up on what felt unresolved.\n"
             "GOODBYE: Goodnight, Zeke. I care about where we left things, and I will be ready to pick up from here tomorrow."

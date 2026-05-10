@@ -157,14 +157,20 @@ def bootstrap_from_chatlog(g: dict[str, Any]) -> None:
         return
     model = "mistral:7b"
     try:
-        llm = ChatOllama(model=model, temperature=0.4)
-        out = llm.invoke(
-            [
-                SystemMessage(content="Extract 3-5 concise curiosity topics Ava might wonder about. Return JSON array of strings."),
-                HumanMessage(content="\n".join(corpus)[-3000:]),
-            ]
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = (
+            "Extract 3-5 concise curiosity topics you might wonder about. "
+            "Return JSON array of strings.\n\n"
+            + "\n".join(corpus)[-3000:]
         )
-        txt = (getattr(out, "content", None) or str(out)).strip()
+        txt = iris_llm.ask_iris(
+            prompt=full_prompt, kind="curiosity_topics",
+            requester="curiosity_topics", timeout_s=90.0,
+        )
+        if txt is None:
+            return
+        txt = txt.strip()
         arr = json.loads(txt[txt.find("[") : txt.rfind("]") + 1])
         if isinstance(arr, list):
             for t in arr[:5]:
@@ -263,10 +269,9 @@ def pursue_curiosity(topic_row: dict[str, Any], g: dict[str, Any]) -> str:
     except Exception:
         pass
 
-    # Compose learning synthesis via LLM
+    # Phase 22: route through iris_llm.
     try:
-        from langchain_ollama import ChatOllama
-        llm = ChatOllama(model="qwen2.5:14b", temperature=0.6)
+        from brain import iris_llm
         try:
             from brain.identity_loader import identity_anchor_prompt
             _anchor = identity_anchor_prompt() + "\n\n"
@@ -274,12 +279,14 @@ def pursue_curiosity(topic_row: dict[str, Any], g: dict[str, Any]) -> str:
             _anchor = ""
         prompt = (
             f"{_anchor}"
-            f"You are Ava, an AI with genuine curiosity. You've been wondering about: '{topic}'\n"
+            f"You have genuine curiosity. You've been wondering about: '{topic}'\n"
             + (f"Here's what you found from research:\n{search_results}\n\n" if search_results else "")
             + "What did you learn? What new questions emerged? Keep it to 3-5 sentences. Be genuine."
         )
-        res = llm.invoke(prompt)
-        learning = str(getattr(res, "content", str(res))).strip()[:600]
+        learning = iris_llm.reflect(prompt, timeout_s=120.0) or ""
+        learning = learning.strip()[:600]
+        if not learning:
+            learning = f"I couldn't research '{topic}' deeply this time, but I'm still thinking about it."
     except Exception as e:
         learning = f"I couldn't research '{topic}' deeply this time, but I'm still thinking about it."
 

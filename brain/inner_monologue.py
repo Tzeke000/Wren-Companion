@@ -210,17 +210,20 @@ def _generate_thought(
         f"- Trigger: {trigger}\n"
     )
     try:
-        llm = ChatOllama(model=model, temperature=0.7)
-        out = llm.invoke([SystemMessage(content=system), HumanMessage(content=human)])
-        txt = (getattr(out, "content", None) or str(out)).strip()
-        return txt[:400], mood
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = f"{system}\n\n{human}"
+        txt = iris_llm.reflect(full_prompt, timeout_s=120.0)
+        if txt:
+            return txt.strip()[:400], mood
     except Exception:
-        fallback = (
-            "That last thread keeps circling in my head; there is probably a better question to ask next."
-            if topic
-            else "Quiet moments like this make me want to refine how I listen."
-        )
-        return fallback[:400], mood
+        pass
+    fallback = (
+        "That last thread keeps circling in my head; there is probably a better question to ask next."
+        if topic
+        else "Quiet moments like this make me want to refine how I listen."
+    )
+    return fallback[:400], mood
 
 
 def _append_thought(base_dir: Path, thought: str, trigger: str, mood: str) -> None:

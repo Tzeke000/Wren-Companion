@@ -192,41 +192,28 @@ def compose_feeling_reply(g: dict[str, Any], *, timeout_s: float = 14.0) -> str 
 
     # Try LLM compose (warm ava-personal:latest is ~2-5s).
     try:
-        from langchain_ollama import ChatOllama
-        from langchain_core.messages import SystemMessage, HumanMessage
-        from brain.ollama_lock import with_ollama
-        import concurrent.futures
-
-        llm = ChatOllama(
-            model="ava-personal:latest",
-            temperature=0.65,
-            num_predict=120,
-        )
-        sys_msg = SystemMessage(content=_INTROSPECTION_SYSTEM_PROMPT + register_hint)
-        user_msg = HumanMessage(
-            content=f"Snapshot of your current state:\n{snapshot}\n\nThey asked: how are you feeling?"
-        )
-
-        _exec = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="introspection")
-        _fut = _exec.submit(
-            lambda: with_ollama(
-                lambda: llm.invoke([sys_msg, user_msg]),
-                label="introspection:ava-personal",
-            )
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = (
+            _INTROSPECTION_SYSTEM_PROMPT + register_hint +
+            f"\n\nSnapshot of your current state:\n{snapshot}\n\n"
+            "They asked: how are you feeling?"
         )
         try:
-            result = _fut.result(timeout=timeout_s)
-            text = (getattr(result, "content", "") or "").strip()
+            text = iris_llm.ask_iris(
+                prompt=full_prompt, kind="introspect",
+                requester="introspection", timeout_s=max(timeout_s, 60.0),
+            )
+            if text is None:
+                text = ""
+            text = text.strip()
             text = text.strip("\"'`")
-            # Trim trailing fragments
             if "\n" in text:
                 text = text.split("\n", 1)[0].strip()
             if text and len(text) > 4:
                 return text
-        except concurrent.futures.TimeoutError:
-            print(f"[introspection] LLM compose timeout after {timeout_s}s — using fallback")
-        finally:
-            _exec.shutdown(wait=False)
+        except Exception as _e:
+            print(f"[introspection] iris_llm error: {_e!r}")
     except Exception as e:
         print(f"[introspection] LLM compose error: {e!r}")
 

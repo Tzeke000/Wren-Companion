@@ -112,9 +112,16 @@ def update_self_model(g: dict[str, Any]) -> dict[str, Any]:
         "question_about_self (string optional), growth_note (string)."
     )
     try:
-        llm = ChatOllama(model="qwen2.5:14b", temperature=0.4)
-        out = llm.invoke([SystemMessage(content=prompt), HumanMessage(content="\n".join(rows)[-6000:])])
-        txt = (getattr(out, "content", None) or str(out)).strip()
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        full_prompt = prompt + "\n\n" + "\n".join(rows)[-6000:]
+        txt = iris_llm.ask_iris(
+            prompt=full_prompt, kind="growth_arc",
+            requester="self_model", timeout_s=120.0,
+        )
+        if txt is None:
+            raise TimeoutError("iris_llm timeout")
+        txt = txt.strip()
         blob = json.loads(txt[txt.find("{") : txt.rfind("}") + 1])
         if isinstance(blob, dict):
             m["current_chapter"] = str(blob.get("current_chapter") or m.get("current_chapter") or "")[:220]

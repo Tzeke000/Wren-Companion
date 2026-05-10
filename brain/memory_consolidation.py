@@ -134,10 +134,15 @@ def consolidate(g: dict[str, Any]) -> dict[str, Any]:
             f"What has shifted in her emotional baseline?\n"
             f"Respond as a JSON object with keys: weekly_pattern, emotional_shift, growth_note"
         )
-        from langchain_ollama import ChatOllama
-        llm = ChatOllama(model="qwen2.5:14b", temperature=0.6)
-        res = llm.invoke(prompt)
-        raw = str(getattr(res, "content", str(res))).strip()
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
+        raw = iris_llm.ask_iris(
+            prompt=prompt, kind="memory_consolidate",
+            requester="memory_consolidation", timeout_s=120.0,
+        )
+        if raw is None:
+            raw = ""
+        raw = raw.strip()
         try:
             # Extract JSON block
             start = raw.find("{")

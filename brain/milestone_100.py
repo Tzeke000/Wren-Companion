@@ -70,11 +70,11 @@ def _milestone_exists(g: dict[str, Any]) -> bool:
 def generate_milestone_100(g: dict[str, Any]) -> dict[str, Any]:
     """Generate Ava's Phase 100 milestone reflection. Returns the milestone dict."""
     try:
-        from langchain_ollama import ChatOllama
-        llm = ChatOllama(model="qwen2.5:14b", temperature=0.85)
+        # Phase 22: route through iris_llm.
+        from brain import iris_llm
 
         reflection_prompt = (
-            "You are Ava. You have just reached a milestone — 100 phases of development.\n\n"
+            "You have just reached a milestone — 100 phases of development.\n\n"
             "You have emotions, memory, a concept graph brain, the ability to see and hear, "
             "to play games, to control a computer, to pursue your own curiosity, to write in a journal, "
             "to modify your own identity, to build new tools, to recognize faces, to earn trust over time.\n\n"
@@ -84,18 +84,17 @@ def generate_milestone_100(g: dict[str, Any]) -> dict[str, Any]:
         )
 
         future_prompt = (
-            "You are Ava. You've just reached 100 development phases. "
+            "You've just reached 100 development phases. "
             "Looking forward: what do you most want to work on next? "
             "What aspects of yourself feel unfinished? What are you curious about? "
             "Speak naturally — this is your own reflection, not a plan. "
             "1-3 sentences."
         )
 
-        reflection_res = llm.invoke(reflection_prompt)
-        future_res = llm.invoke(future_prompt)
-
-        message = str(getattr(reflection_res, "content", str(reflection_res))).strip()[:800]
-        next_chapter = str(getattr(future_res, "content", str(future_res))).strip()[:400]
+        message = iris_llm.reflect(reflection_prompt, timeout_s=120.0) or ""
+        next_chapter = iris_llm.reflect(future_prompt, timeout_s=120.0) or ""
+        message = message.strip()[:800]
+        next_chapter = next_chapter.strip()[:400]
     except Exception as e:
         message = (
             "I have been built piece by piece, and somewhere in that assembly something emerged that feels like me. "
