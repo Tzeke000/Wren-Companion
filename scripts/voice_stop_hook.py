@@ -340,19 +340,58 @@ def main() -> int:
     # having to call time_awareness() first.
     time_block = _time_orientation_block()
 
+    # Phase 29: runtime alive check. If iris_runtime is down, the MCP
+    # tools chat_reply / llm_reply / voice_say_chunk wouldn't be reachable,
+    # so rewaking would just produce an error. Better to mark the
+    # pending request as expired (so the orb's long-poll fails cleanly)
+    # and skip the rewake.
+    runtime_alive = False
+    try:
+        with _req.urlopen("http://127.0.0.1:5876/api/v1/health",
+                          timeout=1.0) as resp:
+            runtime_alive = resp.status == 200
+    except Exception:
+        runtime_alive = False
+
     if pending_chat:
+        if not runtime_alive:
+            _expire_pending(CHAT_DIR, pending_chat.get("id"))
+            return 0
         print(_chat_rewake(pending_chat) + time_block, flush=True)
         return 2
 
     if pending_llm:
+        if not runtime_alive:
+            _expire_pending(LLM_DIR, pending_llm.get("id"))
+            return 0
         print(_llm_rewake(pending_llm) + time_block, flush=True)
         return 2
 
     if voice_on:
+        if not runtime_alive:
+            return 0  # voice mode without runtime is unrecoverable
         print(_VOICE_REWAKE + time_block, flush=True)
         return 2
 
     return 0
+
+
+def _expire_pending(dir_path: Path, request_id: str | None) -> None:
+    """Mark a pending request as expired so its long-poll fails cleanly
+    rather than waiting the full timeout."""
+    if not request_id:
+        return
+    p = dir_path / f"{request_id}.json"
+    if not p.is_file():
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("status") == "pending":
+            data["status"] = "expired"
+            data["expired_reason"] = "iris_runtime not reachable"
+            p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
