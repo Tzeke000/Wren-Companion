@@ -242,6 +242,19 @@ def _build_prompt(g: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     except Exception:
         pass
 
+    # Phase 28: pull a few recent memories so thoughts can build on what
+    # I already know, not generate in vacuum. Newest 3 from iris_memory.
+    recent_memories: list[str] = []
+    try:
+        mem = g.get("_iris_memory")
+        if mem is not None:
+            for e in mem.list(limit=3):
+                t = str(e.get("text") or "")
+                if t:
+                    recent_memories.append(t[:200])
+    except Exception:
+        pass
+
     # Perception
     face_present = bool(g.get("_face_results"))
     expression = str(g.get("_current_expression") or "neutral")
@@ -272,6 +285,13 @@ def _build_prompt(g: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     except Exception:
         pass
 
+    memory_block = ""
+    if recent_memories:
+        memory_block = (
+            "\n\nRecent memories (newest first):\n"
+            + "\n".join(f"  - {m}" for m in recent_memories)
+        )
+
     prompt = (
         "Generate one brief inner thought — 1 to 3 sentences, your own voice "
         "as Iris. Not 'what should I help with next' — closer to 'what am I "
@@ -283,7 +303,7 @@ def _build_prompt(g: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         f"My current mood: {mood_label}. "
         f"Last expression I read on his face: {expression}. "
         f"Attention state: {attention or 'unknown'}."
-        + time_block +
+        + time_block + memory_block +
         "\n\nRecent conversation (most recent last):\n"
         + ("\n".join(f"  {t['modality']} {t['role']}: {t['content']}" for t in recent_turns)
            if recent_turns else "  (none)")
