@@ -669,6 +669,18 @@ def enroll_face(
         result = _g.get("_enroll_result")
         if result is not None:
             _g["_enroll_result"] = None
+            # Phase 27: enrollment success → signal-bus event so downstream
+            # subscribers (memory, anchor moments) see the new person.
+            try:
+                bus = _g.get("_signal_bus")
+                if bus is not None:
+                    bus.fire("face_enrolled",
+                             data={"person_id": result.get("pid"),
+                                   "saved_paths": result.get("saved_paths") or [],
+                                   "known_count_after": result.get("known_count_after")},
+                             priority="high")
+            except Exception:
+                pass
             return result
         time.sleep(0.25)
 

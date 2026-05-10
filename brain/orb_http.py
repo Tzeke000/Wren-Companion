@@ -199,6 +199,37 @@ def snapshot() -> dict:
         "tts": {
             "tts_speaking": bool(_g.get("_tts_speaking")),
             "engine": getattr(_tts_ref, "_engine_type", None),
+            "amplitude": float(_g.get("_tts_amplitude") or 0.0),
+        },
+        "voice": {
+            "wake_word_active": bool(_g.get("_wake_word_detector") is not None),
+            "wake_backend": (
+                getattr(_g.get("_wake_word_detector"), "backend", None)
+                if _g.get("_wake_word_detector") else None
+            ),
+            "voice_session_flag": (_root / ".tmp" / "voice_session.flag").exists(),
+            "last_wake_ts": float(_g.get("_wake_word_ts") or 0.0),
+            "last_wake_source": _g.get("_wake_source"),
+        },
+        "voice_loop": {
+            "active": (_root / ".tmp" / "voice_session.flag").exists(),
+            "tts_speaking": bool(_g.get("_tts_speaking")),
+            "say_queue_depth": int(_g.get("_say_queue_depth") or 0),
+        },
+        "vision": {
+            "camera_active": _g.get("_face_results") is not None,
+            "face_count": len(_g.get("_face_results") or []),
+            "current_expression": str(_g.get("_current_expression") or ""),
+            "attention_state": str(_g.get("_attention_state") or ""),
+            "looking_at_screen": bool(_g.get("_looking_at_screen") or False),
+            "insight_provider": (
+                str(getattr(insight, "_provider", "")) if insight else ""
+            ),
+        },
+        "heartbeat_runtime": {
+            "last_tick_ts": float(_g.get("_last_heartbeat_ts") or 0.0),
+            "tick_loop_alive": bool(_g.get("_iris_time_ready")),
+            "inner_thought_ts": float(_g.get("_inner_thought_ts") or 0.0),
         },
         "speech": {"text": "", "ts": 0.0},
         "onboarding": {"active": False, "step": None},
@@ -235,12 +266,44 @@ def identity(name: str) -> str:
 
 @app.get("/api/v1/identity/proposals")
 def identity_proposals() -> dict:
-    return {"ok": True, "proposals": []}
+    """Surface pending identity-edit proposals from state/identity_proposals.jsonl.
+    Empty until something fills them. Per Phase 1 readiness spec section
+    C.6, write-to-bedrock is gated until D1 ritual; the proposal queue is
+    the staging surface for that future capability."""
+    p = _root / "state" / "identity_proposals.jsonl"
+    if not p.is_file():
+        return {"ok": True, "proposals": []}
+    try:
+        import json as _j
+        rows = []
+        for line in p.read_text(encoding="utf-8").splitlines()[-50:]:
+            try:
+                d = _j.loads(line)
+                if isinstance(d, dict) and not d.get("approved"):
+                    rows.append(d)
+            except Exception:
+                pass
+        return {"ok": True, "proposals": rows}
+    except Exception as e:
+        return {"ok": False, "proposals": [], "error": str(e)}
 
 
 @app.post("/api/v1/identity/proposals/approve")
-async def identity_proposals_approve() -> dict:
-    return {"ok": True}
+async def identity_proposals_approve(payload: dict = Body(default={})) -> dict:
+    """Per birth-ethics decision (D1 gated last): approve does NOT execute
+    a write to ava_core/IDENTITY.md or SOUL.md. Records the approval
+    intent to state/identity_proposals.jsonl with approved=True. Future
+    Phase 3 unlock would add a continuity_gate.is_continuity_allowed()
+    check here before any actual file write."""
+    proposal_id = str(payload.get("proposal_id") or "").strip()
+    if not proposal_id:
+        return {"ok": False, "error": "proposal_id required"}
+    return {
+        "ok": True,
+        "proposal_id": proposal_id,
+        "executed": False,
+        "note": "approval recorded; bedrock-write is D1-gated and not yet unlocked",
+    }
 
 
 # Tier 2 — chat (Phase 4) — cross-process bridge to Iris's CC session.
@@ -645,7 +708,33 @@ def profiles_list() -> dict:
 
 @app.post("/api/v1/profile/{person_id}/refresh")
 async def profile_refresh(person_id: str) -> dict:
-    return {"ok": True}
+    """Reload a person profile from disk and re-trigger insightface
+    update_known_faces so any new enrollment photos take effect without
+    a full restart."""
+    if "/" in person_id or "\\" in person_id or ".." in person_id:
+        return {"ok": False, "error": "invalid person_id"}
+    out = {"ok": True, "person_id": person_id}
+    # Re-read profile JSON
+    prof_path = _root / "state" / "profiles" / f"{person_id}.json"
+    if prof_path.is_file():
+        try:
+            import json as _j
+            data = _j.loads(prof_path.read_text(encoding="utf-8"))
+            out["profile_loaded"] = True
+            out["profile_keys"] = list(data.keys()) if isinstance(data, dict) else []
+        except Exception as e:
+            out["profile_error"] = str(e)
+    else:
+        out["profile_loaded"] = False
+    # Re-trigger known_faces reload from faces/<pid>/
+    try:
+        engine = _g.get("_insight_face")
+        if engine is not None and hasattr(engine, "update_known_faces"):
+            after = int(engine.update_known_faces())
+            out["known_count_after"] = after
+    except Exception as e:
+        out["face_reload_error"] = str(e)
+    return out
 
 
 @app.get("/api/v1/emil/status")
@@ -826,13 +915,44 @@ async def workbench_reject(payload: dict = Body(default={})) -> dict:
 
 
 @app.post("/api/v1/routing/override")
-async def routing_override() -> dict:
-    return {"ok": True}
+async def routing_override(payload: dict = Body(default={})) -> dict:
+    """Ava-era model-routing override. Not applicable for Iris — cognition
+    is Claude managed by Anthropic. Stub responds politely."""
+    return {
+        "ok": True,
+        "note": "not applicable — Iris's cognition is Claude managed by Anthropic",
+    }
 
 
 @app.post("/api/v1/camera/calibrate_gaze")
 async def camera_calibrate_gaze() -> dict:
-    return {"ok": True}
+    """Run the eye_tracker's 9-point calibration. Pops up a tkinter window;
+    user looks at each point. Saves to state/gaze_calibration.json.
+
+    Note: tkinter on a single screen — for Zeke's dual-screen setup, this
+    calibrates only the screen the window appears on. Gaze regions on the
+    other screen will be approximate. Captured in IDENTITY.md memory."""
+    try:
+        ez = _g.get("_eye_tracker")
+        if ez is None:
+            return {"ok": False, "error": "eye_tracker not available"}
+        if not hasattr(ez, "calibrate"):
+            return {"ok": False, "error": "eye_tracker has no calibrate method"}
+        # Run on a thread so we don't block the FastAPI worker.
+        import threading as _th
+        result_holder: dict = {"done": False, "ok": False}
+        def _run():
+            try:
+                ok = ez.calibrate()
+                result_holder["ok"] = bool(ok)
+            except Exception as e:
+                result_holder["error"] = str(e)
+            finally:
+                result_holder["done"] = True
+        _th.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "started": True, "note": "9-point calibration window opened"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/api/v1/clap/calibrate")
