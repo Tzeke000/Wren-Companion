@@ -60,15 +60,33 @@ _REQUEST_TTL_S = 600.0  # 10 min — longer than chat because some kinds (reflec
 def configure(base_dir: Path | str) -> None:
     global _BASE
     _BASE = Path(base_dir)
+    try:
+        from brain.iris_paths import paths as _paths
+        _paths.configure(_BASE)
+    except Exception:
+        pass
     _llm_dir().mkdir(parents=True, exist_ok=True)
 
 
 def _llm_dir() -> Path:
+    """Canonical LLM dir. Prefer brain/iris_paths.paths.llm_dir if configured."""
+    try:
+        from brain.iris_paths import paths as _paths
+        if _paths._root is not None:
+            return _paths.llm_dir
+    except Exception:
+        pass
     base = _BASE if _BASE is not None else Path(".")
     return base / _DIR_NAME
 
 
 def _flag_path() -> Path:
+    try:
+        from brain.iris_paths import paths as _paths
+        if _paths._root is not None:
+            return _paths.llm_pending_flag
+    except Exception:
+        pass
     return _llm_dir() / _FLAG_NAME
 
 

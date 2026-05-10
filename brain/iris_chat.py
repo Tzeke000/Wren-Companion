@@ -39,15 +39,34 @@ _REQUEST_TTL_S = 300.0  # requests older than this are considered abandoned
 def configure(base_dir: Path | str) -> None:
     global _BASE
     _BASE = Path(base_dir)
+    # Also configure brain/iris_paths so other modules see the same root.
+    try:
+        from brain.iris_paths import paths as _paths
+        _paths.configure(_BASE)
+    except Exception:
+        pass
     _chat_dir().mkdir(parents=True, exist_ok=True)
 
 
 def _chat_dir() -> Path:
+    """Canonical chat dir. Prefer brain/iris_paths.paths.chat_dir if configured."""
+    try:
+        from brain.iris_paths import paths as _paths
+        if _paths._root is not None:
+            return _paths.chat_dir
+    except Exception:
+        pass
     base = _BASE if _BASE is not None else Path(".")
     return base / _DIR_NAME
 
 
 def _flag_path() -> Path:
+    try:
+        from brain.iris_paths import paths as _paths
+        if _paths._root is not None:
+            return _paths.chat_pending_flag
+    except Exception:
+        pass
     return _chat_dir() / _FLAG_NAME
 
 

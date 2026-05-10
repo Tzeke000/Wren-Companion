@@ -719,6 +719,23 @@ def iris_health() -> dict:
         "expression_detector": _g.get("_expression_detector") is not None,
         "eye_tracker": _g.get("_eye_tracker") is not None,
     }
+    # Bootstrap subsystem status — one-glance check that everything wired
+    out["subsystems"] = {
+        "iris_paths": bool(_g.get("_iris_paths_ready")),
+        "iris_time": bool(_g.get("_iris_time_ready")),
+        "iris_llm": bool(_g.get("_iris_llm_ready")),
+        "iris_memory": _g.get("_iris_memory") is not None,
+        "semantic_memory": bool(_g.get("_iris_semantic_memory_ready")),
+        "anchor_moments": bool(_g.get("_anchor_moments_ready")),
+        "inner_monologue": bool(_g.get("_inner_monologue_ready")),
+        "signal_bus": _g.get("_signal_bus") is not None,
+        "concept_graph": _g.get("_concept_graph") is not None,
+        "feature_flags": bool(_g.get("_feature_flags_ready")),
+        "skill_sandbox": bool(_g.get("_skill_sandbox_ready")),
+        "identity_stability": bool(_g.get("_identity_stability_ready")),
+        "daily_practice": bool(_g.get("_daily_practice_ready")),
+        "counterfactual_archive": bool(_g.get("_counterfactual_archive_ready")),
+    }
     # Perception
     out["perception"] = {
         "face_count": len(_g.get("_face_results") or []),
@@ -749,13 +766,23 @@ def iris_health() -> dict:
         "concept_graph_edges": (len(cg.edges) if cg is not None else 0),
     }
     # State
-    out["state"] = {
-        "last_heartbeat_ts": float(_g.get("_last_heartbeat_ts") or 0.0),
-        "voice_session_flag": (ROOT / ".tmp" / "voice_session.flag").exists(),
-        "chat_pending": (ROOT / "state" / "iris_chat" / ".pending").exists(),
-        "llm_pending": (ROOT / "state" / "iris_llm" / ".pending").exists(),
-        "orb_window_state": str(_g.get("_orb_window_state") or "unknown"),
-    }
+    try:
+        from brain.iris_paths import paths
+        out["state"] = {
+            "last_heartbeat_ts": float(_g.get("_last_heartbeat_ts") or 0.0),
+            "voice_session_flag": paths.voice_flag.exists(),
+            "chat_pending": paths.chat_pending_flag.exists(),
+            "llm_pending": paths.llm_pending_flag.exists(),
+            "orb_window_state": str(_g.get("_orb_window_state") or "unknown"),
+        }
+    except Exception:
+        out["state"] = {
+            "last_heartbeat_ts": float(_g.get("_last_heartbeat_ts") or 0.0),
+            "voice_session_flag": (ROOT / ".tmp" / "voice_session.flag").exists(),
+            "chat_pending": (ROOT / "state" / "iris_chat" / ".pending").exists(),
+            "llm_pending": (ROOT / "state" / "iris_llm" / ".pending").exists(),
+            "orb_window_state": str(_g.get("_orb_window_state") or "unknown"),
+        }
     # Time substrate — the core "am I oriented in time" answer
     try:
         from brain import iris_time

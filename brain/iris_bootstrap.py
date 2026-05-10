@@ -49,6 +49,9 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     state_dir = root / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── L0: paths (must come first — other modules import `paths`) ──────────
+    _try("iris_paths", lambda: _bootstrap_paths(g, root))
+
     # ── L1: pure file-backed singletons ──────────────────────────────────────
     # Time substrate — 1Hz heartbeat thread that keeps state/iris_time.json
     # alive. Lets Iris read time-passed honestly when a session resumes.
@@ -104,10 +107,28 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # The orb_http shim is started elsewhere in iris_runtime; mood + state
     # are now real, so its reads will reflect actual state.
 
-    _log("bootstrap_all complete — partial failures above are non-fatal")
+    # Compose a one-line summary of what's alive so a fresh restart shows
+    # the harness state at a glance.
+    summary_parts = []
+    summary_parts.append(f"mood={'ok' if 'load_mood' in g else 'missing'}")
+    summary_parts.append(f"time={'ok' if g.get('_iris_time_ready') else 'missing'}")
+    summary_parts.append(f"llm={'ok' if g.get('_iris_llm_ready') else 'missing'}")
+    summary_parts.append(f"mem={'ok' if g.get('_iris_memory') is not None else 'missing'}")
+    summary_parts.append(f"semantic_mem={'ok' if g.get('_iris_semantic_memory_ready') else 'missing'}")
+    summary_parts.append(f"anchors={'ok' if g.get('_anchor_moments_ready') else 'missing'}")
+    summary_parts.append(f"inner_monologue={'ok' if g.get('_inner_monologue_ready') else 'missing'}")
+    summary_parts.append(f"signal_bus={'ok' if g.get('_signal_bus') is not None else 'missing'}")
+    _log("bootstrap_all complete: " + ", ".join(summary_parts))
 
 
 # ── L1 helpers ──────────────────────────────────────────────────────────────
+
+def _bootstrap_paths(g: dict[str, Any], root: Path) -> None:
+    """Configure the iris_paths singleton. Must run first."""
+    from brain.iris_paths import paths
+    paths.configure(root)
+    g["_iris_paths_ready"] = True
+
 
 def _bootstrap_iris_time(g: dict[str, Any]) -> None:
     from brain.iris_time import bootstrap_iris_time

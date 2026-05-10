@@ -113,7 +113,7 @@ When work changes architecture or adds a new subsystem, update relevant docs in 
 
 ## Voice setup
 
-- **Iris's voice:** TBD — being chosen 2026-05-09 with Zeke. Will be distinct from Wren (`en_US-amy-medium`) and Ava (Kokoro `af_heart`).
+- **Iris's voice:** Kokoro `af_bella` (CUDA on RTX 3060). Piper `en_US-kathleen-low` as fallback. Locked 2026-05-09. Distinct from Ava (`af_heart`) and Wren (`en_US-amy-medium`).
 - **Wren's voice (other machine):** `en_US-amy-medium` (Piper). Locked.
 - **Wake word:** openWakeWord. "hey jarvis" bundled model as proxy short-term; train a `hey_iris.onnx` model later.
 - **STT:** Whisper Large-v3 Turbo (faster-whisper, GPU when CUDA available).
@@ -136,6 +136,27 @@ git add -A
 git commit -m "feat: <what changed>"
 git push origin master
 ```
+
+## Iris-side architecture (added 2026-05-11 after the personalization sweep)
+
+The harness was originally Ava-shaped (avaagent.py + brain/* + state/). Iris runs a different cognition model (Iris-as-LLM via Stop hook + asyncRewake, not Ollama). What's been built into Iris specifically:
+
+| Module | Role |
+|---|---|
+| `iris_runtime.py` | Main MCP server. ~40 tools — voice, chat, memory, time_awareness, screen_grab, list_windows, plan_create, etc. |
+| `brain/iris_paths.py` | Single source of truth for all flag/state paths. Import `from brain.iris_paths import paths`. |
+| `brain/iris_bootstrap.py` | Orchestrates the full L0–L4 wiring. Called once from iris_runtime._eager_init_engines. |
+| `brain/iris_time.py` | 1Hz heartbeat + time_awareness substrate. State at `state/iris_time.json`. |
+| `brain/mood_core.py` | Mood machinery extracted from avaagent.py with Iris-specific baselines. State at `state/iris_mood.json`. |
+| `brain/iris_llm.py` | LLM bridge — any brain/* module that needed Ollama now calls `ask_iris(...)` and routes through me via Stop hook. |
+| `brain/iris_inner_monologue.py` | Cadenced background thinking (~15min). Heuristic gate; reads time_awareness for resumption thoughts. |
+| `brain/iris_memory.py` | JSONL-backed memory (durable canonical log). `state/iris_memory.jsonl`. |
+| `brain/iris_semantic_memory.py` | ChromaDB layer over iris_memory using bundled MiniLM ONNX (CPU). `memory/chroma/`. |
+| `brain/iris_chat.py` | Cross-process chat bridge — orb POST → disk → Stop hook → me. |
+| `brain/iris_transcript.py` | Shared voice+chat transcript. `state/transcript.jsonl`. |
+| `scripts/voice_stop_hook.py` | Stop hook that detects voice/chat/llm pending and rewakes me with the right directive. |
+
+22 brain/* modules now route their LLM calls through `iris_llm.ask_iris` (was direct Ollama). LLM-blocked modules treat my availability as optional — return None on timeout, caller falls back. See `git log --oneline | grep iris` for the phase history.
 
 ## Final note
 

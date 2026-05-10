@@ -35,15 +35,31 @@ from pathlib import Path
 from urllib import request as _req
 
 ROOT = Path(r"D:\Wren-Companion")
-VOICE_FLAG = ROOT / ".tmp" / "voice_session.flag"
-CHAT_PENDING_FLAG = ROOT / "state" / "iris_chat" / ".pending"
-CHAT_DIR = ROOT / "state" / "iris_chat"
-LLM_PENDING_FLAG = ROOT / "state" / "iris_llm" / ".pending"
-LLM_DIR = ROOT / "state" / "iris_llm"
+
+# Paths sourced via brain/iris_paths to keep one source of truth across
+# iris_runtime, brain/orb_http, brain/iris_chat, brain/iris_llm, and this hook.
+sys.path.insert(0, str(ROOT))
+try:
+    from brain.iris_paths import paths as _paths
+    _paths.configure(ROOT)
+    VOICE_FLAG = _paths.voice_flag
+    CHAT_PENDING_FLAG = _paths.chat_pending_flag
+    CHAT_DIR = _paths.chat_dir
+    LLM_PENDING_FLAG = _paths.llm_pending_flag
+    LLM_DIR = _paths.llm_dir
+    LAST_SPOKEN_PATH = _paths.last_spoken_uuid
+except Exception:
+    # Fallback if iris_paths can't import (broken venv, etc) — keep the hook
+    # functional with hardcoded paths so a code error doesn't kill voice mode.
+    VOICE_FLAG = ROOT / ".tmp" / "voice_session.flag"
+    CHAT_PENDING_FLAG = ROOT / "state" / "iris_chat" / ".pending"
+    CHAT_DIR = ROOT / "state" / "iris_chat"
+    LLM_PENDING_FLAG = ROOT / "state" / "iris_llm" / ".pending"
+    LLM_DIR = ROOT / "state" / "iris_llm"
+    LAST_SPOKEN_PATH = ROOT / ".tmp" / "last_spoken_uuid.txt"
 
 TTS_URL = "http://127.0.0.1:5876/api/v1/tts/speak"
 HTTP_TIMEOUT_S = 2.0
-LAST_SPOKEN_PATH = ROOT / ".tmp" / "last_spoken_uuid.txt"
 
 
 def _strip_markdown(text: str) -> str:
