@@ -604,6 +604,37 @@ async def plans_resume(plan_id: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/v1/inner_monologue/recent")
+def inner_monologue_recent(limit: int = 20) -> dict:
+    """Read recent inner-monologue thoughts. Surfaces what I've been
+    thinking about during idle time (Iris's cadenced background ticks)."""
+    try:
+        from brain import iris_inner_monologue
+        thoughts = iris_inner_monologue.recent_thoughts(n=int(max(1, limit)))
+        return {"ok": True, "count": len(thoughts), "thoughts": thoughts}
+    except Exception as e:
+        return {"ok": False, "thoughts": [], "error": str(e)}
+
+
+@app.get("/api/v1/signals/recent")
+def signals_recent_endpoint(signal_type: str = "", since_seconds: float = 60.0) -> dict:
+    """Read recent signal-bus events. Useful for the orb's debug tab to
+    show the live signal stream."""
+    try:
+        bus = _g.get("_signal_bus")
+        if bus is None:
+            return {"ok": False, "error": "signal_bus not running", "signals": []}
+        cutoff = time.time() - max(1.0, since_seconds)
+        if signal_type:
+            sigs = bus.peek(signal_type=signal_type, since=cutoff)
+        else:
+            all_sigs = bus.peek()
+            sigs = [s for s in all_sigs if float(s.get("ts") or 0) >= cutoff]
+        return {"ok": True, "count": len(sigs), "signals": sigs}
+    except Exception as e:
+        return {"ok": False, "signals": [], "error": str(e)}
+
+
 @app.get("/api/v1/journal/entries")
 def journal_entries() -> dict:
     try:
