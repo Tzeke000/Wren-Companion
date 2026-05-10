@@ -99,6 +99,11 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # inner_monologue tick (single batch LLM call, not per-turn).
     _try("iris_extraction_queue", lambda: _bootstrap_extraction_queue(g))
 
+    # Concept graph — semantic graph of ideas/people/topics. Loads on demand
+    # from state/concept_graph.json + state/concept_edges.jsonl. Empty until
+    # _extract_concepts_with_mistral / iris_llm fills it.
+    _try("concept_graph", lambda: _bootstrap_concept_graph(g, root))
+
     # Inner monologue — periodic background thinking via the LLM bridge.
     # Cadence: ~15 min when there's signal to think about. Won't tick if no
     # face seen + no recent turn + no salient mood. Won't burn tokens silently.
@@ -303,6 +308,16 @@ def _bootstrap_counterfactual_archive(g: dict[str, Any], root: Path) -> None:
 def _bootstrap_extraction_queue(g: dict[str, Any]) -> None:
     from brain.iris_extraction_queue import bootstrap_iris_extraction_queue
     bootstrap_iris_extraction_queue(g)
+
+
+def _bootstrap_concept_graph(g: dict[str, Any], root: Path) -> None:
+    """Idempotent — if iris_runtime already bootstrapped concept_graph,
+    leave it. Otherwise instantiate."""
+    if g.get("_concept_graph") is not None:
+        return
+    from brain.concept_graph import ConceptGraph
+    cg = ConceptGraph(root)
+    g["_concept_graph"] = cg
 
 
 def _bootstrap_inner_monologue(g: dict[str, Any]) -> None:
