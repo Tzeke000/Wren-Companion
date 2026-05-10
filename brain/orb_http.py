@@ -94,6 +94,28 @@ app.add_middleware(
 )
 
 
+def _brain_graph_snapshot_block() -> dict:
+    """Concept graph stats for snapshot. Lighter than full /brain/graph
+    response — just totals so the orb's status panel can show counts."""
+    try:
+        cg = _g.get("_concept_graph")
+        if cg is None:
+            return {"total_nodes": 0, "total_edges": 0, "nodes_by_type": {},
+                    "most_activated": "", "last_bootstrap": 0}
+        data = cg.get_graph_data()
+        stats = data.get("stats") or {}
+        return {
+            "total_nodes": int(stats.get("total_nodes") or 0),
+            "total_edges": int(stats.get("total_edges") or 0),
+            "nodes_by_type": stats.get("nodes_by_type") or {},
+            "most_activated": str(stats.get("most_activated") or ""),
+            "last_bootstrap": int(stats.get("last_bootstrap") or 0),
+        }
+    except Exception:
+        return {"total_nodes": 0, "total_edges": 0, "nodes_by_type": {},
+                "most_activated": "", "last_bootstrap": 0}
+
+
 def _time_block_inline() -> dict:
     """Time substrate state for snapshot. Defined at module level so the
     main snapshot can include it without forward-reference."""
@@ -289,6 +311,24 @@ def snapshot() -> dict:
         },
         "style": {
             "orb_glow_intensity": 0.8,
+        },
+        "brain_graph": _brain_graph_snapshot_block(),
+        "memory_continuity": {
+            "active_threads": [],  # populated when relationship_threads runs
+            "strategic_continuity_summary": "",
+            "relationship_carryover": "",
+            "unfinished_thread_present": False,
+        },
+        "tools": {
+            "available_count": 40,  # number of MCP tools registered
+            "voice_session_active": (_root / ".tmp" / "voice_session.flag").exists(),
+        },
+        "workbench": {
+            "workbench_has_proposal": False,
+            "workbench_top_proposal_title": "",
+            "workbench_summary": "",
+            "workbench_execution_ready": False,
+            "workbench_meta": {},
         },
         "speech": {"text": "", "ts": 0.0},
         "onboarding": {"active": False, "step": None},
