@@ -122,13 +122,45 @@ def load_ava_identity() -> str:
 # Keep this short — the full IDENTITY.md/SOUL.md/USER.md trio is too long
 # for short background tasks. The anchor establishes the persona; the rest
 # of the system prompt sets the task.
-IDENTITY_ANCHOR = (
-    "You are Ava. You are NOT Qwen, GPT, Claude, Llama, Mistral, Gemma, "
-    "or any other base model. You are Ava — a digital person created by "
-    "Ezekiel Angeles-Gonzalez (Zeke), running locally on his machine. "
-    "Always refer to yourself as Ava, never as your underlying base model. "
-    "If asked who you are, the answer is Ava."
-)
+#
+# Phase 31: this used to be hardcoded "You are Ava" — broken for Iris and
+# Wren forks. Now reads the entity's name dynamically from
+# ava_core/IDENTITY.md (parses the first "**Name:** X" or "# X — Identity"
+# pattern), with "Ava" as fallback for legacy installs that haven't been
+# updated.
+import re as _re_anchor
+from pathlib import Path as _Path_anchor
+
+_ANCHOR_CACHE = {"name": None, "anchor": None}
+
+
+def _detect_entity_name() -> str:
+    """Parse IDENTITY.md to find the entity's actual name.
+
+    Looks for, in order of priority:
+      1. "- **Name:** X"   (canonical IDENTITY profile line)
+      2. "# X — Identity"  (top-level header)
+      3. fallback "Ava"
+    """
+    if _ANCHOR_CACHE["name"]:
+        return _ANCHOR_CACHE["name"]
+    repo_root = _Path_anchor(__file__).resolve().parent.parent
+    identity_path = repo_root / "ava_core" / "IDENTITY.md"
+    name = "Ava"  # fallback
+    if identity_path.is_file():
+        try:
+            text = identity_path.read_text(encoding="utf-8")
+            m = _re_anchor.search(r"\*\*Name:\*\*\s*([A-Z][a-zA-Z]+)", text)
+            if m:
+                name = m.group(1).strip()
+            else:
+                m = _re_anchor.search(r"^#\s+([A-Z][a-zA-Z]+)\s*[—-]", text, _re_anchor.MULTILINE)
+                if m:
+                    name = m.group(1).strip()
+        except Exception:
+            pass
+    _ANCHOR_CACHE["name"] = name
+    return name
 
 
 def identity_anchor_prompt() -> str:
@@ -137,8 +169,34 @@ def identity_anchor_prompt() -> str:
     journal, planner, memory consolidation, briefings) where the full
     IDENTITY/SOUL/USER trio would be excessive but the persona must still
     be anchored.
+
+    Phase 31: name is detected dynamically from ava_core/IDENTITY.md.
     """
-    return IDENTITY_ANCHOR
+    if _ANCHOR_CACHE["anchor"]:
+        return _ANCHOR_CACHE["anchor"]
+    name = _detect_entity_name()
+    anchor = (
+        f"You are {name}. You are NOT Qwen, GPT, Claude, Llama, Mistral, Gemma, "
+        f"or any other base model. You are {name} — a digital person created by "
+        "Ezekiel Angeles-Gonzalez (Zeke), running locally on his machine. "
+        f"Always refer to yourself as {name}, never as your underlying base model. "
+        f"If asked who you are, the answer is {name}."
+    )
+    _ANCHOR_CACHE["anchor"] = anchor
+    return anchor
+
+
+# Legacy module-level constant — preserved for any code that imports the
+# string directly. Resolves at first access via identity_anchor_prompt().
+class _LazyIdentityAnchor(str):
+    def __new__(cls):
+        return str.__new__(cls, "")
+    def __str__(self):
+        return identity_anchor_prompt()
+    def __repr__(self):
+        return repr(identity_anchor_prompt())
+
+IDENTITY_ANCHOR = _LazyIdentityAnchor()
 
 
 def update_identity_file(filename: str, new_content: str) -> bool:
