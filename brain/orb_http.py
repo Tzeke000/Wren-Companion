@@ -172,7 +172,13 @@ def snapshot() -> dict:
             "looking_at_screen": bool(_g.get("_looking_at_screen") or False),
             "gaze_region": str(_g.get("_gaze_region") or ""),
         },
-        "inner_life": {"current_thought": None},
+        "inner_life": {
+            "current_thought": (
+                str(_g.get("_inner_thought") or "") or None
+            ),
+            "thought_ts": float(_g.get("_inner_thought_ts") or 0.0),
+            "trigger": str(_g.get("_inner_thought_trigger") or ""),
+        },
         "tts": {
             "tts_speaking": bool(_g.get("_tts_speaking")),
             "engine": getattr(_tts_ref, "_engine_type", None),

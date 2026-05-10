@@ -87,6 +87,11 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # Counterfactual archive — what I almost said vs what I chose. Empty until used.
     _try("counterfactual_archive", lambda: _bootstrap_counterfactual_archive(g, root))
 
+    # Inner monologue — periodic background thinking via the LLM bridge.
+    # Cadence: ~15 min when there's signal to think about. Won't tick if no
+    # face seen + no recent turn + no salient mood. Won't burn tokens silently.
+    _try("iris_inner_monologue", lambda: _bootstrap_inner_monologue(g))
+
     # ── L4: heartbeat + tick threads ─────────────────────────────────────────
     _try("heartbeat_thread", lambda: _start_heartbeat_thread(g))
 
@@ -241,6 +246,11 @@ def _bootstrap_counterfactual_archive(g: dict[str, Any], root: Path) -> None:
     from brain import counterfactual_archive
     counterfactual_archive.configure(root)
     g["_counterfactual_archive_ready"] = True
+
+
+def _bootstrap_inner_monologue(g: dict[str, Any]) -> None:
+    from brain.iris_inner_monologue import bootstrap_iris_inner_monologue
+    bootstrap_iris_inner_monologue(g)
 
 
 # ── L4: heartbeat tick ──────────────────────────────────────────────────────

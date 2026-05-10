@@ -871,6 +871,34 @@ def memory_remember(text: str, tags: list[str] | None = None,
 
 
 @mcp.tool()
+def inner_monologue_tick(force: bool = True) -> dict:
+    """Trigger one inner-monologue cycle. By default forces a tick (skips
+    the heuristic gate). Use to seed a thought when nothing's happening or
+    to manually reflect on something.
+
+    The thought gets persisted to state/iris_inner_monologue.jsonl and
+    surfaces in the orb's inner_life.current_thought field."""
+    try:
+        from brain.iris_inner_monologue import tick_once
+        thought = tick_once(_g, force=bool(force))
+        if thought is None:
+            return {"ok": True, "thought": None, "note": "no signal or LLM timeout"}
+        return {"ok": True, "thought": thought}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def inner_monologue_recent(n: int = 10) -> dict:
+    """Read recent inner thoughts. Returns a list newest-first."""
+    try:
+        from brain.iris_inner_monologue import recent_thoughts
+        return {"ok": True, "thoughts": recent_thoughts(n=int(n))}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def letter_compose(subject: str, body: str, person_id: str = "zeke",
                    triggered_by: str = "") -> dict:
     """Compose an async letter to Zeke. Different rhythm than chat —
