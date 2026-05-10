@@ -246,6 +246,25 @@ def snapshot() -> dict:
             "insight_provider": (
                 str(getattr(insight, "_provider", "")) if insight else ""
             ),
+            "perception": {
+                "resolved_face_identity": (
+                    str(_g.get("_recognized_person_id") or "")
+                    if _g.get("_recognized_person_id") not in (None, "unknown") else ""
+                ),
+                "stable_face_identity": (
+                    str(_g.get("_recognized_person_id") or "")
+                    if (_g.get("_recognized_person_id") not in (None, "unknown")
+                        and float(_g.get("_recognized_confidence") or 0) > 0.7) else ""
+                ),
+                "identity_confidence": float(_g.get("_recognized_confidence") or 0.0),
+                "face_status": (
+                    "recognized" if _g.get("_recognized_person_id") not in (None, "unknown")
+                    else ("face_unresolved" if (_g.get("_face_results") or []) else "no_face")
+                ),
+                "scene_compact_summary": str(_g.get("_llava_scene_description") or ""),
+                "interpretation_confidence": float(_g.get("_recognized_confidence") or 0.0),
+                "recognized_text": "",
+            },
         },
         "heartbeat_runtime": {
             "last_tick_ts": float(_g.get("_last_heartbeat_ts") or 0.0),
