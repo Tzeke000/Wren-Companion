@@ -445,15 +445,21 @@ def _generate_greeting_async(g: dict[str, Any], person_id: str, prev_person: str
                 + "Greet him warmly in ONE short sentence (under 12 words). "
                 "Don't say 'hello there'. Match how a close friend would greet him."
             )
-            llm = ChatOllama(model=model, temperature=0.8, num_predict=50)
+            # Phase 21: route through iris_llm (was Ollama). Note: proactive
+            # greetings on face-detect are default-OFF in Iris's personalization
+            # ("I don't auto-engage" — IDENTITY.md). This path only fires if
+            # the surrounding gates allow it. Keeping the LLM call wired so
+            # future re-enable just works.
             try:
-                result = with_ollama(
-                    lambda: llm.invoke([HumanMessage(content=prompt)]),
-                    label=f"greeting:{model}",
+                from brain import iris_llm
+                greeting = iris_llm.ask_iris(
+                    prompt=prompt, kind="greeting",
+                    requester="proactive_triggers", timeout_s=30.0,
                 )
-                greeting = str(getattr(result, "content", str(result))).strip()
+                if not greeting:
+                    greeting = "Hey Zeke."
             except Exception as e:
-                print(f"[proactive] greeting llm error: {e!r} — using fallback")
+                print(f"[proactive] greeting iris_llm error: {e!r} — using fallback")
                 greeting = "Hey Zeke."
 
             # Sanity strip

@@ -148,25 +148,26 @@ def _llm_extract(host: dict, user_text: str) -> dict[str, Any] | None:
         user_text=user_text[:1200],
         commit_to_globals=False,
     )
-    llm = ChatOllama(model=tag, temperature=0.35)
-    sys = SystemMessage(
-        content=(
-            "You extract structured data about FUTURE events only. "
-            "If the user message does not imply a future commitment, event, or dated plan, respond with exactly: null\n"
-            "Otherwise respond with one JSON object only, no markdown, keys: "
-            "has_event (bool), event_description (short string), time_reference (string), "
-            "person_involved (string or empty), confidence (0-1 float)."
-        )
+    # Phase 21: route through iris_llm. Was ChatOllama with model `tag`.
+    sys_prompt = (
+        "You extract structured data about FUTURE events only. "
+        "If the user message does not imply a future commitment, event, or dated plan, respond with exactly: null\n"
+        "Otherwise respond with one JSON object only, no markdown, keys: "
+        "has_event (bool), event_description (short string), time_reference (string), "
+        "person_involved (string or empty), confidence (0-1 float)."
     )
-    hum = HumanMessage(
-        content=f'User message:\n"""{user_text[:1200]}"""\n\nJSON or null:'
-    )
+    full_prompt = f"{sys_prompt}\n\nUser message:\n\"\"\"{user_text[:1200]}\"\"\"\n\nJSON or null:"
     try:
-        res = llm.invoke([sys, hum])
-        text = (getattr(res, "content", None) or str(res)).strip()
-        if not text or text.lower().startswith("null"):
+        from brain import iris_llm
+        text = iris_llm.ask_iris(
+            prompt=full_prompt, kind="extract_event",
+            requester="event_extractor", timeout_s=60.0,
+        )
+        if text is None:
             return None
         text = text.strip()
+        if not text or text.lower().startswith("null"):
+            return None
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
             text = re.sub(r"\s*```$", "", text)

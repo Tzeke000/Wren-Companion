@@ -163,30 +163,23 @@ def score_retrieved_memories(
     scorer_error: str | None = None
     scorer_ms: int = 0
     try:
-        from langchain_ollama import ChatOllama  # type: ignore
-        from langchain_core.messages import HumanMessage  # type: ignore
-        from brain.ollama_lock import with_ollama  # type: ignore
+        # Phase 21: route through iris_llm. Memory reflection scoring is
+        # non-urgent; long timeout is fine.
+        from brain import iris_llm
 
         prompt = _build_scoring_prompt(user_text, reply_text, retrieved)
-        # keep_alive carries forward Phase 1 fix; reuse fast-path cache
-        # if present, otherwise create a fresh instance with the same key.
-        cache = g.get("_fast_llm_cache")
-        llm = None
-        if isinstance(cache, dict):
-            llm = cache.get((scorer, 80))
-        if llm is None:
-            llm = ChatOllama(
-                model=scorer, temperature=0.1, num_predict=120, keep_alive=-1
-            )
-
         s0 = time.time()
-        out = with_ollama(
-            lambda: llm.invoke([HumanMessage(content=prompt)]),
-            label=f"reflection_scorer:{scorer}",
+        raw = iris_llm.ask_iris(
+            prompt=prompt,
+            kind="reflection_scorer",
+            requester="memory_reflection",
+            timeout_s=120.0,
         )
         scorer_ms = int((time.time() - s0) * 1000)
-        raw = (getattr(out, "content", str(out)) or "").strip()
-        scores = _parse_scores(raw, n_ret)
+        if raw is None:
+            scorer_error = "iris_llm timeout"
+        else:
+            scores = _parse_scores(raw.strip(), n_ret)
     except Exception as e:
         scorer_error = f"{type(e).__name__}: {e}"
 

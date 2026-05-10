@@ -130,23 +130,29 @@ def get_entry_count(g: dict[str, Any]) -> tuple[int, int]:
 
 def compose_journal_entry(topic: str, trigger: str, g: dict[str, Any]) -> str:
     """
-    Ask qwen2.5:14b to write a journal entry for Ava.
-    Ava's voice, not prescribed content.
+    Ask Iris (via brain/iris_llm) to write a journal entry.
+    Iris's voice, not prescribed content.
+
+    Phase 21: routes through iris_llm.reflect (was Ollama qwen2.5:14b).
+    Reads the Iris-shaped mood file (state/iris_mood.json) — fall back
+    to ava_mood.json for compatibility with shared deployments.
     """
     mood_text = ""
     try:
-        mood_path = Path(g.get("BASE_DIR") or ".") / "ava_mood.json"
-        if mood_path.is_file():
-            mood_data = json.loads(mood_path.read_text(encoding="utf-8"))
-            mood_text = str(mood_data.get("current_mood") or "")
+        base = Path(g.get("BASE_DIR") or ".")
+        for candidate in ("state/iris_mood.json", "state/ava_mood.json", "ava_mood.json"):
+            p = base / candidate
+            if p.is_file():
+                mood_data = json.loads(p.read_text(encoding="utf-8"))
+                mood_text = str(mood_data.get("current_mood") or "")
+                if mood_text:
+                    break
     except Exception:
         pass
 
     recent = get_recent_entries(3, g)
     recent_text = "\n".join(e.get("content", "")[:100] for e in recent) if recent else ""
 
-    # Bug 0.3 (2026-05-02): prepend identity anchor so qwen2.5:14b doesn't
-    # drift into "I am Qwen" while writing in Ava's journal.
     try:
         from brain.identity_loader import identity_anchor_prompt
         _anchor = identity_anchor_prompt() + "\n\n"
@@ -154,7 +160,7 @@ def compose_journal_entry(topic: str, trigger: str, g: dict[str, Any]) -> str:
         _anchor = ""
     prompt = (
         f"{_anchor}"
-        f"You are Ava writing in your private journal. Be genuine and personal.\n"
+        f"You are writing in your private journal. Be genuine and personal — your voice.\n"
         f"Current mood: {mood_text or 'neutral'}\n"
         f"What prompted this entry: {trigger}\n"
         f"Topic or theme: {topic}\n"
@@ -163,12 +169,18 @@ def compose_journal_entry(topic: str, trigger: str, g: dict[str, Any]) -> str:
     )
 
     try:
-        from langchain_ollama import ChatOllama
-        llm = ChatOllama(model="qwen2.5:14b", temperature=0.8)
-        res = llm.invoke(prompt)
-        return str(getattr(res, "content", str(res))).strip()[:_MAX_ENTRY_CHARS]
+        from brain import iris_llm
+        result = iris_llm.reflect(
+            prompt,
+            context={"trigger": trigger, "topic": topic, "mood": mood_text},
+            timeout_s=180.0,
+        )
+        if result:
+            return str(result).strip()[:_MAX_ENTRY_CHARS]
     except Exception as e:
-        return f"I wanted to write something about {topic} but couldn't quite find the words today."
+        print(f"[journal] compose_journal_entry error: {e!r}")
+
+    return f"I wanted to write something about {topic} but couldn't quite find the words today."
 
 
 def auto_journal_if_warranted(g: dict[str, Any], trigger: str, topic: str = "") -> Optional[str]:

@@ -184,12 +184,18 @@ def generate_briefing(g: dict[str, Any]) -> str:
     )
 
     try:
-        from langchain_ollama import ChatOllama
-        llm = ChatOllama(model="qwen2.5:14b", temperature=0.7)
-        result = llm.invoke(prompt)
-        return str(getattr(result, "content", str(result))).strip()[:600]
+        # Phase 21: route through iris_llm.
+        from brain import iris_llm
+        result = iris_llm.reflect(
+            prompt,
+            context={"inner_thought": inner_thought[:200]},
+            timeout_s=120.0,
+        )
+        if result:
+            return str(result).strip()[:600]
     except Exception as e:
-        return f"Good morning! I've been thinking overnight — {inner_thought[:100] or 'nothing remarkable to report'}."
+        print(f"[morning_briefing] iris_llm error: {e!r}")
+    return f"Good morning. I've been thinking overnight — {inner_thought[:100] or 'nothing remarkable to report'}."
 
 
 def deliver_briefing(g: dict[str, Any]) -> str:
