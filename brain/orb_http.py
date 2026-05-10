@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 import uvicorn
@@ -123,6 +123,11 @@ def snapshot() -> dict:
         "mood": {"mood_label": "calm", "valence": 0.0, "arousal": 0.2},
         "connectivity": {"online": True, "wan": True, "lan": True},
         "current_person": current_person,
+        "attention": {
+            "state": str(_g.get("_attention_state") or ""),
+            "looking_at_screen": bool(_g.get("_looking_at_screen") or False),
+            "gaze_region": str(_g.get("_gaze_region") or ""),
+        },
         "inner_life": {"current_thought": None},
         "tts": {
             "tts_speaking": bool(_g.get("_tts_speaking")),
@@ -249,29 +254,96 @@ async def shutdown() -> dict:
 
 # Tier 5 — feature stubs. Orb has .catch(() => {}) on these, so empty
 # success renders the relevant tabs as empty UI instead of "broken."
+# ── Memory (Phase 3) — JSONL-backed iris_memory store ────────────────────────
+# The orb reads entry.memory and entry.created_at; iris_memory stores text/iso.
+# We project the canonical JSONL fields into the orb's expected shape.
+def _project_mem_entry(e: dict) -> dict:
+    return {
+        "id": e.get("id"),
+        "memory": e.get("text") or "",
+        "created_at": e.get("iso") or "",
+        "ts": e.get("ts"),
+        "person_id": e.get("person_id"),
+        "category": e.get("category"),
+        "importance": e.get("importance"),
+        "tags": e.get("tags") or [],
+    }
+
+
 @app.get("/api/v1/memory/mem0")
 def memory_mem0() -> dict:
-    return {"ok": True, "entries": []}
+    mem = _g.get("_iris_memory")
+    if mem is None:
+        return {"ok": True, "entries": []}
+    try:
+        rows = mem.list(limit=200)
+        return {"ok": True, "entries": [_project_mem_entry(e) for e in rows]}
+    except Exception as e:
+        return {"ok": False, "entries": [], "error": str(e)}
 
 
 @app.post("/api/v1/memory/mem0/search")
-async def memory_mem0_search() -> dict:
-    return {"ok": True, "results": []}
+async def memory_mem0_search(payload: dict = Body(default={})) -> dict:
+    mem = _g.get("_iris_memory")
+    if mem is None:
+        return {"ok": True, "results": []}
+    q = str(payload.get("query") or "").strip()
+    limit = int(payload.get("limit") or 10)
+    if not q:
+        return {"ok": True, "results": []}
+    try:
+        rows = mem.search(q, limit=limit)
+        return {"ok": True, "results": [_project_mem_entry(e) for e in rows]}
+    except Exception as e:
+        return {"ok": False, "results": [], "error": str(e)}
 
 
 @app.delete("/api/v1/memory/mem0/{entry_id}")
 async def memory_mem0_delete(entry_id: str) -> dict:
-    return {"ok": True}
+    mem = _g.get("_iris_memory")
+    if mem is None:
+        return {"ok": False, "error": "memory not available"}
+    try:
+        deleted = mem.delete(entry_id)
+        return {"ok": deleted, "id": entry_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
+# ── Brain graph (Phase 3) — concept_graph passthrough ────────────────────────
 @app.get("/api/v1/brain/graph")
 def brain_graph() -> dict:
-    return {"ok": True, "nodes": [], "edges": [], "stats": {}}
+    cg = _g.get("_concept_graph")
+    if cg is None:
+        return {"ok": True, "nodes": [], "edges": [], "stats": {}}
+    try:
+        data = cg.get_graph_data()
+        return {"ok": True, **data}
+    except Exception as e:
+        return {"ok": False, "nodes": [], "edges": [], "stats": {}, "error": str(e)}
 
 
 @app.get("/api/v1/brain/active")
 def brain_active() -> dict:
-    return {"ok": True, "active_nodes": [], "firing_paths": []}
+    cg = _g.get("_concept_graph")
+    if cg is None:
+        return {"ok": True, "active_nodes": [], "firing_paths": []}
+    try:
+        active = cg.get_active_nodes(last_n_seconds=30)
+        # firing_paths: edges between any two currently-active nodes.
+        active_ids = {str(n.get("id")) for n in active}
+        firing = []
+        for edge in cg.edges:
+            s, t = str(edge.source), str(edge.target)
+            if s in active_ids and t in active_ids:
+                firing.append({
+                    "source": s, "target": t,
+                    "relationship": edge.relationship,
+                    "strength": edge.strength,
+                })
+        return {"ok": True, "active_nodes": active, "firing_paths": firing}
+    except Exception as e:
+        return {"ok": False, "active_nodes": [], "firing_paths": [], "error": str(e)}
 
 
 @app.get("/api/v1/plans")
@@ -296,12 +368,35 @@ async def plans_resume(plan_id: str) -> dict:
 
 @app.get("/api/v1/journal/entries")
 def journal_entries() -> dict:
-    return {"ok": True, "entries": []}
+    try:
+        from brain import journal as _journal
+        # Default to a generous window — orb decides what to render.
+        entries = _journal.get_recent_entries(n=200, g=_g)
+        # Newest first.
+        entries = list(reversed(entries))
+        return {"ok": True, "entries": entries}
+    except Exception as e:
+        return {"ok": False, "entries": [], "error": str(e)}
 
 
 @app.get("/api/v1/journal/shared", response_class=PlainTextResponse)
 def journal_shared() -> str:
-    return ""
+    try:
+        from brain import journal as _journal
+        shared = _journal.get_shared_entries(_g)
+        if not shared:
+            return "(no shared journal entries yet)"
+        # Plain text dump, newest first.
+        shared.sort(key=lambda e: float(e.get("ts") or 0.0), reverse=True)
+        chunks: list[str] = []
+        for e in shared:
+            date = str(e.get("date") or "")
+            topic = str(e.get("topic") or "")
+            content = str(e.get("content") or "")
+            chunks.append(f"=== {date} — {topic} ===\n{content}\n")
+        return "\n".join(chunks)
+    except Exception as e:
+        return f"(journal error: {e})"
 
 
 @app.get("/api/v1/learning/log")

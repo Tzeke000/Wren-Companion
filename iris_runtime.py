@@ -499,6 +499,8 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
 
     interval = 1.0 / 15.0
     insight_every_n = 3
+    expr_every_n = 5      # ~3fps expression detection
+    attn_every_n = 30     # ~0.5fps attention/gaze (still much faster than Ava's 30s heartbeat)
     frame_idx = 0
 
     from brain.camera_annotator import annotate_frame as _annotate
@@ -582,6 +584,34 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                 except Exception as _ee:
                     print(f"[iris_video] enroll error: {_ee!r}", file=sys.stderr, flush=True)
 
+            # Phase 2 — expression detection (MediaPipe-backed). Throttled
+            # because it runs face mesh per call. Stores dominant label on _g
+            # for orb snapshot (current_person.expression) and annotator overlay.
+            et = g.get("_expression_detector")
+            if et is not None and getattr(et, "available", False):
+                if frame_idx % expr_every_n == 0:
+                    try:
+                        expr = et.detect_expression(frame)
+                        if expr:
+                            g["_current_expression"] = str(expr.get("dominant", "") or "")
+                    except Exception as _ee:
+                        pass
+
+            # Phase 2 — attention / gaze. eye_tracker.get_attention_state returns
+            # one of focused/distracted/away/absent. _looking_at_screen drives
+            # the "should I speak" gate downstream. Heavily throttled (~0.5fps)
+            # since the orb just polls snapshot at 5s anyway.
+            ez = g.get("_eye_tracker")
+            if ez is not None and getattr(ez, "available", False):
+                if frame_idx % attn_every_n == 0:
+                    try:
+                        g["_attention_state"] = ez.get_attention_state(frame)
+                        g["_looking_at_screen"] = bool(ez.is_looking_at_screen(frame))
+                        if getattr(ez, "calibrated", False):
+                            g["_gaze_region"] = ez.get_gaze_region(frame) or ""
+                    except Exception:
+                        pass
+
             try:
                 annotated = _annotate(frame, g.get("_face_results"), g)
             except Exception as _ae:
@@ -644,6 +674,47 @@ def _eager_init_engines() -> None:
                 print("[iris_runtime] InsightFace not available — camera will serve raw frames without overlays", file=sys.stderr, flush=True)
         except Exception as _ve:
             print(f"[iris_runtime] vision phase 1 skipped: {_ve!r}", file=sys.stderr, flush=True)
+
+        # Phase 2 perception — expression + eye/attention. MediaPipe-backed,
+        # both modules degrade to .available=False if MP isn't installed; the
+        # capture loop null-checks before calling. Calibration for gaze is
+        # optional (POST /api/v1/camera/calibrate_gaze); without it we still
+        # get attention_state + looking_at_screen from face geometry.
+        try:
+            from brain.expression_detector import bootstrap_expression_detector
+            bootstrap_expression_detector(_g)
+        except Exception as _ee:
+            print(f"[iris_runtime] expression_detector skipped: {_ee!r}", file=sys.stderr, flush=True)
+        try:
+            from brain.eye_tracker import bootstrap_eye_tracker
+            bootstrap_eye_tracker(_g)
+        except Exception as _ye:
+            print(f"[iris_runtime] eye_tracker skipped: {_ye!r}", file=sys.stderr, flush=True)
+
+        # Phase 3 — memory + concept graph + journal.
+        # iris_memory: JSONL-backed manual memory store. mem0/LLM extraction
+        #   deferred until Phase 4 wires an LLM endpoint.
+        # concept_graph: load existing graph if present, else start empty.
+        #   bootstrap_from_existing_memory uses Mistral for concept extraction;
+        #   skip that for now and let the graph fill via direct add_node calls.
+        # journal: JSONL-backed; module is stateless and reads BASE_DIR from _g.
+        try:
+            from brain.iris_memory import bootstrap_iris_memory
+            bootstrap_iris_memory(_g)
+        except Exception as _me:
+            print(f"[iris_runtime] iris_memory skipped: {_me!r}", file=sys.stderr, flush=True)
+        try:
+            from brain.concept_graph import ConceptGraph
+            _cg = ConceptGraph(ROOT)
+            _g["_concept_graph"] = _cg
+            print(f"[iris_runtime] concept_graph ready (nodes={len(_cg.nodes)}, edges={len(_cg.edges)})", file=sys.stderr, flush=True)
+        except Exception as _cge:
+            print(f"[iris_runtime] concept_graph skipped: {_cge!r}", file=sys.stderr, flush=True)
+        try:
+            (ROOT / "state").mkdir(parents=True, exist_ok=True)
+            print("[iris_runtime] journal ready (state/journal.jsonl)", file=sys.stderr, flush=True)
+        except Exception as _je:
+            print(f"[iris_runtime] journal dir setup failed: {_je!r}", file=sys.stderr, flush=True)
 
         # Filler audio clips — pre-rendered Kokoro phrases played via direct
         # sounddevice on the voice_next_input return path. Perceived-latency
