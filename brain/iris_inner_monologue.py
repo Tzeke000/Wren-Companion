@@ -402,13 +402,26 @@ def tick_once(g: dict[str, Any], force: bool = False) -> Optional[str]:
     # Same CC turn that produced the thought also runs extraction — no
     # extra turn cost.
     try:
-        from brain import iris_extraction_queue
-        if iris_extraction_queue.pending_count() > 0:
-            stats = iris_extraction_queue.drain_one_batch(g, max_turns=8)
-            if stats.get("facts_extracted", 0) > 0:
-                print(f"[inner_monologue] extraction drain: {stats}")
+        from brain import iris_extraction_queue, iris_tune
+        if iris_tune.get("behavior", "auto_extract_facts", True):
+            if iris_extraction_queue.pending_count() > 0:
+                batch_size = int(iris_tune.get("cadence", "extraction_queue_max_batch", 8))
+                stats = iris_extraction_queue.drain_one_batch(g, max_turns=batch_size)
+                if stats.get("facts_extracted", 0) > 0:
+                    print(f"[inner_monologue] extraction drain: {stats}")
     except Exception as _ee:
         print(f"[inner_monologue] extraction drain error: {_ee!r}")
+    # Phase 44: weekly memory consolidation. Cheap should_consolidate gate
+    # decides if it's been long enough since last run; consolidate() is
+    # only LLM-heavy when it actually fires (~once a week).
+    try:
+        from brain import memory_consolidation
+        if memory_consolidation.should_consolidate(g):
+            print("[inner_monologue] running memory consolidation...")
+            result = memory_consolidation.consolidate(g)
+            print(f"[inner_monologue] consolidation done: {result}")
+    except Exception as _ce:
+        print(f"[inner_monologue] consolidation error: {_ce!r}")
     print(f"[inner_monologue] tick: trigger={trigger} thought={thought[:80]!r}")
     return thought
 

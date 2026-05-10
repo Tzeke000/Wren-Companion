@@ -621,6 +621,27 @@ def chat_reply(request_id: str, text: str) -> dict:
                 iris_extraction_queue.enqueue(user_msg, person_id="zeke", modality="chat")
         except Exception:
             pass
+        # Phase 44: auto-detect anchor moment from this turn (regex, no LLM).
+        try:
+            from brain import anchor_moments
+            user_msg = str((req or {}).get("user_text") or "")
+            if user_msg:
+                anchor_id = anchor_moments.auto_detect_anchor_in_turn(
+                    "zeke", user_msg, str(text),
+                )
+                if anchor_id:
+                    print(f"[chat_reply] auto-marked anchor: {anchor_id}",
+                          file=sys.stderr, flush=True)
+                    try:
+                        bus = _g.get("_signal_bus")
+                        if bus is not None:
+                            bus.fire("anchor_marked",
+                                     data={"anchor_id": anchor_id, "kind": "auto"},
+                                     priority="medium")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         # Phase 26: chat reply nudges mood toward engagement + fires signal.
         try:
             from brain import mood_core
