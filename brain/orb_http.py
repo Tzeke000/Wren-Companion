@@ -434,22 +434,53 @@ def brain_active() -> dict:
 
 @app.get("/api/v1/plans")
 def plans_list() -> dict:
-    return {"ok": True, "plans": []}
+    """All plans via brain/planner.LongHorizonPlanner. Plans persist at
+    state/plans.jsonl."""
+    try:
+        from brain.planner import get_planner
+        planner = get_planner(_root)
+        plans = planner._load()  # raw list of plan dicts
+        return {"ok": True, "plans": plans}
+    except Exception as e:
+        return {"ok": False, "plans": [], "error": str(e)}
 
 
 @app.post("/api/v1/plans/create")
-async def plans_create() -> dict:
-    return {"ok": True, "id": None}
+async def plans_create(payload: dict = Body(default={})) -> dict:
+    """Create a plan. goal is required. context is optional. Plan creation
+    asks Iris (via iris_llm) to decompose into 3-6 steps; on Iris timeout
+    falls back to a single-step plan."""
+    goal = str(payload.get("goal") or "").strip()
+    if not goal:
+        return {"ok": False, "error": "goal is required"}
+    context = str(payload.get("context") or "")
+    try:
+        from brain.planner import get_planner
+        planner = get_planner(_root)
+        plan = planner.create_plan(goal, context=context)
+        return {"ok": True, "id": plan.get("id"), "plan": plan}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/api/v1/plans/{plan_id}/pause")
 async def plans_pause(plan_id: str) -> dict:
-    return {"ok": True}
+    try:
+        from brain.planner import get_planner
+        planner = get_planner(_root)
+        return planner.pause_plan(plan_id)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/api/v1/plans/{plan_id}/resume")
 async def plans_resume(plan_id: str) -> dict:
-    return {"ok": True}
+    try:
+        from brain.planner import get_planner
+        planner = get_planner(_root)
+        return planner.resume_plan(plan_id)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/api/v1/journal/entries")

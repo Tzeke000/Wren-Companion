@@ -105,8 +105,15 @@ def has_pending() -> bool:
 
 def submit(prompt: str, kind: str = "general",
            context: Optional[dict] = None,
-           requester: str = "brain") -> str:
-    """Write a new pending LLM request, return request_id."""
+           requester: str = "brain",
+           image_b64: Optional[str] = None,
+           image_path: Optional[str] = None) -> str:
+    """Write a new pending LLM request, return request_id.
+
+    If image_b64 or image_path is given, the request is multimodal — Iris
+    receives the image alongside the prompt. Used by scene_understanding
+    and any vision-LLM caller. Iris is multimodal so this works as long
+    as the rewake message references the image."""
     request_id = uuid.uuid4().hex[:12]
     entry = {
         "id": request_id,
@@ -119,6 +126,14 @@ def submit(prompt: str, kind: str = "general",
         "reply": None,
         "answered_ts": None,
     }
+    if image_b64:
+        entry["image_b64"] = str(image_b64)
+        entry["has_image"] = True
+    elif image_path:
+        entry["image_path"] = str(image_path)
+        entry["has_image"] = True
+    else:
+        entry["has_image"] = False
     with _LOCK:
         _request_path(request_id).write_text(
             json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -204,6 +219,47 @@ def get(request_id: str) -> Optional[dict[str, Any]]:
 
 
 # ── Public API: synchronous one-call wrapper ────────────────────────────────
+
+def describe_image(image_path: str, prompt: str = "",
+                   kind: str = "describe_image",
+                   timeout_s: float = 180.0) -> Optional[str]:
+    """Vision-LLM via Iris. Iris is multimodal — she receives the image
+    via a path reference in the rewake message and describes what she sees.
+
+    Used by scene_understanding (replacing LLaVA), describe_person, and
+    any caller that needs visual interpretation.
+
+    Args:
+        image_path: Absolute path to PNG/JPG.
+        prompt: What to focus on. Default is open-ended description.
+        timeout_s: Default 3 min — vision takes longer than text.
+
+    Returns: description text, or None on timeout.
+    """
+    if _BASE is None:
+        return None
+    if not prompt.strip():
+        prompt = ("Describe what you see naturally and briefly. Focus on: "
+                  "who is present, what they are doing, their apparent mood/energy, "
+                  "anything notable. 2-3 sentences as if describing to a friend.")
+    try:
+        rid = submit(
+            prompt, kind=kind, requester="scene_understanding",
+            image_path=image_path, timeout_s=timeout_s,
+        )
+        return wait_for_reply(rid, timeout_s=timeout_s)
+    except TypeError:
+        # submit() doesn't accept timeout_s — recover by submitting without it
+        try:
+            rid = submit(prompt, kind=kind, requester="scene_understanding",
+                        image_path=image_path)
+            return wait_for_reply(rid, timeout_s=timeout_s)
+        except Exception:
+            return None
+    except Exception as e:
+        print(f"[iris_llm] describe_image error: {e!r}")
+        return None
+
 
 def ask_iris(
     prompt: str,

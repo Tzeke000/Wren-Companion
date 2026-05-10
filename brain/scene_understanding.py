@@ -83,11 +83,13 @@ def _store_cache(key: str, text: str) -> None:
 
 
 def describe_scene(frame_path: str, context: str = "", fallback_scene: str = "") -> str:
+    """Vision-LLM scene description. Phase 17: routes through brain/iris_llm
+    (Iris is multimodal) instead of LLaVA via Ollama.
+
+    Falls back to fallback_scene on timeout — vision asks take a while
+    and we don't want to block the heartbeat tick."""
     path = Path(frame_path)
     if not path.is_file():
-        return str(fallback_scene or "").strip()
-    model = _pick_llava_model()
-    if not model:
         return str(fallback_scene or "").strip()
     prompt = (
         "Describe what you see naturally and briefly. Focus on: who is present, what they are doing, "
@@ -100,21 +102,19 @@ def describe_scene(frame_path: str, context: str = "", fallback_scene: str = "")
     if cached is not None:
         return cached
     try:
-        txt = _call_llava(path, prompt, model)
+        from brain import iris_llm
+        txt = iris_llm.describe_image(str(path), prompt=prompt, timeout_s=180.0)
         if txt:
             _store_cache(key, txt)
             return txt
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[scene_understanding] describe_scene error: {e!r}")
     return str(fallback_scene or "").strip()
 
 
 def describe_person(frame_path: str, person_name: str = "") -> str:
     path = Path(frame_path)
     if not path.is_file():
-        return ""
-    model = _pick_llava_model()
-    if not model:
         return ""
     prompt = (
         "Describe the person in this image. "
@@ -127,12 +127,13 @@ def describe_person(frame_path: str, person_name: str = "") -> str:
     if cached is not None:
         return cached
     try:
-        txt = _call_llava(path, prompt, model)
+        from brain import iris_llm
+        txt = iris_llm.describe_image(str(path), prompt=prompt, timeout_s=180.0)
         if txt:
             _store_cache(key, txt)
             return txt
-    except Exception:
-        return ""
+    except Exception as e:
+        print(f"[scene_understanding] describe_person error: {e!r}")
     return ""
 
 

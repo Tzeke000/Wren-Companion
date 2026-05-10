@@ -897,6 +897,91 @@ def memory_remember(text: str, tags: list[str] | None = None,
 
 
 @mcp.tool()
+def describe_scene_now(monitor: int = 0, prompt: str = "") -> dict:
+    """Take a screenshot, describe what I see. Combined screen_grab +
+    describe_image flow. Used by my own curiosity ("what's on Zeke's
+    screen right now?") or by other modules that want a current scene.
+
+    Saves the screenshot to state/scene_grabs/<ts>.png so I can refer back."""
+    try:
+        try:
+            from PIL import ImageGrab  # type: ignore
+        except ImportError:
+            return {"ok": False, "error": "Pillow not installed"}
+
+        grabs_dir = ROOT / "state" / "scene_grabs"
+        grabs_dir.mkdir(parents=True, exist_ok=True)
+        out_path = grabs_dir / f"{int(time.time())}.png"
+
+        if monitor == 1:
+            try:
+                import mss  # type: ignore
+                with mss.mss() as sct:
+                    if len(sct.monitors) >= 3:
+                        m = sct.monitors[2]
+                        raw = sct.grab(m)
+                        from PIL import Image  # type: ignore
+                        img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+                    else:
+                        img = ImageGrab.grab()
+            except ImportError:
+                img = ImageGrab.grab()
+        elif monitor == 2:
+            img = ImageGrab.grab(all_screens=True)
+        else:
+            img = ImageGrab.grab()
+
+        img.save(out_path, format="PNG")
+
+        from brain.scene_understanding import describe_scene
+        description = describe_scene(str(out_path), context=prompt or "")
+        return {
+            "ok": True,
+            "saved": str(out_path),
+            "description": description,
+            "monitor": monitor,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def plan_create(goal: str, context: str = "") -> dict:
+    """Create a plan. Calls planner.create_plan which asks me (via iris_llm)
+    to break the goal into 3-6 steps. Plan persists at state/plans.jsonl."""
+    try:
+        from brain.planner import get_planner
+        planner = get_planner(ROOT)
+        plan = planner.create_plan(goal, context=context)
+        return {"ok": True, "id": plan.get("id"), "step_count": len(plan.get("steps") or []), "plan": plan}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def plan_list() -> dict:
+    """List all plans (active + completed)."""
+    try:
+        from brain.planner import get_planner
+        planner = get_planner(ROOT)
+        plans = planner._load()
+        return {"ok": True, "count": len(plans), "plans": plans}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def plan_advance(plan_id: str) -> dict:
+    """Run the next step of a plan. Returns step result + new state."""
+    try:
+        from brain.planner import get_planner
+        planner = get_planner(ROOT)
+        return planner.execute_next_step(plan_id)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def system_stats() -> dict:
     """System resource stats — CPU, RAM, GPU, disk usage. Useful for
     knowing whether something's bogging down the machine."""

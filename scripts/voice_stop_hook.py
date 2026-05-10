@@ -175,6 +175,8 @@ def _llm_rewake(req: dict) -> str:
     kind = str(req.get("kind") or "general")
     requester = str(req.get("requester") or "brain")
     prompt = str(req.get("prompt") or "").replace('"', "'")[:4000]
+    has_image = bool(req.get("has_image"))
+    image_path = str(req.get("image_path") or "")
     ctx_summary = ""
     ctx = req.get("context") or {}
     if isinstance(ctx, dict) and ctx:
@@ -191,13 +193,26 @@ def _llm_rewake(req: dict) -> str:
         "classify_intent": "Return ONLY the intent name. No other text.",
         "reflect": "Take time. Write in your own voice — Iris reflecting, not generic AI prose.",
         "compose_letter": "Write the body of a letter, plain prose, your voice.",
+        "describe_image": "Describe the image plainly. 2-3 sentences. Your voice.",
+        "plan_decompose": "Reply ONLY with a JSON object matching the schema in the prompt.",
         "general": "Reply per the prompt's instruction.",
     }
     hint = kind_hints.get(kind, kind_hints["general"])
 
+    image_block = ""
+    if has_image and image_path:
+        image_block = (
+            f"\n\nIMAGE: {image_path}\n"
+            "Read the image with the Read tool first (it's a multimodal "
+            "Read — pass the path and you'll see the contents), then answer.\n"
+        )
+    elif has_image:
+        image_block = ("\n\nNOTE: This request includes an image as base64 in the "
+                       "request file. You can read the request file directly to access it.\n")
+
     return (
         f"Pending LLM request from brain/{requester} (request_id={rid!r}, kind={kind!r}).\n\n"
-        f"PROMPT:\n{prompt}{ctx_summary}\n\n"
+        f"PROMPT:\n{prompt}{ctx_summary}{image_block}\n\n"
         f"FORMATTING: {hint}\n\n"
         "Generate the reply and call mcp__iris__llm_reply(request_id, text). "
         "Pass the response text as the `text` arg. Do NOT emit plain text "

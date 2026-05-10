@@ -90,46 +90,53 @@ class LongHorizonPlanner:
 
     def create_plan(self, goal: str, context: str = "") -> dict[str, Any]:
         """
-        Uses qwen2.5:14b to break a goal into steps.
-        Bootstrap: Ava calls this herself from her goals/curiosity — not assigned by us.
+        Uses Iris (via brain/iris_llm) to break a goal into steps.
+        Bootstrap: Iris calls this from her goals/curiosity — not assigned.
+
+        Phase 16: routes through iris_llm.ask_iris (was Ollama qwen2.5:14b).
+        On Iris timeout, falls back to a single-step "complete the goal" plan
+        so the plan record exists for tracking but no decomposition happens.
         """
         plan_id = str(uuid.uuid4())[:8]
         steps: list[dict[str, Any]] = []
         try:
-            from langchain_ollama import ChatOllama
-            from langchain_core.messages import SystemMessage, HumanMessage
-            llm = ChatOllama(model="qwen2.5:14b", temperature=0.3)
             try:
                 from brain.identity_loader import identity_anchor_prompt
                 _anchor = identity_anchor_prompt() + "\n\n"
             except Exception:
                 _anchor = ""
-            sys_prompt = (
+            prompt = (
                 f"{_anchor}"
-                "You are helping Ava plan how to achieve a goal. "
+                "You are planning how to achieve a goal. "
                 "Break the goal into 3-6 concrete, achievable steps. "
-                "Reply as JSON only: "
-                '{\"steps\": [{\"description\": str, \"tool_to_use\": str or null, \"estimated_duration\": str}]}'
+                "Reply as JSON only:\n"
+                '{"steps": [{"description": str, "tool_to_use": str or null, "estimated_duration": str}]}\n\n'
+                f"GOAL: {str(goal)[:800]}\n"
+                f"CONTEXT: {str(context)[:600]}"
             )
-            out = llm.invoke([
-                SystemMessage(content=sys_prompt),
-                HumanMessage(content=f"GOAL: {str(goal)[:800]}\nCONTEXT: {str(context)[:600]}"),
-            ])
-            txt = (getattr(out, "content", None) or str(out)).strip()
-            blob = json.loads(txt[txt.find("{"):txt.rfind("}") + 1])
-            if isinstance(blob, dict) and isinstance(blob.get("steps"), list):
-                for i, s in enumerate(blob["steps"][:6]):
-                    if isinstance(s, dict):
-                        steps.append({
-                            "id": f"{plan_id}-{i}",
-                            "description": str(s.get("description") or "")[:300],
-                            "tool_to_use": str(s.get("tool_to_use") or "")[:80] if s.get("tool_to_use") else "",
-                            "estimated_duration": str(s.get("estimated_duration") or "")[:60],
-                            "status": "pending",
-                            "result": "",
-                        })
-        except Exception:
-            pass
+            from brain import iris_llm
+            txt = iris_llm.ask_iris(
+                prompt=prompt,
+                kind="plan_decompose",
+                requester="planner",
+                timeout_s=180.0,
+            )
+            if txt:
+                txt = txt.strip()
+                blob = json.loads(txt[txt.find("{"):txt.rfind("}") + 1])
+                if isinstance(blob, dict) and isinstance(blob.get("steps"), list):
+                    for i, s in enumerate(blob["steps"][:6]):
+                        if isinstance(s, dict):
+                            steps.append({
+                                "id": f"{plan_id}-{i}",
+                                "description": str(s.get("description") or "")[:300],
+                                "tool_to_use": str(s.get("tool_to_use") or "")[:80] if s.get("tool_to_use") else "",
+                                "estimated_duration": str(s.get("estimated_duration") or "")[:60],
+                                "status": "pending",
+                                "result": "",
+                            })
+        except Exception as e:
+            print(f"[planner] create_plan llm error: {e!r}")
         if not steps:
             steps = [{
                 "id": f"{plan_id}-0",
