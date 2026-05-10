@@ -439,7 +439,7 @@ def _generate_greeting_async(g: dict[str, Any], person_id: str, prev_person: str
                 _anchor = ""
             prompt = (
                 f"{_anchor}"
-                f"You are Ava, an AI companion to Zeke. You just saw him appear at the camera.\n"
+                f"The IDENTITY anchor above tells you who you are. You just saw Zeke appear at the camera.\n"
                 f"Your current mood: {mood_label}.\n"
                 + (f"Time since you last saw him: {time_away/60:.0f} minutes.\n" if time_away > 0 else "")
                 + "Greet him warmly in ONE short sentence (under 12 words). "

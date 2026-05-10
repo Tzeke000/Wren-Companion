@@ -102,12 +102,16 @@ class VisualMemory:
         }
 
 
+# Phase 30: module-relative repo root, not hardcoded D:/AvaAgentv2.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
 def cluster_faces(image_dir: str) -> dict[str, Any]:
-    vm = VisualMemory(Path("D:/AvaAgentv2"))
+    vm = VisualMemory(_REPO_ROOT)
     return vm.cluster_faces(image_dir=image_dir)
 
 
 def get_cluster_summary() -> dict[str, Any]:
-    vm = VisualMemory(Path("D:/AvaAgentv2"))
+    vm = VisualMemory(_REPO_ROOT)
     return vm.get_cluster_summary()
 

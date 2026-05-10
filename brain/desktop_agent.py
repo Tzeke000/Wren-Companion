@@ -13,7 +13,10 @@ from typing import Any, Callable
 import requests
 from fury import create_tool
 
-PROJECT_ROOT = Path("D:/AvaAgentv2").resolve()
+# Phase 30: module-relative project root, not hardcoded D:/AvaAgentv2.
+# brain/desktop_agent.py is at brain/desktop_agent.py, so .parent.parent
+# is the repo root. Works for Ava, Iris, and Wren.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAFE_ROOTS = [PROJECT_ROOT, Path.home().resolve()]
 
 
@@ -122,7 +125,7 @@ class ToolRegistry:
         self._register("write_file", 2, "Write file content.", {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}, self._t_write_file)
         self._register("run_powershell_write", 2, "Run PowerShell command.", {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, self._t_run_powershell_write)
         self._register("run_powershell_admin", 2, "Run elevated command with verbal check-in.", {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, self._t_run_powershell_admin)
-        self._register("run_local_tool", 1, "Run a tool script in D:/AvaAgentv2/tools.", {"type": "object", "properties": {"name": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}, "required": ["name"]}, self._t_run_local_tool)
+        self._register("run_local_tool", 1, "Run a tool script in <repo>/tools/.", {"type": "object", "properties": {"name": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}, "required": ["name"]}, self._t_run_local_tool)
         # Tier 3 reserved explicit external actions
         self._register("send_external_message", 3, "Send external message as Zeke.", {"type": "object", "properties": {"target": {"type": "string"}, "content": {"type": "string"}}, "required": ["target", "content"]}, self._t_send_external_message)
 

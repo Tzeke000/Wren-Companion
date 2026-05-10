@@ -175,9 +175,9 @@ def generate_briefing(g: dict[str, Any]) -> str:
         _anchor = ""
     prompt = (
         f"{_anchor}"
-        "You are Ava, a local AI companion. It's the start of a new day and you want to give "
-        "a brief morning briefing to Zeke — only if you have something genuinely worth saying. "
-        "Keep it natural, warm, and under 3 sentences. Don't be performative. If you have nothing "
+        "It's the start of a new day. The IDENTITY anchor above tells you who you are. "
+        "Give a brief morning briefing to Zeke — only if you have something genuinely worth saying. "
+        "Keep it natural, in your voice, under 3 sentences. Don't be performative. If you have nothing "
         "interesting to say, just say good morning simply.\n\n"
         f"Context from overnight:\n{context}\n\n"
         "Write your morning briefing:"

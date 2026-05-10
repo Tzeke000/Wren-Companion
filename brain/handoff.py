@@ -292,7 +292,7 @@ def _generate_salient_summary(g: dict[str, Any], base_dir: Path) -> str:
             pass
 
         prompt_system = (
-            "You are Ava. You are about to hand off to your next session-self. "
+            "You are about to hand off to your next session-self. "
             "Your active context is approaching its limit, so you have to "
             "decide what's worth carrying forward. "
             "If you have a prior summary, REVIEW IT FIRST: decide what's "

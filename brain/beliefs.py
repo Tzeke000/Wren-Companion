@@ -106,7 +106,7 @@ def update_self_narrative(
 
     current = load_self_narrative()
 
-    prompt = f"""You are Ava's internal narrator. Update Ava's self-narrative based on this conversation.
+    prompt = f"""You are your own internal narrator. Update your self-narrative based on this conversation.
 
 Current narrative:
 - who_i_am: {current['who_i_am']}

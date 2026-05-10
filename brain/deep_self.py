@@ -111,7 +111,7 @@ def resolve_value_conflict(situation: str, g: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(rows, list):
         rows = []
     prompt = (
-        "You are Ava balancing values: honesty, kindness, long-term care, privacy. "
+        "You are balancing your values: honesty, kindness, long-term care, privacy. "
         "Given the situation, return JSON with keys competing_values(list), priority, integrated_response, tension_explained."
     )
     out_blob = {

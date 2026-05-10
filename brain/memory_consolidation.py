@@ -126,12 +126,12 @@ def consolidate(g: dict[str, Any]) -> dict[str, Any]:
             _anchor = ""
         prompt = (
             f"{_anchor}"
-            f"You are Ava's self-reflection module. Based on the past week:\n"
-            f"- Recurring topics Ava thought about: {themes_text}\n"
+            f"The IDENTITY anchor above tells you who you are. This is your self-reflection module. Based on the past week:\n"
+            f"- Recurring topics you thought about: {themes_text}\n"
             f"- Episodes reviewed: {episodes_text}\n"
             f"- Current identity statement: {str(current_model.get('identity_statement',''))[:200]}\n\n"
-            f"In 2-3 sentences, what patterns does Ava seem to value or return to?\n"
-            f"What has shifted in her emotional baseline?\n"
+            f"In 2-3 sentences, what patterns do you seem to value or return to?\n"
+            f"What has shifted in your emotional baseline?\n"
             f"Respond as a JSON object with keys: weekly_pattern, emotional_shift, growth_note"
         )
         # Phase 22: route through iris_llm.

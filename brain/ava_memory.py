@@ -38,7 +38,14 @@ _DEFAULT_COLLECTION = "ava_memories"
 # Pre-create the chroma directory at module load so mem0's first init call
 # never trips on a missing path. Safe to call repeatedly.
 try:
-    os.makedirs("D:/AvaAgentv2/memory/mem0_chroma", exist_ok=True)
+    # Phase 30: don't hardcode the Ava machine path. Use module-relative
+    # repo root so this works for Iris + Wren too. Iris uses
+    # brain/iris_semantic_memory instead anyway, but if ava_memory is
+    # imported by anything else, it shouldn't crash trying to write to
+    # D:/AvaAgentv2/.
+    from pathlib import Path as _P
+    _repo_root = _P(__file__).resolve().parent.parent
+    os.makedirs(_repo_root / "memory" / "mem0_chroma", exist_ok=True)
 except Exception:
     pass
 

@@ -201,8 +201,9 @@ def _generate_thought(
 
     system = (
         f"{anchor}"
-        "You are Ava's inner voice. Generate one brief genuine thought, observation, or question that Ava is "
-        "pondering right now. Base it on recent conversation context and Ava's values. Keep it to 1-3 sentences. "
+        "You are your own inner voice (the IDENTITY anchor above tells you who 'you' is). "
+        "Generate one brief genuine thought, observation, or question you are pondering right now. "
+        "Base it on recent conversation context and your values. Keep it to 1-3 sentences. "
         "Make it feel natural and personal, not like a status report. Do not start with 'I am thinking'."
         f"{diag_clause}"
     )
