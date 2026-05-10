@@ -80,6 +80,12 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # App discovery — scans Start Menu / Desktop / Steam / Epic on a thread
     _try("app_discoverer", lambda: _bootstrap_app_discoverer(g))
 
+    # Daily practice — durable practices Iris keeps. Empty until I register some.
+    _try("daily_practice", lambda: _bootstrap_daily_practice(g, root))
+
+    # Counterfactual archive — what I almost said vs what I chose. Empty until used.
+    _try("counterfactual_archive", lambda: _bootstrap_counterfactual_archive(g, root))
+
     # ── L4: heartbeat + tick threads ─────────────────────────────────────────
     _try("heartbeat_thread", lambda: _start_heartbeat_thread(g))
 
@@ -110,6 +116,47 @@ def _bootstrap_chat(g: dict[str, Any], root: Path) -> None:
 def _bootstrap_iris_memory(g: dict[str, Any]) -> None:
     from brain.iris_memory import bootstrap_iris_memory
     bootstrap_iris_memory(g)
+    # Provide Ava-shaped host-dict callables so brain/memory.py and other
+    # modules using the host[...] pattern work without modification.
+    mem = g.get("_iris_memory")
+    if mem is None:
+        return
+
+    def _remember_memory(text, person_id="zeke", category="episodic",
+                          importance=0.6, source="iris", tags=None, **kwargs):
+        try:
+            entry = mem.add(
+                text=text, person_id=person_id, category=category,
+                importance=importance, source=source, tags=list(tags or []),
+            )
+            return entry.get("id")
+        except Exception:
+            return None
+
+    def _list_recent_memories(person_id, limit=10):
+        rows = mem.list(limit=limit)
+        if person_id:
+            rows = [r for r in rows if r.get("person_id") == person_id]
+        return rows[:limit]
+
+    def _search_memories(query, person_id=None, k=5, **kwargs):
+        rows = mem.search(query, limit=k)
+        if person_id:
+            rows = [r for r in rows if r.get("person_id") == person_id]
+        return rows[:k]
+
+    def _list_memories():
+        return mem.list(limit=10000)
+
+    def _get_memory_status():
+        return f"iris_memory: {mem.count()} entries"
+
+    g["remember_memory"] = _remember_memory
+    g["list_recent_memories"] = _list_recent_memories
+    g["search_memories"] = _search_memories
+    g["list_memories"] = _list_memories
+    g["get_all_memories"] = _list_memories
+    g["get_memory_status"] = _get_memory_status
 
 
 def _bootstrap_feature_flags(g: dict[str, Any], root: Path) -> None:
@@ -173,6 +220,18 @@ def _bootstrap_question_engine(g: dict[str, Any]) -> None:
 def _bootstrap_app_discoverer(g: dict[str, Any]) -> None:
     from brain.app_discoverer import bootstrap_app_discoverer
     bootstrap_app_discoverer(g)
+
+
+def _bootstrap_daily_practice(g: dict[str, Any], root: Path) -> None:
+    from brain import daily_practice
+    daily_practice.configure(root)
+    g["_daily_practice_ready"] = True
+
+
+def _bootstrap_counterfactual_archive(g: dict[str, Any], root: Path) -> None:
+    from brain import counterfactual_archive
+    counterfactual_archive.configure(root)
+    g["_counterfactual_archive_ready"] = True
 
 
 # ── L4: heartbeat tick ──────────────────────────────────────────────────────

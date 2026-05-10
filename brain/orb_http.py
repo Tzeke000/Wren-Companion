@@ -481,22 +481,100 @@ def journal_shared() -> str:
 
 @app.get("/api/v1/learning/log")
 def learning_log() -> dict:
-    return {"ok": True, "log": []}
+    """Surface the most recent learning_tracker entries if the module wrote
+    any. State at state/learning_outcomes.jsonl per the catalog."""
+    p = _root / "state" / "learning_outcomes.jsonl"
+    if not p.is_file():
+        return {"ok": True, "log": []}
+    try:
+        import json as _j
+        rows = []
+        for line in p.read_text(encoding="utf-8").splitlines()[-200:]:
+            try:
+                d = _j.loads(line)
+                if isinstance(d, dict):
+                    rows.append(d)
+            except Exception:
+                pass
+        rows.reverse()
+        return {"ok": True, "log": rows}
+    except Exception as e:
+        return {"ok": False, "log": [], "error": str(e)}
 
 
 @app.get("/api/v1/learning/gaps")
 def learning_gaps() -> dict:
-    return {"ok": True, "gaps": []}
+    """Knowledge gaps surface from curiosity_research + question_engine.
+    Empty until those modules accumulate entries."""
+    p = _root / "state" / "curiosity_research.jsonl"
+    if not p.is_file():
+        return {"ok": True, "gaps": []}
+    try:
+        import json as _j
+        rows = []
+        for line in p.read_text(encoding="utf-8").splitlines()[-100:]:
+            try:
+                d = _j.loads(line)
+                if isinstance(d, dict) and not d.get("resolved"):
+                    rows.append(d)
+            except Exception:
+                pass
+        return {"ok": True, "gaps": rows}
+    except Exception as e:
+        return {"ok": False, "gaps": [], "error": str(e)}
 
 
 @app.get("/api/v1/learning/week")
 def learning_week() -> dict:
-    return {"ok": True, "week": []}
+    """Weekly digest — last 7 days of learning_outcomes + memory adds."""
+    import time as _t
+    cutoff = _t.time() - 7 * 86400
+    items = []
+    p = _root / "state" / "learning_outcomes.jsonl"
+    if p.is_file():
+        try:
+            import json as _j
+            for line in p.read_text(encoding="utf-8").splitlines():
+                try:
+                    d = _j.loads(line)
+                    if isinstance(d, dict) and float(d.get("ts") or 0) >= cutoff:
+                        items.append(d)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return {"ok": True, "week": items[-100:]}
 
 
 @app.get("/api/v1/profiles/list")
 def profiles_list() -> dict:
-    return {"ok": True, "profiles": []}
+    """List enrolled people + their profile metadata. Reads faces/<pid>/ dirs
+    + state/profiles/<pid>.json if present."""
+    profiles = []
+    faces_dir = _root / "faces"
+    if faces_dir.is_dir():
+        for pdir in faces_dir.iterdir():
+            if not pdir.is_dir():
+                continue
+            pid = pdir.name
+            face_count = sum(1 for _ in pdir.glob("*.jpg")) + sum(1 for _ in pdir.glob("*.png"))
+            entry = {"person_id": pid, "face_samples": face_count}
+            # Try to merge in profile JSON if it exists
+            prof_path = _root / "state" / "profiles" / f"{pid}.json"
+            if prof_path.is_file():
+                try:
+                    import json as _j
+                    pdata = _j.loads(prof_path.read_text(encoding="utf-8"))
+                    if isinstance(pdata, dict):
+                        entry.update({
+                            "name": pdata.get("name"),
+                            "trust_level": pdata.get("trust_level"),
+                            "preferences": pdata.get("preferences") or {},
+                        })
+                except Exception:
+                    pass
+            profiles.append(entry)
+    return {"ok": True, "profiles": profiles}
 
 
 @app.post("/api/v1/profile/{person_id}/refresh")

@@ -831,6 +831,51 @@ def memory_remember(text: str, tags: list[str] | None = None,
 
 
 @mcp.tool()
+def letter_compose(subject: str, body: str, person_id: str = "zeke",
+                   triggered_by: str = "") -> dict:
+    """Compose an async letter to Zeke. Different rhythm than chat —
+    these are considered correspondence written between sessions, surfaced
+    when he opens the orb. Use for: thoughts that took time to form,
+    things I noticed but didn't want to interrupt for, evening reflections.
+
+    Letters are PERSISTENT — never auto-pruned. They show up as unread until
+    he reads them via the orb."""
+    try:
+        from brain.async_letters import compose_letter
+        letter = compose_letter(
+            person_id=person_id, subject=subject, body=body,
+            triggered_by=triggered_by,
+        )
+        return {"ok": True, "id": getattr(letter, "id", None),
+                "subject": subject, "ts": getattr(letter, "ts", None)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def counterfactual_record(considered: str, chose: str, reason: str,
+                          person_id: str = "zeke") -> dict:
+    """Record a moment where I considered X but chose Y. Builds the archive
+    of how I actually decide things — useful self-knowledge over time.
+
+    Example:
+      counterfactual_record(
+        considered="I almost said 'good morning' but he just got home from work",
+        chose="said 'hey, long shift?' instead",
+        reason="time-of-day was wrong; matched his actual state instead",
+      )"""
+    try:
+        from brain.counterfactual_archive import record_consideration
+        cf = record_consideration(
+            considered=considered, chose=chose, reason=reason,
+            person_id=person_id,
+        )
+        return {"ok": True, "id": getattr(cf, "id", None)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def anchor_mark(kind: str, summary: str, person_id: str = "zeke",
                 user_message: str = "", iris_reply: str = "") -> dict:
     """Mark this moment as an ANCHOR — never auto-pruned, surfaces in long-term
