@@ -434,6 +434,46 @@ def voice_say_chunk(text: str, emotion: str = "neutral", intensity: float = 0.5)
 
 
 @mcp.tool()
+def llm_reply(request_id: str, text: str) -> dict:
+    """Answer a pending LLM request from a brain/* module (Phase 9).
+
+    When any brain/* module calls brain.iris_llm.ask_iris(prompt, kind=...),
+    it submits a request file and blocks. The Stop hook detects the pending
+    flag and rewakes me with the prompt + kind. I generate a response and
+    pass it here. The caller's wait_for_reply() unblocks.
+
+    The kind tells me what shape of reply is expected (extract_facts wants
+    one fact per line, classify_intent wants just the intent name, etc.).
+    The rewake message includes the kind + prompt + requester so I know
+    what to produce.
+
+    Args:
+        request_id: From the rewake system-reminder.
+        text: My reply, formatted per the kind's contract.
+
+    Returns:
+        {ok, request_id, kind} on success.
+    """
+    if not request_id or not str(request_id).strip():
+        return {"ok": False, "error": "empty request_id"}
+    if text is None:
+        text = ""
+    try:
+        from brain import iris_llm
+        req = iris_llm.get(str(request_id))
+        if req is None:
+            return {"ok": False, "error": "request not found"}
+        if req.get("status") == "answered":
+            return {"ok": False, "error": "request already answered"}
+        ok = iris_llm.mark_answered(str(request_id), str(text))
+        if not ok:
+            return {"ok": False, "error": "mark_answered failed"}
+        return {"ok": True, "request_id": str(request_id), "kind": req.get("kind")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def chat_reply(request_id: str, text: str) -> dict:
     """Answer a pending chat request from the orb (Phase 4).
 

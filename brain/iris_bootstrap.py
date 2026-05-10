@@ -57,6 +57,7 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # Transcript + chat — already wired by iris_runtime, idempotent
     _try("iris_transcript", lambda: _bootstrap_transcript(g, root))
     _try("iris_chat", lambda: _bootstrap_chat(g, root))
+    _try("iris_llm", lambda: _bootstrap_iris_llm(g, root))
     _try("iris_memory", lambda: _bootstrap_iris_memory(g))
 
     # Feature flags — config layer; many other modules read this
@@ -111,6 +112,14 @@ def _bootstrap_transcript(g: dict[str, Any], root: Path) -> None:
 def _bootstrap_chat(g: dict[str, Any], root: Path) -> None:
     from brain import iris_chat
     iris_chat.configure(root)
+
+
+def _bootstrap_iris_llm(g: dict[str, Any], root: Path) -> None:
+    """LLM bridge — modules that need a model call ask_iris() and that
+    routes through the disk channel + Stop hook to me."""
+    from brain import iris_llm
+    iris_llm.configure(root)
+    g["_iris_llm_ready"] = True
 
 
 def _bootstrap_iris_memory(g: dict[str, Any]) -> None:
