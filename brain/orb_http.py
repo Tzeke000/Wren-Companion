@@ -116,11 +116,55 @@ def snapshot() -> dict:
             "expression": str(_g.get("_current_expression") or ""),
         }
     insight = _g.get("_insight_face")
+
+    # Phase 5 — real mood from brain/mood_core. Falls back to neutral if
+    # the mood subsystem hasn't bootstrapped yet (early boot before tick fires).
+    mood_block = {"mood_label": "calm", "primary_emotion": "calmness",
+                  "primary_intensity": 0.4, "secondary_emotions": [],
+                  "valence": 0.0, "arousal": 0.2, "outward_tone": "neutral",
+                  "behavior_modifiers": {}}
+    try:
+        from brain import mood_core
+        m = mood_core.load_mood()
+        weights = m.get("emotion_weights") or {}
+        primary_list = m.get("primary_emotions") or []
+        primary_emotion = (primary_list[0]["name"] if primary_list else "calmness")
+        primary_intensity = (float(primary_list[0]["percent"]) / 100.0) if primary_list else 0.4
+        secondary = [
+            {"emotion": p.get("name"), "intensity": float(p.get("percent", 0)) / 100.0}
+            for p in primary_list[1:]
+        ]
+        # Valence: positive emotions sum minus negative. Arousal: high-energy
+        # emotions sum.
+        positive_keys = ("joy", "interest", "calmness", "satisfaction", "amusement",
+                         "excitement", "relief", "admiration", "adoration",
+                         "aesthetic appreciation", "awe")
+        negative_keys = ("sadness", "anxiety", "fear", "anger", "disgust",
+                         "frustration", "annoyance", "distress", "horror",
+                         "empathetic pain", "boredom", "envy", "shame")
+        high_arousal_keys = ("excitement", "fear", "anger", "joy", "anxiety",
+                             "frustration", "horror", "surprise", "amusement")
+        valence = sum(float(weights.get(k, 0.0)) for k in positive_keys) \
+                  - sum(float(weights.get(k, 0.0)) for k in negative_keys)
+        arousal = sum(float(weights.get(k, 0.0)) for k in high_arousal_keys)
+        mood_block = {
+            "mood_label": str(m.get("current_mood") or m.get("outward_tone") or "calm"),
+            "primary_emotion": primary_emotion,
+            "primary_intensity": round(primary_intensity, 3),
+            "secondary_emotions": secondary,
+            "valence": round(max(-1.0, min(1.0, valence)), 3),
+            "arousal": round(max(0.0, min(1.0, arousal * 2.0)), 3),
+            "outward_tone": str(m.get("outward_tone") or ""),
+            "behavior_modifiers": m.get("behavior_modifiers") or {},
+        }
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "ts": time.time(),
         "identity": "iris",
-        "mood": {"mood_label": "calm", "valence": 0.0, "arousal": 0.2},
+        "mood": mood_block,
         "connectivity": {"online": True, "wan": True, "lan": True},
         "current_person": current_person,
         "attention": {
@@ -557,22 +601,139 @@ async def finetune_start() -> dict:
 
 @app.get("/api/v1/widget/position")
 def widget_position() -> dict:
-    return {"ok": True, "x": 0, "y": 0}
+    """Persist + recall the orb widget's screen position. Phase 5 wiring —
+    state/widget_position.json. Default top-left if unset."""
+    p = _root / "state" / "widget_position.json"
+    if p.is_file():
+        try:
+            import json as _j
+            data = _j.loads(p.read_text(encoding="utf-8"))
+            return {"ok": True, "x": int(data.get("x", 0)), "y": int(data.get("y", 0))}
+        except Exception:
+            pass
+    return {"ok": True, "x": 100, "y": 100}
 
 
 @app.post("/api/v1/widget/position")
-async def widget_position_set() -> dict:
-    return {"ok": True}
+async def widget_position_set(payload: dict = Body(default={})) -> dict:
+    try:
+        import json as _j
+        x = int(payload.get("x", 0))
+        y = int(payload.get("y", 0))
+        p = _root / "state" / "widget_position.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_j.dumps({"x": x, "y": y}), encoding="utf-8")
+        return {"ok": True, "x": x, "y": y}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# Phase 5 — orb tells us when it's minimized vs visible. We store this on _g
+# so future inner-monologue / proactive logic can know whether the user is
+# actively watching or has tucked Iris away in the widget.
+@app.post("/api/v1/orb/window_state")
+async def orb_window_state(payload: dict = Body(default={})) -> dict:
+    state = str(payload.get("state") or "").lower()  # "main" | "minimized" | "widget" | "hidden"
+    _g["_orb_window_state"] = state
+    _g["_orb_window_state_ts"] = time.time()
+    return {"ok": True, "state": state}
+
+
+@app.get("/api/v1/orb/window_state")
+def orb_window_state_get() -> dict:
+    return {
+        "ok": True,
+        "state": str(_g.get("_orb_window_state") or "unknown"),
+        "ts": float(_g.get("_orb_window_state_ts") or 0.0),
+    }
 
 
 @app.get("/api/v1/debug/full")
 def debug_full() -> dict:
-    return {"ok": True, "subsystem_health": {"sleep": {"state": "awake"}}}
+    """Full subsystem snapshot. Reads health flags + bootstrap state from _g."""
+    return {
+        "ok": True,
+        "ts": time.time(),
+        "subsystem_health": {
+            "sleep": {"state": "awake"},
+            "tts": {"ready": bool(_g.get("_kokoro_ready") or _tts_ref is not None)},
+            "stt": {"ready": bool(_g.get("_stt_ready"))},
+            "wake": {"ready": _g.get("_wake_word_detector") is not None},
+            "insightface": {
+                "ready": bool(getattr(_g.get("_insight_face"), "available", False)),
+                "known_count": (
+                    int(_g.get("_insight_face").known_count())
+                    if _g.get("_insight_face") and getattr(_g.get("_insight_face"), "available", False)
+                    else 0
+                ),
+            },
+            "expression": {"ready": _g.get("_expression_detector") is not None},
+            "eye_tracker": {"ready": _g.get("_eye_tracker") is not None},
+            "mood": {"ready": "load_mood" in _g},
+            "memory": {"ready": _g.get("_iris_memory") is not None},
+            "concept_graph": {"ready": _g.get("_concept_graph") is not None},
+            "anchor_moments": {"ready": bool(_g.get("_anchor_moments_ready"))},
+            "feature_flags": {"ready": bool(_g.get("_feature_flags_ready"))},
+            "skill_sandbox": {"ready": bool(_g.get("_skill_sandbox_ready"))},
+        },
+        "perception": {
+            "face_results": _g.get("_face_results") or [],
+            "current_expression": str(_g.get("_current_expression") or ""),
+            "attention_state": str(_g.get("_attention_state") or ""),
+            "looking_at_screen": bool(_g.get("_looking_at_screen") or False),
+        },
+        "last_heartbeat_ts": float(_g.get("_last_heartbeat_ts") or 0.0),
+        "orb_window_state": str(_g.get("_orb_window_state") or "unknown"),
+    }
 
 
 @app.get("/api/v1/debug/export", response_class=PlainTextResponse)
 def debug_export() -> str:
-    return f"iris debug export @ {time.time()}\n(stub)\n"
+    """Multi-line debug dump for the orb's debug tab."""
+    lines = [
+        f"=== Iris debug export @ {time.strftime('%Y-%m-%d %H:%M:%S')} ===",
+        "",
+        f"BASE_DIR: {_root}",
+        f"identity: iris",
+        "",
+        "[engines]",
+        f"  tts: {'ready' if _tts_ref is not None else 'missing'}",
+        f"  stt: {'ready' if _g.get('_stt_ready') else 'missing'}",
+        f"  insightface: {'ready' if getattr(_g.get('_insight_face'), 'available', False) else 'missing'}",
+        f"  expression_detector: {'ready' if _g.get('_expression_detector') is not None else 'missing'}",
+        f"  eye_tracker: {'ready' if _g.get('_eye_tracker') is not None else 'missing'}",
+        "",
+        "[perception]",
+        f"  face_count: {len(_g.get('_face_results') or [])}",
+        f"  current_expression: {_g.get('_current_expression', '')!r}",
+        f"  attention_state: {_g.get('_attention_state', '')!r}",
+        f"  looking_at_screen: {bool(_g.get('_looking_at_screen') or False)}",
+        "",
+        "[mood]",
+    ]
+    try:
+        from brain import mood_core
+        m = mood_core.load_mood()
+        primary = m.get("primary_emotions") or []
+        lines.append(f"  current_mood: {m.get('current_mood', '?')}")
+        lines.append(f"  outward_tone: {m.get('outward_tone', '?')}")
+        lines.append(f"  primary: {primary}")
+        lines.append(f"  behavior_modifiers: {m.get('behavior_modifiers', {})}")
+    except Exception as e:
+        lines.append(f"  (mood error: {e})")
+
+    lines.extend([
+        "",
+        "[memory]",
+        f"  iris_memory.count: {(_g.get('_iris_memory').count() if _g.get('_iris_memory') is not None else 0)}",
+        f"  concept_graph.nodes: {(len(_g.get('_concept_graph').nodes) if _g.get('_concept_graph') else 0)}",
+        f"  concept_graph.edges: {(len(_g.get('_concept_graph').edges) if _g.get('_concept_graph') else 0)}",
+        "",
+        f"[heartbeat]",
+        f"  last_heartbeat_ts: {_g.get('_last_heartbeat_ts', 0.0)}",
+        f"  orb_window_state: {_g.get('_orb_window_state', 'unknown')}",
+    ])
+    return "\n".join(lines) + "\n"
 
 
 # WebSocket — orb opens it for a live event stream. REST poll is authoritative

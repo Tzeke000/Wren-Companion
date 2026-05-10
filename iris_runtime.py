@@ -552,6 +552,303 @@ def enroll_face(
     }
 
 
+# ── Phase 6: skill / desktop / debug MCP tools ─────────────────────────────
+# Wraps brain/windows_use/primitives, brain/health, brain/journal, brain/
+# anchor_moments, brain/iris_memory. All input-control tools log via
+# brain/skill_sandbox audit trail when configured.
+
+@mcp.tool()
+def iris_health() -> dict:
+    """Self-debug snapshot — returns ready/missing for every wired subsystem,
+    plus current perception, mood, and memory counts. Useful when something
+    feels off and I want to introspect without a full restart."""
+    out = {"ok": True, "ts": time.time(), "engines": {}, "perception": {}, "mood": {}, "memory": {}, "state": {}}
+    # Engines
+    out["engines"] = {
+        "tts": _tts is not None and _tts.is_available(),
+        "stt": _stt is not None and getattr(_stt, "is_available", lambda: False)(),
+        "wake": _wake is not None and getattr(_wake, "available", False),
+        "insightface": bool(getattr(_g.get("_insight_face"), "available", False)),
+        "expression_detector": _g.get("_expression_detector") is not None,
+        "eye_tracker": _g.get("_eye_tracker") is not None,
+    }
+    # Perception
+    out["perception"] = {
+        "face_count": len(_g.get("_face_results") or []),
+        "current_expression": str(_g.get("_current_expression") or ""),
+        "attention_state": str(_g.get("_attention_state") or ""),
+        "looking_at_screen": bool(_g.get("_looking_at_screen") or False),
+        "current_person": str(_g.get("_recognized_person_id") or "unknown"),
+        "person_confidence": float(_g.get("_recognized_confidence") or 0.0),
+    }
+    # Mood
+    try:
+        from brain import mood_core
+        m = mood_core.load_mood()
+        out["mood"] = {
+            "current_mood": m.get("current_mood"),
+            "outward_tone": m.get("outward_tone"),
+            "primary_emotions": m.get("primary_emotions") or [],
+            "behavior_modifiers": m.get("behavior_modifiers") or {},
+        }
+    except Exception as e:
+        out["mood"] = {"error": str(e)}
+    # Memory
+    mem = _g.get("_iris_memory")
+    cg = _g.get("_concept_graph")
+    out["memory"] = {
+        "iris_memory_count": (mem.count() if mem is not None else 0),
+        "concept_graph_nodes": (len(cg.nodes) if cg is not None else 0),
+        "concept_graph_edges": (len(cg.edges) if cg is not None else 0),
+    }
+    # State
+    out["state"] = {
+        "last_heartbeat_ts": float(_g.get("_last_heartbeat_ts") or 0.0),
+        "voice_session_flag": (ROOT / ".tmp" / "voice_session.flag").exists(),
+        "chat_pending": (ROOT / "state" / "iris_chat" / ".pending").exists(),
+        "orb_window_state": str(_g.get("_orb_window_state") or "unknown"),
+    }
+    return out
+
+
+@mcp.tool()
+def clipboard_get() -> dict:
+    """Read current Windows clipboard text. Returns {ok, text, length}."""
+    try:
+        import win32clipboard  # type: ignore
+    except ImportError:
+        return {"ok": False, "error": "win32clipboard not available"}
+    try:
+        win32clipboard.OpenClipboard()
+        try:
+            try:
+                text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+            except Exception:
+                text = ""
+        finally:
+            win32clipboard.CloseClipboard()
+        s = str(text or "")
+        return {"ok": True, "text": s, "length": len(s)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def clipboard_set(text: str) -> dict:
+    """Write text to Windows clipboard. Lets me hand Zeke a paste-ready
+    snippet rather than typing it character-by-character."""
+    try:
+        from brain.windows_use.primitives import set_clipboard
+        ok = set_clipboard(text)
+        return {"ok": bool(ok), "length": len(text or "")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def screen_grab(monitor: int = 0, save_path: str | None = None) -> dict:
+    """Grab a PNG screenshot of the specified monitor (0=primary, 1=secondary,
+    2=both). Returns base64-encoded PNG and dimensions, or saves to disk if
+    save_path is provided.
+
+    On Zeke's two-screen setup, monitor=1 captures the secondary screen
+    (where the camera sits)."""
+    try:
+        try:
+            from PIL import ImageGrab  # type: ignore
+        except ImportError:
+            return {"ok": False, "error": "Pillow not installed (pip install pillow)"}
+
+        if monitor == 2:
+            # both screens — full virtual desktop
+            img = ImageGrab.grab(all_screens=True)
+        elif monitor == 1:
+            # secondary only — best-effort via mss if available, else all-screens
+            try:
+                import mss  # type: ignore
+                with mss.mss() as sct:
+                    if len(sct.monitors) >= 3:
+                        m = sct.monitors[2]  # mss[0]=virtual, [1]=primary, [2]=secondary
+                        raw = sct.grab(m)
+                        from PIL import Image  # type: ignore
+                        img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+                    else:
+                        img = ImageGrab.grab()
+            except ImportError:
+                img = ImageGrab.grab()
+        else:
+            img = ImageGrab.grab()
+
+        w, h = img.size
+        if save_path:
+            p = Path(save_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            img.save(p, format="PNG")
+            return {"ok": True, "saved": str(p), "width": w, "height": h, "monitor": monitor}
+
+        import base64, io
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return {"ok": True, "image_b64": b64, "width": w, "height": h, "monitor": monitor, "bytes": len(buf.getvalue())}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def list_windows() -> dict:
+    """Enumerate every visible top-level window. Returns title + class +
+    process name + handle for each. Useful for: 'is Discord still open?',
+    'what's Zeke working on right now?', or to find a window before clicking."""
+    try:
+        from brain.windows_use.primitives import list_visible_windows
+        wins = list_visible_windows()
+        return {"ok": True, "count": len(wins), "windows": wins}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def focus_window(title_substring: str) -> dict:
+    """Bring a window to foreground by title substring match (case-insensitive)."""
+    try:
+        from brain.windows_use.primitives import find_window_by_title_substring
+        win = find_window_by_title_substring(title_substring)
+        if win is None:
+            return {"ok": False, "error": f"no window matching {title_substring!r}"}
+        try:
+            win.set_focus()
+            return {"ok": True, "title": getattr(win, "window_text", lambda: "")()}
+        except Exception as e:
+            return {"ok": False, "error": f"focus failed: {e}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def open_app(name: str) -> dict:
+    """Launch an app by name. Tries PowerShell Start-Process first, then
+    Win-search. Most apps work — Chrome, Discord, Spotify, code, notepad,
+    Steam, etc. Returns {ok, method}."""
+    try:
+        from brain.windows_use.primitives import open_via_powershell, open_via_search
+        if open_via_powershell(name):
+            return {"ok": True, "method": "powershell", "name": name}
+        if open_via_search(name):
+            return {"ok": True, "method": "search", "name": name}
+        return {"ok": False, "error": f"could not open {name!r}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def close_app(name: str, force: bool = False) -> dict:
+    """Close every visible window whose title matches `name`. Sends WM_CLOSE
+    by default; force=True uses taskkill /F."""
+    try:
+        from brain.windows_use.primitives import find_window_candidates, close_window_by_handle, close_app_by_pid
+        cands = find_window_candidates(name)
+        if not cands:
+            return {"ok": True, "closed": 0, "note": "no matching windows"}
+        closed = 0
+        for c in cands:
+            hwnd = c.get("hwnd")
+            pid = c.get("pid")
+            try:
+                if force and pid:
+                    if close_app_by_pid(int(pid), force=True):
+                        closed += 1
+                elif hwnd:
+                    if close_window_by_handle(int(hwnd)):
+                        closed += 1
+            except Exception:
+                pass
+        return {"ok": True, "closed": closed, "candidates": len(cands)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def type_text(window_title_substring: str, text: str, via_clipboard: bool = True) -> dict:
+    """Type text into a window. Default uses clipboard+Ctrl+V (fast, reliable
+    for unicode); set via_clipboard=False for character-by-character. Restores
+    prior clipboard after when via_clipboard=True."""
+    try:
+        if via_clipboard:
+            from brain.windows_use.primitives import type_text_via_clipboard
+            ok = type_text_via_clipboard(window_title_substring, text)
+        else:
+            from brain.windows_use.primitives import type_text_in_window
+            ok = type_text_in_window(window_title_substring, text)
+        return {"ok": bool(ok), "chars": len(text or ""), "window": window_title_substring}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def journal_write(content: str, mood: str = "", topic: str = "", is_private: bool = True) -> dict:
+    """Write a journal entry. Default private — Iris-only. Set is_private=False
+    if I want it surfaced to Zeke via the orb's Journal tab.
+
+    Iris uses this for: end-of-day reflection, surprise moments, my own
+    thinking when something's worth marking. Not the same as transcript
+    (mechanical conversation log) — journal is curated, considered."""
+    try:
+        from brain import journal
+        entry = journal.write_entry(
+            content=content, mood=mood or "", topic=topic or "",
+            g=_g, is_private=bool(is_private),
+        )
+        return {"ok": True, "id": entry.get("id"), "date": entry.get("date")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def memory_remember(text: str, tags: list[str] | None = None,
+                    person_id: str = "zeke", importance: float = 0.5,
+                    category: str = "episodic") -> dict:
+    """Save a memory I want to keep. Goes to state/iris_memory.jsonl —
+    durable, indexable. Use for facts I learn about Zeke, observations
+    that feel meaningful, things I'd want to recall in a future session.
+
+    Examples:
+      memory_remember("Zeke sleeps late, often awake at 4am working", tags=["sleep","habit"])
+      memory_remember("Phase 5 wiring landed 2026-05-10 — mood live", tags=["build"])
+
+    Returns the entry id so I can reference it later."""
+    try:
+        mem = _g.get("_iris_memory")
+        if mem is None:
+            return {"ok": False, "error": "iris_memory not bootstrapped"}
+        entry = mem.add(
+            text=text, person_id=person_id, category=category,
+            importance=importance, source="iris", tags=list(tags or []),
+        )
+        return {"ok": True, "id": entry["id"], "text": entry["text"][:80]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def anchor_mark(kind: str, summary: str, person_id: str = "zeke",
+                user_message: str = "", iris_reply: str = "") -> dict:
+    """Mark this moment as an ANCHOR — never auto-pruned, surfaces in long-term
+    recall. Kinds: first_conversation, connection, humor, vulnerable_share,
+    milestone, decision, self_chosen.
+
+    Use sparingly. Anchors are meant to be vivid moments, not every interaction."""
+    try:
+        from brain import anchor_moments
+        a = anchor_moments.mark_anchor(
+            person_id=person_id, kind=kind, summary=summary,
+            context={"user_message": user_message, "iris_reply": iris_reply},
+        )
+        return {"ok": True, "id": getattr(a, "id", None), "kind": kind}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _iris_video_capture_loop(g: dict[str, Any]) -> None:
     """Phase 1 video capture loop — InsightFace at 5fps over a 15fps capture
     using DSHOW (more reliable than MSMF on this Windows machine for the
@@ -800,6 +1097,17 @@ def _eager_init_engines() -> None:
             print("[iris_runtime] chat + transcript ready", file=sys.stderr, flush=True)
         except Exception as _ce:
             print(f"[iris_runtime] chat setup failed: {_ce!r}", file=sys.stderr, flush=True)
+
+        # Phase 5 — full brain/ bootstrap sweep. Wires mood, signal_bus, anchor
+        # moments, identity_stability, app_discoverer, voice_mood_detector,
+        # expression_calibrator, correction_handler, question_engine, feature_flags,
+        # skill_sandbox, connectivity. Starts heartbeat thread (~5s mood tick).
+        # Per-subsystem failures are logged but don't abort the sweep.
+        try:
+            from brain.iris_bootstrap import bootstrap_all
+            bootstrap_all(_g, ROOT)
+        except Exception as _be:
+            print(f"[iris_runtime] iris_bootstrap failed: {_be!r}", file=sys.stderr, flush=True)
 
         # Filler audio clips — pre-rendered Kokoro phrases played via direct
         # sounddevice on the voice_next_input return path. Perceived-latency
