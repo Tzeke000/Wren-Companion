@@ -165,10 +165,16 @@ def _build_context_block(g: dict[str, Any]) -> str:
 
 
 def classify_actions(text: str, *, g: dict[str, Any] | None = None, timeout_s: float = 6.0) -> list[tuple[str, str | None]]:
-    """Ask the fast LLM to emit action tags for the user's input.
+    """Ask Iris to emit action tags for the user's input.
 
     Returns list of (tag, arg) tuples. Empty list on failure or if the
     model didn't emit any recognized tags.
+
+    Phase 9: routes through brain/iris_llm.ask_iris instead of Ollama.
+    Iris-as-LLM means this only fires when Iris is reachable; on timeout
+    we return empty and the caller falls through to deep-path or asks
+    for clarification. timeout_s default raised to 30s — Iris has more
+    latency than a local Ollama model but more accuracy too.
 
     A4: when `g` is supplied, prepends a cross-turn context block to
     the classifier prompt so pronouns resolve naturally ("close it"
@@ -176,38 +182,26 @@ def classify_actions(text: str, *, g: dict[str, Any] | None = None, timeout_s: f
     """
     if not (text or "").strip():
         return []
-    try:
-        from langchain_ollama import ChatOllama
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from brain.ollama_lock import with_ollama
-    except Exception as e:
-        print(f"[action_tag] import error: {e!r}")
-        return []
 
     context_block = _build_context_block(g) if g else ""
+    prompt = (
+        _ACTION_TAG_SYSTEM_PROMPT + context_block +
+        f'\n\nUser: "{text.strip()}"\nOutput:'
+    )
 
-    # 2026-05-07 latency fix: cache + pin the classifier LLM. Was being
-    # re-instantiated every call without keep_alive, costing 5-30s per turn
-    # on idle-evicted model. Same pattern as fast/deep paths in reply_engine.
     try:
-        global _CLASSIFIER_LLM
-        if "_CLASSIFIER_LLM" not in globals() or _CLASSIFIER_LLM is None:
-            _CLASSIFIER_LLM = ChatOllama(
-                model="ava-personal:latest",
-                temperature=0.0,
-                num_predict=80,
-                keep_alive=-1,
-            )
-        llm = _CLASSIFIER_LLM
-        sys_msg = SystemMessage(content=_ACTION_TAG_SYSTEM_PROMPT + context_block)
-        user_msg = HumanMessage(content=f'User: "{text.strip()}"\nOutput:')
+        from brain import iris_llm
         t0 = time.time()
-        result = with_ollama(
-            lambda: llm.invoke([sys_msg, user_msg]),
-            label="action_tag:ava-personal",
+        reply = iris_llm.ask_iris(
+            prompt=prompt,
+            kind="classify_intent",
+            requester="action_tag_router",
+            timeout_s=max(timeout_s, 30.0),
         )
         ms = int((time.time() - t0) * 1000)
-        reply = getattr(result, "content", str(result))
+        if reply is None:
+            print(f"[action_tag] iris_llm timeout after {ms}ms — no tags")
+            return []
         tags = parse_tags(reply)
         print(f"[action_tag] classified in {ms}ms tags={tags} ctx={'yes' if context_block else 'no'} raw={reply[:120]!r}")
         return tags

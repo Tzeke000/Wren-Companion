@@ -615,17 +615,63 @@ def ui_custom_tabs() -> dict:
 
 @app.get("/api/v1/images/list")
 def images_list() -> dict:
-    return {"ok": True, "images": []}
+    """List generated images from state/generated_images/, newest first."""
+    d = _root / "state" / "generated_images"
+    if not d.is_dir():
+        return {"ok": True, "images": []}
+    try:
+        entries = []
+        for p in d.iterdir():
+            if p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                continue
+            entries.append({
+                "filename": p.name,
+                "path": str(p),
+                "ts": p.stat().st_mtime,
+                "size_bytes": p.stat().st_size,
+            })
+        entries.sort(key=lambda e: e["ts"], reverse=True)
+        return {"ok": True, "images": entries[:200]}
+    except Exception as e:
+        return {"ok": False, "images": [], "error": str(e)}
 
 
 @app.post("/api/v1/images/generate")
-async def images_generate() -> dict:
-    return {"ok": False, "error": "not wired"}
+async def images_generate(payload: dict = Body(default={})) -> dict:
+    """Try local ComfyUI first, then Pollinations.ai cloud fallback. Returns
+    saved path on success."""
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "empty prompt"}
+    try:
+        from tools.creative.image_generator import ImageGenerator
+        gen = ImageGenerator(_g)
+        # try local first
+        path = None
+        if hasattr(gen, "generate_local"):
+            path = gen.generate_local(prompt)
+        if path is None and hasattr(gen, "generate_cloud"):
+            path = gen.generate_cloud(prompt)
+        if path is None:
+            return {"ok": False, "error": "both local and cloud generation failed"}
+        return {"ok": True, "path": str(path), "prompt": prompt}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.delete("/api/v1/images/{filename}")
 async def images_delete(filename: str) -> dict:
-    return {"ok": True}
+    """Delete a generated image. Path-traversal protected — only filename, no /."""
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return {"ok": False, "error": "invalid filename"}
+    try:
+        p = _root / "state" / "generated_images" / filename
+        if p.is_file():
+            p.unlink()
+            return {"ok": True, "deleted": filename}
+        return {"ok": False, "error": "not found"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/api/v1/workbench/approve")
@@ -649,8 +695,16 @@ async def camera_calibrate_gaze() -> dict:
 
 
 @app.post("/api/v1/clap/calibrate")
-async def clap_calibrate() -> dict:
-    return {"ok": True}
+async def clap_calibrate(payload: dict = Body(default={})) -> dict:
+    """Run a 2s ambient noise calibration and persist threshold to
+    state/clap_calibration.json. Returns measured ambient + new threshold."""
+    duration = float(payload.get("duration_seconds", 2.0))
+    try:
+        from brain.clap_detector import calibrate_clap_threshold
+        result = calibrate_clap_threshold(_g, duration_seconds=duration)
+        return {"ok": bool(result.get("ok", True)), **result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/api/v1/onboarding/start")
