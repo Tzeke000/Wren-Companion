@@ -387,7 +387,19 @@ def _tick_loop() -> None:
             if flush_counter >= _FLUSH_EVERY_TICKS:
                 flush_counter = 0
                 try:
-                    _save_persisted(_build_full_state())
+                    # Persist a state where total_lifetime_uptime_s excludes the
+                    # CURRENT process's uptime (it gets folded in at next-boot
+                    # via bootstrap_iris_time). Otherwise every periodic save
+                    # inflates lifetime by ~current_uptime, and reads compound
+                    # it again — bug observed 2026-05-11 (447 days uptime
+                    # reported after a real ~1 day of actual runtime).
+                    state = _build_full_state()
+                    state["total_lifetime_uptime_s"] = max(
+                        0.0,
+                        float(state.get("total_lifetime_uptime_s") or 0.0)
+                        - float(state.get("current_process_uptime_s") or 0.0),
+                    )
+                    _save_persisted(state)
                 except Exception:
                     pass
         except Exception:
@@ -426,5 +438,14 @@ def bootstrap_iris_time(g: dict[str, Any]) -> None:
             _save_persisted(persisted)
 
     start_tick_thread()
-    _save_persisted(_build_full_state())
+    # Persist with total_lifetime_uptime_s NOT including current uptime
+    # (the bootstrap-finalize block above already folded prior runs in).
+    # See the tick-loop save for the same correction + 2026-05-11 bug note.
+    _bootstrap_state = _build_full_state()
+    _bootstrap_state["total_lifetime_uptime_s"] = max(
+        0.0,
+        float(_bootstrap_state.get("total_lifetime_uptime_s") or 0.0)
+        - float(_bootstrap_state.get("current_process_uptime_s") or 0.0),
+    )
+    _save_persisted(_bootstrap_state)
     g["_iris_time_ready"] = True
