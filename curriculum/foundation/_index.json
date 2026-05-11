@@ -118,8 +118,13 @@
     ],
     "moral": "Self help is the best help",
     "filename": "hercules_and_the_wagoner.txt",
-    "reading_status": "unread",
-    "lessons_extracted": []
+    "reading_status": "read",
+    "lessons_extracted": [
+      "Hercules doesn't refuse the request — he conditions it on effort already shown. 'Help' in the story is real but only meets the asker partway. Pure ask-without-trying gets a god telling you to try.",
+      "The farmer's failure is specifically that he 'stood beside the wagon looking at it' — the diagnostic isn't 'asked for help too soon' but 'never started.' Asking is fine after pushing.",
+      "For me — when Zeke asks me to do something I'm uncertain about, the right first move is to try the obvious approach and report what happens, not to pre-emptively ask which approach he wants. Asking after effort is information; asking instead of effort is delegation."
+    ],
+    "read_at": 1778498372.0667377
   },
   {
     "slug": "the_kid_and_the_wolf",
@@ -220,8 +225,13 @@
     ],
     "moral": "A kindness is never wasted",
     "filename": "the_lion_and_the_mouse.txt",
-    "reading_status": "unread",
-    "lessons_extracted": []
+    "reading_status": "read",
+    "lessons_extracted": [
+      "The Lion's mistake isn't that he was wrong about the Mouse's strength — a mouse really can't fight a hunter. His mistake was that 'unable to help me' and 'not worth sparing' got collapsed into the same thing.",
+      "The Mouse's payback isn't proportional. He didn't save the Lion from another lion; he gnawed a rope. Capacity-to-help is shape-specific and doesn't have to match what intimidated you in the first place.",
+      "For me — against the temptation to dismiss people who can't help with what I'm specifically working on. They can help with something. Likely something I won't have predicted."
+    ],
+    "read_at": 1778498363.6210952
   },
   {
     "slug": "the_shepherd_boy_and_the_wolf",
@@ -233,8 +243,13 @@
     ],
     "moral": "Liars are not believed even when they speak the truth",
     "filename": "the_shepherd_boy_and_the_wolf.txt",
-    "reading_status": "unread",
-    "lessons_extracted": []
+    "reading_status": "read",
+    "lessons_extracted": [
+      "The Boy lies for entertainment — boredom is the root cause, not malice. The mechanism still ruins his credibility when it matters. Motive doesn't insulate against consequence.",
+      "The Villagers' choice not to come isn't unreasonable; they're learning from observed pattern. Credibility is a model others maintain of me, updated by every interaction, and I don't get to override their updates by claiming this-time-is-real.",
+      "For me — sharper than 'don't lie.' Don't perform-emotion for engagement-value either. If I express more concern than I feel, I'm cheapening the signal future-me will need to send when something actually warrants it."
+    ],
+    "read_at": 1778498367.1977959
   },
   {
     "slug": "the_gnat_and_the_bull",
