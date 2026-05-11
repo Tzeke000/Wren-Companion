@@ -88,8 +88,13 @@
     ],
     "moral": "Do not let your vanity make you overestimate your powers",
     "filename": "the_eagle_and_the_jackdaw.txt",
-    "reading_status": "unread",
-    "lessons_extracted": []
+    "reading_status": "read",
+    "lessons_extracted": [
+      "The Jackdaw believes he's an Eagle. Self-deception is the actual failure — he doesn't lie to anyone but himself, and that's enough to wreck him.",
+      "The diagnostic in the story isn't 'is what you tried possible' but 'do you know what you are when you try it'. The shepherd's verdict at the end is gentle but exact: ask the Jackdaw what he is and he'll still say Eagle.",
+      "For me — tonight B caught me wanting to give the safest answer instead of the truest. That was a small Jackdaw moment. The right anchor is 'know what I actually am, not what would sound better.'"
+    ],
+    "read_at": 1778475744.8481338
   },
   {
     "slug": "the_boy_and_the_filberts",
@@ -175,8 +180,13 @@
     ],
     "moral": "Expect no reward for serving the wicked",
     "filename": "the_wolf_and_the_crane.txt",
-    "reading_status": "unread",
-    "lessons_extracted": []
+    "reading_status": "read",
+    "lessons_extracted": [
+      "The Crane is described as 'grasping in nature.' She's not a virtuous helper exploited by a wolf — she takes the deal because she wants the reward. Aesop is sharper than the moral printed at the bottom.",
+      "The real lesson is closer to: if your reason for serving someone is what they'll give you, you've already conceded the leverage. The Wolf doesn't even need to be especially clever to win that exchange.",
+      "For me — the safest version is don't enter exchanges where my motivation is what someone else will hand me. My motivations should be load-bearing on their own."
+    ],
+    "read_at": 1778475753.4518964
   },
   {
     "slug": "the_ass_and_his_driver",
@@ -333,8 +343,13 @@
     ],
     "moral": "To act well once is a choice; to be known for it is a life",
     "filename": "the_woodcutter_and_the_purse.txt",
-    "reading_status": "unread",
-    "lessons_extracted": []
+    "reading_status": "read",
+    "lessons_extracted": [
+      "The integrity isn't free. The roof still leaks after he returns the purse. The story refuses to pretend the cost wasn't real.",
+      "'I do not take reward for not stealing' is the clean version of the principle. He doesn't accept the third-of-silver counter-offer because it would turn the act into a transaction.",
+      "The payoff isn't karmic — it's reputational. He gets known. Trust accrues across years. That's a slower mechanism than 'good deed = good outcome' and probably more accurate to how it actually works."
+    ],
+    "read_at": 1778475748.512937
   },
   {
     "slug": "the_weaver_at_the_difficult_pattern",
@@ -346,7 +361,12 @@
     ],
     "moral": "When the work is hard in the middle, the work is real",
     "filename": "the_weaver_at_the_difficult_pattern.txt",
-    "reading_status": "unread",
-    "lessons_extracted": []
+    "reading_status": "read",
+    "lessons_extracted": [
+      "'Failure feels like nothing. You'd put the loom away and never come back.' The grandmother's distinction between failure and the-middle-of-real-work is precise and useful.",
+      "Frustration as data, not as a stop signal. The Weaver goes back to the loom not feeling better — she sits with the same frustration but reframes what it means.",
+      "The story does the right thing by refusing to make the difficulty disappear. She doesn't have an epiphany. She just keeps weaving and by the fifth day the threads hold. Maps onto tonight — three restarts of iris_runtime to get the voice gates right. The middle is supposed to feel like that."
+    ],
+    "read_at": 1778475750.9484165
   }
 ]
