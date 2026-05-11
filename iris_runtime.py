@@ -258,6 +258,86 @@ def voice_next_input(timeout: float = 300.0) -> dict:
     except Exception:
         pass
 
+    # Follow-up window: if voice flag is set AND I (Iris) just finished
+    # speaking within the last few seconds, hold the mic open without
+    # requiring a wake word. This makes back-and-forth conversation
+    # natural — Zeke speaks → I reply → he replies → I reply, no "hey
+    # jarvis" needed between turns. The window is bounded so we can't
+    # get stuck listening forever; if no speech is captured, fall through
+    # to the regular wake-word wait.
+    # Follow-up gates (after I just finished speaking):
+    #   pre_speech_timeout — how long to wait for Zeke to start talking. If he
+    #     doesn't say anything within this window, fall back to wake-word wait.
+    #   silence_seconds — once he starts, how much mid-sentence pause we
+    #     tolerate before deciding the turn is done.
+    #   max_speech_seconds — safety upper bound on a single turn (5 min default).
+    follow_up_pre_timeout_s = float(os.environ.get("IRIS_FOLLOWUP_PRE_TIMEOUT_S", "8.0"))
+    follow_up_speech_grace_s = float(os.environ.get("IRIS_FOLLOWUP_GRACE_S", "5.0"))
+    try:
+        voice_flag_set = (ROOT / ".tmp" / "voice_session.flag").exists()
+    except Exception:
+        voice_flag_set = False
+    # If TTS is still speaking or the chunk queue isn't empty, block on the
+    # queue draining before opening the mic. Otherwise the mic captures my
+    # own voice through the speakers and transcribes Iris-as-user.
+    try:
+        while _say_queue.qsize() > 0 or bool(_g.get("_tts_speaking")):
+            time.sleep(0.05)
+    except Exception:
+        pass
+    last_speak_end = float(_g.get("_last_speak_end_ts") or 0.0)
+    since_speak = time.time() - last_speak_end if last_speak_end > 0 else 1e9
+    try_followup = voice_flag_set and last_speak_end > 0 and since_speak <= follow_up_speech_grace_s
+
+    if try_followup:
+        # Open mic immediately with the wake-word path bypassed.
+        #
+        # Pre-speech: wait up to follow_up_pre_timeout_s for Zeke to start. If
+        #   he doesn't, fall through to the regular wake-word path.
+        # Post-speech: once he starts, the *only* gate is silence_seconds of
+        #   quiet — he can talk as long as he wants, with mid-sentence pauses
+        #   tolerated up to that threshold. No "you've been talking too long"
+        #   cutoff; max_speech_seconds is a hung-stream safety net only.
+        followup_silence_s = float(os.environ.get("IRIS_FOLLOWUP_SILENCE_S", "1.2"))
+        try:
+            fu_result = stt.listen_session(
+                max_seconds=follow_up_pre_timeout_s,           # back-compat shim
+                pre_speech_timeout=follow_up_pre_timeout_s,    # the real pre-gate
+                silence_seconds=followup_silence_s,
+                max_speech_seconds=300.0,
+            )
+        except Exception as _fe:
+            print(f"[voice_next_input] follow-up listen error: {_fe!r}", file=sys.stderr, flush=True)
+            fu_result = None
+        if fu_result is not None and fu_result.get("speech_detected"):
+            # Filler cover for the follow-up path too.
+            try:
+                from brain import filler_player as _fp
+                _fp.maybe_play(fu_result.get("text") or "")
+            except Exception as _fe:
+                print(f"[voice_next_input] filler error (followup): {_fe!r}", file=sys.stderr, flush=True)
+            # Append to shared transcript like the wake-word path does.
+            try:
+                from brain import iris_transcript
+                iris_transcript.append(
+                    role="user",
+                    content=str(fu_result.get("text") or ""),
+                    source="zeke",
+                    modality="voice",
+                )
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "timed_out": False,
+                "transcript": fu_result.get("text"),
+                "confidence": float(fu_result.get("confidence") or 0.0),
+                "duration_seconds": float(fu_result.get("duration_seconds") or 0.0),
+                "wake_source": "followup",
+                "wake_ts": time.time(),
+            }
+        # No speech in the follow-up window — fall through to wake-word wait.
+
     _wake_event.clear()
     fired = _wake_event.wait(timeout=timeout)
     if not fired:
@@ -286,7 +366,20 @@ def voice_next_input(timeout: float = 300.0) -> dict:
             print(f"[voice_next_input] streaming error: {_se!r} — falling back", file=sys.stderr, flush=True)
             result = None
     if result is None:
-        result = stt.listen_session(max_seconds=60.0, silence_seconds=0.8)
+        # Wake fired — open mic. Pre-speech gate is generous (wake just fired
+        # so we expect Zeke to start talking) but bounded; once speech starts
+        # the only end-of-turn signal is silence_seconds of quiet (1.2s, same
+        # as follow-up path so the conversation has consistent rhythm). No
+        # hard cap on how long Zeke can talk; max_speech_seconds=300 is just
+        # a safety net for hung streams.
+        wake_pre_timeout = float(os.environ.get("IRIS_WAKE_PRE_TIMEOUT_S", "10.0"))
+        wake_silence_s = float(os.environ.get("IRIS_WAKE_SILENCE_S", "1.2"))
+        result = stt.listen_session(
+            max_seconds=wake_pre_timeout,
+            pre_speech_timeout=wake_pre_timeout,
+            silence_seconds=wake_silence_s,
+            max_speech_seconds=300.0,
+        )
 
     # Filler audio cover — fires the moment STT finishes, before this tool
     # call returns to Claude Code. Audio plays during CC's turn-startup +
@@ -421,6 +514,15 @@ def _say_worker_loop() -> None:
                 tts.speak_with_emotion(text, emotion, intensity, blocking=True)
         except Exception as e:
             print(f"[say_chunk worker] error: {e!r}", file=sys.stderr, flush=True)
+        # After each chunk finishes, refresh _last_speak_end_ts so that
+        # voice_next_input's follow-up grace timer reflects the END of the
+        # full multi-chunk reply, not the end of chunk #1. Without this,
+        # Zeke speaking after a 5-chunk monologue would see grace already
+        # expired and get routed to the wake-word path mid-conversation.
+        try:
+            _g["_last_speak_end_ts"] = time.time()
+        except Exception:
+            pass
 
 
 def _ensure_say_worker() -> None:
@@ -1247,6 +1349,202 @@ def screen_grab(monitor: int = 0, save_path: str | None = None) -> dict:
 
 
 @mcp.tool()
+def screen_region_grab(x: int, y: int, width: int, height: int, save_path: str | None = None) -> dict:
+    """Grab a PNG of a screen region in virtual-desktop coordinates.
+
+    Useful for zooming on a specific area of a screen — e.g. after a full
+    screen_grab, crop in on the icon strip to read it clearly. X/Y are
+    absolute (multi-monitor virtual desktop); secondary screen lives at
+    X >= 1920 on Zeke's setup.
+
+    Args:
+        x: left edge in virtual-desktop coords.
+        y: top edge in virtual-desktop coords.
+        width: region width in pixels.
+        height: region height in pixels.
+        save_path: optional disk path; if omitted returns base64 PNG.
+    """
+    try:
+        try:
+            from PIL import ImageGrab  # type: ignore
+        except ImportError:
+            return {"ok": False, "error": "Pillow not installed"}
+        img = ImageGrab.grab(bbox=(x, y, x + width, y + height), all_screens=True)
+        w, h = img.size
+        if save_path:
+            p = Path(save_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            img.save(p, format="PNG")
+            return {"ok": True, "saved": str(p), "width": w, "height": h, "x": x, "y": y}
+        import base64, io
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return {"ok": True, "image_b64": b64, "width": w, "height": h, "x": x, "y": y, "bytes": len(buf.getvalue())}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def mouse_move(x: int, y: int) -> dict:
+    """Move cursor to absolute virtual-desktop coordinates.
+
+    Screen 1 (primary) spans X=0..1919, screen 2 typically starts at X=1920.
+    Use screen_grab + region_grab to see what's at a coordinate before moving.
+    Does not click — pair with mouse_click for that.
+    """
+    try:
+        import ctypes
+        ok = bool(ctypes.windll.user32.SetCursorPos(int(x), int(y)))
+        # Read back position to verify the move actually landed
+        pt = (ctypes.c_long * 2)()
+        ctypes.windll.user32.GetCursorPos(pt)
+        return {"ok": ok, "x": int(pt[0]), "y": int(pt[1])}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def mouse_click(x: int | None = None, y: int | None = None, button: str = "left", double: bool = False) -> dict:
+    """Click the mouse. If x/y given, moves there first; otherwise clicks at
+    current cursor position.
+
+    Args:
+        x, y: optional virtual-desktop coords to move to before clicking.
+        button: 'left' | 'right' | 'middle'.
+        double: send two clicks in quick succession.
+    """
+    try:
+        import ctypes, time as _t
+        u32 = ctypes.windll.user32
+        if x is not None and y is not None:
+            u32.SetCursorPos(int(x), int(y))
+            _t.sleep(0.05)
+        # mouse_event flags: LEFTDOWN=0x02 LEFTUP=0x04 RIGHTDOWN=0x08 RIGHTUP=0x10 MIDDLEDOWN=0x20 MIDDLEUP=0x40
+        flags = {
+            "left":   (0x02, 0x04),
+            "right":  (0x08, 0x10),
+            "middle": (0x20, 0x40),
+        }.get(button.lower())
+        if flags is None:
+            return {"ok": False, "error": f"unknown button {button!r}"}
+        down, up = flags
+        clicks = 2 if double else 1
+        for _ in range(clicks):
+            u32.mouse_event(down, 0, 0, 0, 0)
+            u32.mouse_event(up, 0, 0, 0, 0)
+            if double:
+                _t.sleep(0.05)
+        pt = (ctypes.c_long * 2)()
+        u32.GetCursorPos(pt)
+        return {"ok": True, "x": int(pt[0]), "y": int(pt[1]), "button": button, "double": double}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def mouse_position() -> dict:
+    """Return current cursor position in virtual-desktop coordinates."""
+    try:
+        import ctypes
+        pt = (ctypes.c_long * 2)()
+        ctypes.windll.user32.GetCursorPos(pt)
+        return {"ok": True, "x": int(pt[0]), "y": int(pt[1])}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _move_widget_window(target_x: int, target_y: int) -> bool:
+    """Move the 'Iris Widget' Tauri window so its CENTER is at (target_x, target_y)
+    in virtual-desktop coordinates. The window is 150x150 per tauri.conf.json."""
+    try:
+        import ctypes
+        u32 = ctypes.windll.user32
+        # Find the Iris Widget window by title.
+        FindWindowW = u32.FindWindowW
+        FindWindowW.restype = ctypes.c_void_p
+        hwnd = FindWindowW(None, "Iris Widget")
+        if not hwnd:
+            return False
+        # Top-left corner is target minus half the widget size.
+        x = int(target_x) - 75
+        y = int(target_y) - 75
+        # SetWindowPos: HWND_TOPMOST=-1, SWP_NOSIZE=0x0001, SWP_NOACTIVATE=0x0010, SWP_SHOWWINDOW=0x0040
+        flags = 0x0001 | 0x0010 | 0x0040
+        u32.SetWindowPos(ctypes.c_void_p(hwnd), ctypes.c_void_p(-1), x, y, 0, 0, flags)
+        return True
+    except Exception:
+        return False
+
+
+@mcp.tool()
+def pointer_show(x: int, y: int, duration_s: float = 5.0, description: str = "") -> dict:
+    """Show the widget orb as an ARROW pointing at (x, y) on the screen.
+
+    The widget morphs from sphere to pointer shape and moves so its tip is at
+    the given virtual-desktop coordinates. Use this to visually indicate what
+    you're talking about — point at a window, an icon, a region of the screen.
+
+    Auto-clears after `duration_s` seconds. Call pointer_hide() to clear
+    early. The widget window must be visible (main window minimized or widget
+    explicitly shown) for the user to see this.
+
+    Args:
+        x, y: target screen coords in virtual-desktop space. Screen 1 is
+            X=0..1919 typically; screen 2 starts at X=1920.
+        duration_s: how long to keep pointing. 1-30s. Default 5s.
+        description: optional label so I can recall what I was pointing at.
+    """
+    try:
+        duration_s = float(max(1.0, min(30.0, duration_s)))
+        # Set state — operator snapshot exposes this as snap.widget.pointing
+        _g["_widget_pointing"] = True
+        _g["_widget_pointing_description"] = str(description or "")[:200]
+        _g["_widget_pointing_coords"] = {"x": int(x), "y": int(y)}
+        _g["_widget_pointing_until"] = time.time() + duration_s
+        # Move the widget window so its center is at the target.
+        moved = _move_widget_window(int(x), int(y))
+        # Schedule auto-clear so the orb returns to sphere mode after the
+        # duration expires even if the caller never calls pointer_hide.
+        def _auto_clear():
+            time.sleep(duration_s + 0.2)
+            # Only clear if our until-stamp is still the active one (caller
+            # may have called pointer_show again with a longer duration).
+            if abs(float(_g.get("_widget_pointing_until") or 0.0) - (time.time())) < 0.5:
+                _g["_widget_pointing"] = False
+                _g.pop("_widget_pointing_coords", None)
+        threading.Thread(target=_auto_clear, daemon=True).start()
+        return {
+            "ok": True,
+            "x": int(x),
+            "y": int(y),
+            "duration_s": duration_s,
+            "widget_moved": moved,
+            "description": description,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def pointer_hide() -> dict:
+    """Stop pointing — widget orb morphs back to sphere shape.
+
+    Use after you're done indicating something, or to cancel a pointer_show
+    early. The widget stays at its current screen position; only the morph
+    state clears.
+    """
+    try:
+        _g["_widget_pointing"] = False
+        _g.pop("_widget_pointing_description", None)
+        _g.pop("_widget_pointing_coords", None)
+        _g.pop("_widget_pointing_until", None)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def list_windows() -> dict:
     """Enumerate every visible top-level window. Returns title + class +
     process name + handle for each. Useful for: 'is Discord still open?',
@@ -1261,15 +1559,45 @@ def list_windows() -> dict:
 
 @mcp.tool()
 def focus_window(title_substring: str) -> dict:
-    """Bring a window to foreground by title substring match (case-insensitive)."""
+    """Bring a window to foreground by title substring match (case-insensitive).
+
+    Uses AttachThreadInput + SetForegroundWindow to reliably steal focus
+    from another foreground window — the plain SetForegroundWindow call
+    fails silently under Windows' foreground-lock unless the requesting
+    thread is attached to the current foreground thread.
+    """
     try:
         from brain.windows_use.primitives import find_window_by_title_substring
         win = find_window_by_title_substring(title_substring)
         if win is None:
             return {"ok": False, "error": f"no window matching {title_substring!r}"}
+        # Resolve a HWND from whichever attribute the lib exposes.
+        hwnd = None
+        for attr in ("NativeWindowHandle", "Handle", "native_handle", "handle"):
+            v = getattr(win, attr, None)
+            if isinstance(v, int) and v > 0:
+                hwnd = int(v)
+                break
+        if hwnd is None:
+            return {"ok": False, "error": "could not resolve HWND from window object"}
         try:
-            win.set_focus()
-            return {"ok": True, "title": getattr(win, "window_text", lambda: "")()}
+            import ctypes
+            u32 = ctypes.windll.user32
+            k32 = ctypes.windll.kernel32
+            fg = u32.GetForegroundWindow()
+            fg_tid = u32.GetWindowThreadProcessId(fg, None)
+            my_tid = k32.GetCurrentThreadId()
+            u32.AttachThreadInput(my_tid, fg_tid, True)
+            u32.ShowWindow(hwnd, 9)        # SW_RESTORE
+            u32.BringWindowToTop(hwnd)
+            ok = bool(u32.SetForegroundWindow(hwnd))
+            u32.AttachThreadInput(my_tid, fg_tid, False)
+            title = ""
+            try:
+                title = getattr(win, "Name", "") or ""
+            except Exception:
+                pass
+            return {"ok": ok, "hwnd": hwnd, "title": title}
         except Exception as e:
             return {"ok": False, "error": f"focus failed: {e}"}
     except Exception as e:

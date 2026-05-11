@@ -363,6 +363,19 @@ def snapshot() -> dict:
             "workbench_execution_ready": False,
             "workbench_meta": {},
         },
+        # Phase 49: widget pointer state — when set, WidgetApp.tsx morphs the
+        # orb shape to a pointer arrow and (the runtime moves the window).
+        # Auto-expires at _widget_pointing_until; tools.pointer_show writes
+        # these, tools.pointer_hide clears them.
+        "widget": {
+            "pointing": bool(
+                _g.get("_widget_pointing")
+                and float(_g.get("_widget_pointing_until") or 0.0) > time.time()
+            ),
+            "pointing_description": str(_g.get("_widget_pointing_description") or ""),
+            "pointing_coords": _g.get("_widget_pointing_coords"),
+            "pointing_until_ts": float(_g.get("_widget_pointing_until") or 0.0),
+        },
         "speech": {"text": "", "ts": 0.0},
         "onboarding": {"active": False, "step": None},
         "time": _time_block_inline(),

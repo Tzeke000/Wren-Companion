@@ -141,15 +141,24 @@ class WakeWordDetector:
             # Override with AVA_USE_HEY_JARVIS_PROXY=1 to re-enable jarvis
             # as a proxy. Default behavior is to disable.
             wake_models: list[str] = []
-            custom = self._base / "models" / "wake_words" / "hey_ava.onnx"
-            if custom.is_file():
-                wake_models.append(str(custom))
-                print(f"[wake_word] custom hey_ava model loaded: {custom}")
+            # Prefer hey_iris.onnx (Iris's own trained model). Fall back to
+            # hey_ava.onnx for backwards-compat with older repo state.
+            custom_iris = self._base / "models" / "wake_words" / "hey_iris.onnx"
+            custom_ava = self._base / "models" / "wake_words" / "hey_ava.onnx"
+            if custom_iris.is_file():
+                wake_models.append(str(custom_iris))
+                print(f"[wake_word] custom hey_iris model loaded: {custom_iris}")
+            elif custom_ava.is_file():
+                wake_models.append(str(custom_ava))
+                print(f"[wake_word] custom hey_ava model loaded: {custom_ava}")
+            # jarvis-as-proxy loads ALONGSIDE the custom model when env=1, not
+            # just as a fallback. Lets a weak custom model coexist with the
+            # reliable bundled proxy until retrained.
             allow_jarvis = os.environ.get("AVA_USE_HEY_JARVIS_PROXY", "0").strip() == "1"
-            if allow_jarvis and not wake_models:
+            if allow_jarvis:
                 wake_models.append("hey_jarvis")
                 print("[wake_word] hey_jarvis proxy enabled (AVA_USE_HEY_JARVIS_PROXY=1)")
-            elif not wake_models:
+            if not wake_models:
                 # No custom model + jarvis disabled. Skip openWakeWord
                 # entirely so the wake source falls through to clap +
                 # transcript_wake (Whisper). The whisper-poll fallback
@@ -164,12 +173,15 @@ class WakeWordDetector:
                 enable_speex_noise_suppression=False,
             )
             self._oww_keys = list(self._oww_model.models.keys())
-            using_custom = any("hey_ava" in k for k in self._oww_keys)
+            using_iris = any("hey_iris" in k for k in self._oww_keys)
+            using_ava = any("hey_ava" in k for k in self._oww_keys)
+            using_custom = using_iris or using_ava
             using_jarvis = any("jarvis" in k for k in self._oww_keys)
+            custom_name = "hey_iris" if using_iris else ("hey_ava" if using_ava else "")
             if using_custom and using_jarvis:
-                tag = "custom hey_ava + hey_jarvis proxy"
+                tag = f"custom {custom_name} + hey_jarvis proxy"
             elif using_custom:
-                tag = "custom hey_ava only"
+                tag = f"custom {custom_name} only"
             elif using_jarvis:
                 tag = "hey_jarvis proxy (legacy)"
             else:

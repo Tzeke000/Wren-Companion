@@ -219,10 +219,23 @@ class STTEngine:
         silence_seconds: float = 2.5,
         sample_rate: int = 16000,
         rms_threshold: float = 0.008,
+        pre_speech_timeout: float | None = None,
+        max_speech_seconds: float = 300.0,
     ) -> dict | None:
         """
         Opens microphone, streams 100ms blocks, stops when silence_seconds
         of quiet follows speech. Returns None immediately if no speech detected.
+
+        Turn-taking gates (in priority order):
+          1. Pre-speech: if no speech detected after `pre_speech_timeout` seconds
+             (defaults to `max_seconds` for back-compat), return with
+             speech_detected=False. This is the "did you start talking?" gate.
+          2. Post-speech: once speech is detected, the only end-of-turn signal
+             is `silence_seconds` of quiet. The user can talk as long as they
+             need — natural pauses up to `silence_seconds` are tolerated.
+          3. Safety: `max_speech_seconds` is an upper bound to prevent a hung
+             stream from camping the mic forever. Default 5 min.
+
         Returns dict: {text, confidence, duration_seconds, speech_detected}.
         """
         if not self.is_available():
@@ -233,11 +246,18 @@ class STTEngine:
         except ImportError:
             return self._listen_once_compat()
 
+        # Back-compat: callers that pass only max_seconds still get the old
+        # behavior of "exit after max_seconds total." If they pass
+        # pre_speech_timeout explicitly, we use the new gates.
+        pre_timeout = float(pre_speech_timeout) if pre_speech_timeout is not None else float(max_seconds)
+        max_speech = float(max_speech_seconds)
+
         t0 = time.monotonic()
         BLOCK = int(sample_rate * 0.1)  # 100ms
         all_audio: list = []
         speech_started = False
-        last_speech_t = None
+        speech_started_t: float | None = None
+        last_speech_t: float | None = None
 
         with self._lock:
             try:
@@ -245,15 +265,26 @@ class STTEngine:
                 stream.start()
                 self._backend = "sounddevice"
                 while True:
-                    elapsed = time.monotonic() - t0
-                    if elapsed >= max_seconds:
-                        break
+                    now = time.monotonic()
+                    if not speech_started:
+                        # Pre-speech gate — only counts time before any speech
+                        # is detected. If you never start talking, exit at
+                        # pre_speech_timeout.
+                        if (now - t0) >= pre_timeout:
+                            break
+                    else:
+                        # Post-speech safety net only. Real end-of-turn is the
+                        # silence_seconds check below.
+                        if speech_started_t is not None and (now - speech_started_t) >= max_speech:
+                            break
                     block_data, _ = stream.read(BLOCK)
                     chunk = np.squeeze(block_data, axis=1) if block_data.ndim > 1 else block_data
                     all_audio.append(chunk)
                     rms = float(np.sqrt(np.mean(chunk ** 2)))
                     if rms > rms_threshold:
-                        speech_started = True
+                        if not speech_started:
+                            speech_started = True
+                            speech_started_t = time.monotonic()
                         last_speech_t = time.monotonic()
                     elif speech_started and last_speech_t is not None:
                         silent_for = time.monotonic() - last_speech_t

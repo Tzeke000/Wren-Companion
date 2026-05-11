@@ -1,0 +1,79 @@
+## openWakeWord training config — hey_iris model for Iris
+## Drives: python -m openwakeword.train --training_config hey_iris.yaml --generate_clips --augment_clips --train_model
+
+# Model identity
+model_name: "hey_iris"
+
+# Wake phrases. Per Zeke 2026-05-10: include bare "iris" alongside the prefixed forms,
+# accepting that "iris" alone will be touchy in conversations that include the name.
+target_phrase:
+  - "hey iris"
+  - "hi iris"
+  - "okay iris"
+  - "iris"
+
+# Negative phrases: phonetic neighbors that should NOT trigger.
+# Train.py auto-adds adversarial phoneme-overlap text on top of these.
+custom_negative_phrases:
+  - "paris"
+  - "irish"
+  - "iris flower"
+  - "isis"
+  - "your eyes"
+  - "I'd risk"
+  - "ibis"
+  - "I rest"
+  - "I wish"
+  - "I miss"
+  - "ours"
+  - "yours"
+  - "his"
+  - "the iris"
+
+# Sample counts. Per Zeke 2026-05-10 (retrain v2 after weak v1 metrics): 25000 positives.
+# v1 metrics were recall 39.4% / FP 0.62/hr — needed more data + relaxed FP target.
+n_samples: 25000
+n_samples_val: 5000
+
+# TTS batch sizes. CPU-only training so keep these modest.
+tts_batch_size: 50
+augmentation_batch_size: 16
+augmentation_rounds: 2
+
+# Path to the dscripka piper-sample-generator clone (NOT rhasspy's — incompatible API).
+piper_sample_generator_path: "/home/zeke/piper-sample-generator"
+
+# Where train.py drops generated clips, features, and the final ONNX.
+# Using WSL home so the ~17GB intermediate features file isn't sitting on Windows.
+output_dir: "/home/zeke/wakeword_data/training_output"
+
+# Augmentation corpora (downloaded by ~/fetch_aug_data.py).
+rir_paths:
+  - "/home/zeke/wakeword_data/mit_rirs"
+
+background_paths:
+  - "/home/zeke/wakeword_data/background"
+
+background_paths_duplication_rate:
+  - 1
+
+# False-positive validation. The HF-hosted set is 11h of mixed speech/noise/music.
+false_positive_validation_data_path: "/home/zeke/wakeword_data/validation_set_features.npy"
+
+# The 16.5GB pre-computed ACAV100M features used as the negative training corpus.
+feature_data_files:
+  ACAV100M_sample: "/home/zeke/wakeword_data/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+batch_n_per_class:
+  ACAV100M_sample: 1024
+  adversarial_negative: 50
+  positive: 50
+
+# Model architecture. dnn + layer_size 32 is the default and works for short wake phrases.
+model_type: "dnn"
+layer_size: 32
+
+# Training schedule. v2 tuning: less aggressive FP target → more recall headroom.
+steps: 50000
+max_negative_weight: 1000
+target_false_positives_per_hour: 0.5
