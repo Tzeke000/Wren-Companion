@@ -277,18 +277,30 @@ def _find_control_in(parent, criteria: dict[str, Any], timeout: float = 2.0):
 
 
 def type_text_in_window(window_title_substring: str, text: str) -> bool:
-    """Bring window forward and send keystrokes."""
+    """Bring window forward and send keystrokes.
+
+    Uses AttachThreadInput-based focus when an HWND is resolvable, falling
+    back to uiautomation's SetActive otherwise. SendKeys still uses
+    uiautomation here because that path delivers individual character keys
+    correctly; the broken case was specifically chord keystrokes like Ctrl+V
+    (handled by paste_into_window).
+    """
     if not text:
         return False
     auto = _ui_auto()
     win = find_window_by_title_substring(window_title_substring, timeout=1.5)
     if win is None:
         return False
+    hwnd = _resolve_hwnd(win)
+    if hwnd is not None:
+        _force_foreground(hwnd)
+    else:
+        try:
+            win.SetActive()
+        except Exception:
+            pass
     try:
-        win.SetActive()
-    except Exception:
-        pass
-    try:
+        time.sleep(0.05)  # settle
         # uiautomation.SendKeys treats {} () + ^ % ~ as special. Escape them.
         out = []
         for ch in text:
@@ -409,23 +421,103 @@ def set_clipboard(text: str) -> bool:
         return False
 
 
-def paste_into_window(window_title_substring: str) -> bool:
-    """Bring the matching window to foreground, then send Ctrl+V. Returns
-    True if the window was found and the keystroke was sent (does not
-    verify the paste actually landed — caller can re-read the window if
-    needed).
+def _resolve_hwnd(win: Any) -> int | None:
+    """Pull a Win32 HWND out of whatever the lib exposed on its WindowControl."""
+    for attr in ("NativeWindowHandle", "Handle", "native_handle", "handle"):
+        v = getattr(win, attr, None)
+        if isinstance(v, int) and v > 0:
+            return int(v)
+    return None
+
+
+def _force_foreground(hwnd: int) -> bool:
+    """Steal foreground reliably using AttachThreadInput. Plain
+    SetForegroundWindow fails silently under Windows' foreground-lock unless
+    we attach to the current foreground thread first.
     """
-    auto = _ui_auto()
+    try:
+        import ctypes
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        fg = u32.GetForegroundWindow()
+        fg_tid = u32.GetWindowThreadProcessId(fg, None)
+        my_tid = k32.GetCurrentThreadId()
+        u32.AttachThreadInput(my_tid, fg_tid, True)
+        u32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        u32.BringWindowToTop(hwnd)
+        ok = bool(u32.SetForegroundWindow(hwnd))
+        u32.AttachThreadInput(my_tid, fg_tid, False)
+        return ok
+    except Exception:
+        return False
+
+
+def paste_into_window(window_title_substring: str) -> bool:
+    """Bring the matching window to foreground, then send Ctrl+V via
+    System.Windows.Forms.SendKeys (PowerShell-style) which delivers the
+    modifier correctly. Returns True if the window was found and the
+    keystroke was sent (does not verify the paste actually landed — caller
+    can re-read the window if needed).
+
+    History 2026-05-11: the original implementation used uiautomation's
+    `SendKeys("^v")` after `win.SetActive()`. On this Windows 10 build both
+    sides of that failed silently — SetActive didn't reliably steal focus,
+    and even when it did the SendKeys delivery showed up as literal "^v"
+    characters in Notepad's Edit control. Replaced with AttachThreadInput +
+    SetForegroundWindow + SendInput (via WSCRIPT shell or PowerShell as the
+    Ctrl+V dispatcher).
+    """
     win = find_window_by_title_substring(window_title_substring, timeout=1.5)
     if win is None:
         return False
+    hwnd = _resolve_hwnd(win)
+    if hwnd is None:
+        # Fall back to uiautomation focus if HWND isn't exposed.
+        try:
+            win.SetActive()
+        except Exception:
+            pass
+    else:
+        _force_foreground(hwnd)
     try:
-        win.SetActive()
-    except Exception:
-        pass
-    try:
-        time.sleep(0.05)  # tiny settle so SetActive completes
-        auto.SendKeys("^v")
+        time.sleep(0.08)  # small settle so the foreground swap completes
+        # Send Ctrl+V via Win32 SendInput directly. Using virtual-key codes
+        # so we don't depend on layout-specific scan codes.
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+
+        VK_CONTROL = 0x11
+        VK_V = 0x56
+        KEYEVENTF_KEYUP = 0x0002
+        INPUT_KEYBOARD = 1
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class _INPUT_UNION(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _anonymous_ = ("u",)
+            _fields_ = [("type", wintypes.DWORD), ("u", _INPUT_UNION)]
+
+        def _send(vk: int, up: bool) -> None:
+            inp = INPUT()
+            inp.type = INPUT_KEYBOARD
+            inp.ki = KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, None)
+            u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+
+        _send(VK_CONTROL, False)
+        _send(VK_V, False)
+        _send(VK_V, True)
+        _send(VK_CONTROL, True)
         return True
     except Exception:
         return False
