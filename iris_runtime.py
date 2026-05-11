@@ -2455,6 +2455,61 @@ def _eager_init_engines() -> None:
         # Orb HTTP shim — gives apps/ava-control/ a backend to talk to on :5876.
         from brain.orb_http import start as _start_orb_http
         _start_orb_http(_g, ROOT, tts=tts)
+
+        # Handoff persistence — read any existing handoff on startup (so the
+        # rest of bootstrap can see "what was true last session"), then start
+        # a periodic writer so even an ungraceful kill loses at most ~5 min
+        # of session state. Plus an atexit handler for graceful shutdowns
+        # (Ctrl+C, SIGTERM-style kills that allow cleanup to run).
+        #
+        # This was the gap Zeke flagged 2026-05-11 — pre-restart "save what's
+        # important to memory" was manual. brain/handoff.py existed but
+        # nothing was wiring it.
+        try:
+            from brain import handoff as _handoff
+            existing = _handoff.read_handoff(ROOT)
+            if existing:
+                _g["_prior_handoff"] = existing
+                print(
+                    f"[iris_runtime] prior handoff loaded "
+                    f"(reason={existing.get('reason', '?')}, "
+                    f"written={existing.get('written_iso', '?')})",
+                    file=sys.stderr, flush=True,
+                )
+            else:
+                print("[iris_runtime] no prior handoff on disk (first boot or clean state)", file=sys.stderr, flush=True)
+
+            # Periodic snapshot — every 5 min, cheap write_handoff (no LLM).
+            # The richer write_handoff_with_summary is reserved for clean
+            # shutdown + context-threshold triggers from elsewhere.
+            def _handoff_periodic_loop() -> None:
+                while True:
+                    time.sleep(300.0)  # 5 minutes
+                    try:
+                        _handoff.write_handoff(_g, ROOT)
+                    except Exception as _he:
+                        print(f"[handoff periodic] write failed: {_he!r}", file=sys.stderr, flush=True)
+            threading.Thread(
+                target=_handoff_periodic_loop,
+                daemon=True,
+                name="iris-handoff-periodic",
+            ).start()
+
+            # atexit — fires on graceful shutdown (clean Python exit, SIGTERM
+            # on Windows when the process is given a chance to clean up).
+            # Does NOT fire on Stop-Process -Force; that's why the periodic
+            # writer is the primary defense.
+            import atexit as _atexit
+            def _handoff_atexit() -> None:
+                try:
+                    _handoff.write_handoff(_g, ROOT)
+                    print("[iris_runtime] handoff written at shutdown", file=sys.stderr, flush=True)
+                except Exception as _ae:
+                    print(f"[handoff atexit] failed: {_ae!r}", file=sys.stderr, flush=True)
+            _atexit.register(_handoff_atexit)
+            print("[iris_runtime] handoff persistence wired (5min periodic + atexit)", file=sys.stderr, flush=True)
+        except Exception as _hbe:
+            print(f"[iris_runtime] handoff wiring failed (non-fatal): {_hbe!r}", file=sys.stderr, flush=True)
     except Exception as e:
         print(f"[iris_runtime] eager engine init failed: {e!r}", file=sys.stderr, flush=True)
 
