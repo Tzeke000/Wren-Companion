@@ -20,6 +20,7 @@ Wired into Claude Code via .mcp.json at repo root.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -918,6 +919,7 @@ def sibling_reply(letter_id: str, body: str, mood: str | None = None) -> dict:
     Returns:
         {ok, letter_id, posted} on success.
     """
+    import json as _json
     if not letter_id or not body or not body.strip():
         return {"ok": False, "error": "letter_id and body required"}
     # Find the original letter so we know who to address the reply to.
@@ -925,7 +927,7 @@ def sibling_reply(letter_id: str, body: str, mood: str | None = None) -> dict:
     if not inbox_path.is_file():
         return {"ok": False, "error": f"letter {letter_id!r} not in inbox"}
     try:
-        orig = json.loads(inbox_path.read_text(encoding="utf-8"))
+        orig = _json.loads(inbox_path.read_text(encoding="utf-8"))
     except Exception as e:
         return {"ok": False, "error": f"could not read letter: {e!r}"}
     sender = str(orig.get("sender") or "all").lower()
@@ -968,11 +970,12 @@ def sibling_defer(letter_id: str, note: str = "") -> dict:
     """
     if not letter_id:
         return {"ok": False, "error": "letter_id required"}
+    import json as _json
     inbox_path = ROOT / "state" / "iris_sibling" / "inbox" / f"{letter_id}.json"
     if not inbox_path.is_file():
         return {"ok": False, "error": f"letter {letter_id!r} not in inbox"}
     try:
-        data = json.loads(inbox_path.read_text(encoding="utf-8"))
+        data = _json.loads(inbox_path.read_text(encoding="utf-8"))
     except Exception as e:
         return {"ok": False, "error": f"could not read letter: {e!r}"}
     if not isinstance(data, dict):

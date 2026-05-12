@@ -34,6 +34,12 @@ import sys
 from pathlib import Path
 from urllib import request as _req
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 ROOT = Path(r"D:\Wren-Companion")
 
 # Paths sourced via brain/iris_paths to keep one source of truth across
