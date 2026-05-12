@@ -1053,6 +1053,118 @@ def sibling_inbox_list(include_deferred: bool = False) -> dict:
     return {"ok": True, "count": len(out), "letters": out}
 
 
+# ── Self-restart (Iris-initiated) ────────────────────────────────────────────
+# The watchdog at scripts/iris_watchdog.ps1 polls D:\Wren-Companion\.tmp\
+# restart_cc.flag every 2s. When the flag appears, it kills the active CC
+# session and spawns a fresh one. Iris uses this to apply code changes
+# that need a CC restart (new MCP tools, etc.) without needing Zeke at the
+# keyboard.
+#
+# Discipline (Iris-side):
+#   - DON'T call this casually. CC restart is one-way: the cognition that
+#     decided to restart doesn't see the new session boot. Use it when
+#     restart is actually necessary, not as a reset button when confused.
+#   - ALWAYS write a handoff first via brain.handoff.write_handoff. The
+#     next session boots blind to what we were doing without it.
+#   - The watchdog debounces 30s — back-to-back restart calls within 30s
+#     are ignored to prevent loops if the new session also decides to
+#     restart immediately.
+#
+# Auth: ROOT/.tmp/restart_cc.flag is just a text file. The watchdog has
+# to be running (start it via Task Scheduler at logon for permanence).
+# If the watchdog isn't running, calling this tool drops the flag but
+# nothing happens — CC keeps running, Iris notices nothing changed.
+
+@mcp.tool()
+def restart_self(reason: str = "", skip_handoff: bool = False) -> dict:
+    """Request a Claude Code restart of this session.
+
+    Writes a handoff snapshot (via brain.handoff.write_handoff — no LLM,
+    cheap), then drops a trigger flag at .tmp/restart_cc.flag. An external
+    watchdog (scripts/iris_watchdog.ps1) polls for the flag and respawns
+    a fresh CC session.
+
+    Use this when:
+      - Code changes you've made need a CC restart to load (new MCP tools
+        registered, settings.json env vars updated).
+      - You've requested an iris_runtime restart and the new code needs
+        BOTH halves rebooted.
+
+    Do NOT use this when:
+      - You're just confused or want a fresh slate. Use memory + handoff
+        instead; restarting won't fix being confused, it'll just lose
+        context.
+      - The watchdog isn't running. Calling this tool drops a flag that
+        nothing will see; you keep running with old code.
+
+    Args:
+        reason: Short string written to the flag file so the watchdog log
+            (and future-you reading it) knows why this restart happened.
+        skip_handoff: If True, don't write the handoff snapshot first.
+            Default False. Skip only if you've already written one this
+            turn.
+
+    Returns:
+        {ok, flag_written, handoff_written, watchdog_running, reason}
+    """
+    try:
+        flag_dir = ROOT / ".tmp"
+        flag_dir.mkdir(parents=True, exist_ok=True)
+        flag_path = flag_dir / "restart_cc.flag"
+
+        # Write handoff first — if this fails, abort so we don't lose context.
+        handoff_ok = False
+        if not skip_handoff:
+            try:
+                from brain import handoff as _handoff
+                handoff_ok = _handoff.write_handoff(_g, ROOT)
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "error": f"handoff write failed: {e!r}",
+                    "flag_written": False,
+                }
+
+        # Watchdog liveness check — look for an iris_watchdog.ps1 process.
+        watchdog_running = False
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe' OR Name='pwsh.exe'\" "
+                 "| Where-Object { $_.CommandLine -like '*iris_watchdog*' } "
+                 "| Select-Object -First 1 ProcessId | ForEach-Object { $_.ProcessId }"],
+                capture_output=True, text=True, timeout=5,
+            )
+            watchdog_running = bool(result.stdout.strip())
+        except Exception:
+            pass
+
+        # Drop the trigger flag with reason text.
+        reason_text = str(reason or "iris requested restart")[:500]
+        flag_path.write_text(reason_text, encoding="utf-8")
+
+        return {
+            "ok": True,
+            "flag_written": str(flag_path),
+            "handoff_written": handoff_ok,
+            "watchdog_running": watchdog_running,
+            "reason": reason_text,
+            "note": (
+                "Watchdog will pick up the flag within ~2s and respawn CC. "
+                "This session will be killed; the new one reads memory + "
+                "handoff on wake."
+                if watchdog_running else
+                "WARNING: watchdog process not detected. The flag is dropped "
+                "but nothing will respawn CC until the watchdog is started "
+                "(scripts/iris_watchdog.ps1). Tell Zeke to start it, or "
+                "delete the flag if you want to abort the restart."
+            ),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @mcp.tool()
 def enroll_face(
     person_id: str,
