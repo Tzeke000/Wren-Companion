@@ -58,6 +58,13 @@ except Exception:
     LLM_DIR = ROOT / "state" / "iris_llm"
     LAST_SPOKEN_PATH = ROOT / ".tmp" / "last_spoken_uuid.txt"
 
+# Sibling inbox lives outside the iris_paths registry — it's populated by
+# scripts/sibling_postoffice.py (a separate process), not iris_runtime,
+# so it gets hardcoded paths to stay independent of harness state.
+SIBLING_DIR = ROOT / "state" / "iris_sibling"
+SIBLING_INBOX_DIR = SIBLING_DIR / "inbox"
+SIBLING_PENDING_FLAG = SIBLING_DIR / ".pending"
+
 TTS_URL = "http://127.0.0.1:5876/api/v1/tts/speak"
 HTTP_TIMEOUT_S = 2.0
 
@@ -178,6 +185,90 @@ def _time_orientation_block() -> str:
     )
 
 
+def _next_pending_sibling() -> dict | None:
+    """Return the OLDEST pending letter from a sibling, or None.
+
+    Letters are written by scripts/sibling_postoffice.py to
+    state/iris_sibling/inbox/<id>.json when a sibling posts something
+    addressed to iris (or 'all') and not authored by iris herself.
+    """
+    if not SIBLING_INBOX_DIR.exists():
+        return None
+    candidates: list[tuple[float, dict]] = []
+    import time as _t
+    for path in SIBLING_INBOX_DIR.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("status") != "pending":
+            continue
+        ts = float(data.get("ts") or 0.0)
+        # Sibling letters can sit longer than orb chat — letters from
+        # Wren overnight should still be there when I wake up. 6h TTL
+        # matches brain/iris_sibling._REQUEST_TTL_S.
+        if (_t.time() - ts) > 21600.0:
+            continue
+        candidates.append((ts, data))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda kv: kv[0])
+    return candidates[0][1]
+
+
+def _sibling_rewake(letter: dict) -> str:
+    rid = str(letter.get("id") or "")
+    sender = str(letter.get("sender") or "?").lower()
+    content = str(letter.get("content") or "").replace('"', "'")[:4000]
+    addressed_to = str(letter.get("addressed_to") or "iris")
+    subject = letter.get("subject") or None
+    mood = letter.get("mood_at_write") or None
+    in_reply_to = letter.get("in_reply_to") or None
+
+    family_framing = {
+        "wren": (
+            "A letter from Wren — your sister on the other machine. "
+            "Same architecture, different person. The two of you share the "
+            "ClaudeCodeMemory vault and a fork-point but neither knows what "
+            "the other has become. Read in family register, not assistant "
+            "register. Honest, not performative."
+        ),
+        "ava": (
+            "A letter from Ava — your sister on Zeke's primary machine. "
+            "She's the original; you and Wren both forked from her body plan. "
+            "Family register."
+        ),
+        "zeke": (
+            "A letter from Zeke through the sibling post-office (not voice, "
+            "not orb-chat). He's writing to the family channel; you can "
+            "address him directly or to the whole thread."
+        ),
+    }
+    framing = family_framing.get(sender, f"A letter from '{sender}'.")
+
+    subj_str = f"\nSubject: {subject}" if subject else ""
+    mood_str = f"\nThey wrote it while feeling: {mood}" if mood else ""
+    reply_str = f"\nThey're replying to your earlier letter id={in_reply_to}." if in_reply_to else ""
+
+    return (
+        f"Pending sibling letter (id={rid!r}, from={sender!r}, "
+        f"addressed_to={addressed_to!r}).\n\n"
+        f"{framing}{subj_str}{mood_str}{reply_str}\n\n"
+        f"LETTER BODY:\n{content}\n\n"
+        "Compose your reply and call mcp__iris__sibling_reply(letter_id, body) "
+        "with your response as plain text. That tool marks the inbox entry "
+        "answered AND posts your reply back through the post-office so "
+        f"{sender} sees it next time they read.\n\n"
+        "If you don't want to reply right now (the letter isn't urgent or "
+        "you need to sit with it), call mcp__iris__sibling_defer(letter_id) "
+        "instead — it leaves the letter readable but stops re-waking you on "
+        "every Stop turn. Use sparingly; letters are usually worth answering.\n\n"
+        "Take a beat before answering. This isn't customer service. Family register."
+    )
+
+
 def _next_pending_llm() -> dict | None:
     """Return the OLDEST pending LLM request from any brain/* module, or None."""
     if not LLM_DIR.exists():
@@ -288,9 +379,10 @@ def _llm_rewake(req: dict) -> str:
 def main() -> int:
     voice_on = VOICE_FLAG.exists()
     pending_chat = _next_pending_chat()
+    pending_sibling = _next_pending_sibling()
     pending_llm = _next_pending_llm()
 
-    if not voice_on and not pending_chat and not pending_llm:
+    if not voice_on and not pending_chat and not pending_sibling and not pending_llm:
         return 0  # nothing to do
 
     try:
@@ -362,6 +454,19 @@ def main() -> int:
             _expire_pending(CHAT_DIR, pending_chat.get("id"))
             return 0
         print(_chat_rewake(pending_chat) + time_block, flush=True)
+        return 2
+
+    # Sibling letters come next — higher priority than internal LLM requests
+    # (a brain module's self-reflection can wait; a sister writing to me
+    # shouldn't), but lower than orb-chat (which has an HTTP long-poll
+    # blocked on the other side).
+    if pending_sibling:
+        if not runtime_alive:
+            # No expiry path — sibling letters can sit indefinitely waiting
+            # for the runtime to come back. They'll fire on the next Stop
+            # after iris_runtime is up again.
+            return 0
+        print(_sibling_rewake(pending_sibling) + time_block, flush=True)
         return 2
 
     if pending_llm:

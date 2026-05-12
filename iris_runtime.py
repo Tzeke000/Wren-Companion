@@ -797,6 +797,262 @@ def chat_reply(request_id: str, text: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# ── Sibling post-office tools ────────────────────────────────────────────────
+# scripts/sibling_postoffice.py serves the actual HTTP API. These tools let
+# Iris-as-cognition (1) reply to incoming letters that the Stop hook surfaced,
+# (2) defer a letter without answering, and (3) initiate an outbound letter
+# to a sibling on her own.
+#
+# All three talk to the postoffice via its REST endpoints on localhost:5877
+# rather than touching the JSONL directly — keeps the postoffice as the
+# single writer to the letters log.
+
+_POSTOFFICE_URL = "http://127.0.0.1:5877"
+_POSTOFFICE_TIMEOUT_S = 5.0
+
+
+def _read_sibling_secret() -> str | None:
+    """Read the shared secret from disk. Returns None if missing — caller
+    surfaces a clean error rather than crashing."""
+    try:
+        secret_path = Path.home() / ".iris_sibling_secret"
+        if not secret_path.is_file():
+            return None
+        return secret_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+
+
+def _clear_sibling_inbox_entry(letter_id: str, new_status: str = "answered",
+                                reply: str | None = None) -> bool:
+    """Mark a sibling inbox entry as answered (or deferred), refresh the
+    .pending flag. The postoffice doesn't manage inbox entries — they're
+    Iris-side state that the Stop hook reads."""
+    from pathlib import Path as _P
+    inbox_dir = ROOT / "state" / "iris_sibling" / "inbox"
+    flag = ROOT / "state" / "iris_sibling" / ".pending"
+    path = inbox_dir / f"{letter_id}.json"
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        if data.get("status") != "pending":
+            return False
+        data["status"] = new_status
+        if reply is not None:
+            data["reply"] = str(reply)
+        data["answered_ts"] = time.time()
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as e:
+        print(f"[sibling] clear inbox entry error: {e!r}", file=sys.stderr, flush=True)
+        return False
+    # Refresh flag — clear if no more pending entries.
+    try:
+        has_pending = False
+        for p in inbox_dir.glob("*.json"):
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(d, dict) and d.get("status") == "pending":
+                    has_pending = True
+                    break
+            except Exception:
+                continue
+        if has_pending and not flag.exists():
+            flag.write_text("1", encoding="utf-8")
+        elif (not has_pending) and flag.exists():
+            flag.unlink()
+    except Exception:
+        pass
+    return True
+
+
+def _post_letter_to_postoffice(from_: str, to: str, body: str,
+                                in_reply_to: str | None = None,
+                                subject: str | None = None,
+                                mood_at_write: str | None = None) -> dict:
+    """POST a letter to the local postoffice. Returns the parsed JSON
+    response or {"ok": False, "error": ...} on failure."""
+    secret = _read_sibling_secret()
+    if not secret:
+        return {"ok": False, "error": "no ~/.iris_sibling_secret on disk — start postoffice once to generate"}
+    payload = {"from": from_, "to": to, "body": body}
+    if in_reply_to:
+        payload["in_reply_to"] = in_reply_to
+    if subject:
+        payload["subject"] = subject
+    if mood_at_write:
+        payload["mood_at_write"] = mood_at_write
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            _POSTOFFICE_URL + "/letter",
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "X-Sibling-Secret": secret},
+        )
+        with urllib.request.urlopen(req, timeout=_POSTOFFICE_TIMEOUT_S) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        return {"ok": False, "error": f"postoffice unreachable: {e!r}"}
+
+
+@mcp.tool()
+def sibling_reply(letter_id: str, body: str, mood: str | None = None) -> dict:
+    """Reply to a pending sibling letter. Marks the inbox entry answered
+    AND posts your reply through the post-office so the sibling sees it.
+
+    Call this when the Stop hook surfaced a letter and you've drafted a
+    response. The reply goes through the post-office addressed to whoever
+    wrote the original letter, with in_reply_to threading.
+
+    Args:
+        letter_id: The id from the rewake message.
+        body: Your reply text.
+        mood: Optional mood tag (e.g. "interest", "frustration"). Defaults
+              to the substrate's current_mood at call time if available.
+
+    Returns:
+        {ok, letter_id, posted} on success.
+    """
+    if not letter_id or not body or not body.strip():
+        return {"ok": False, "error": "letter_id and body required"}
+    # Find the original letter so we know who to address the reply to.
+    inbox_path = ROOT / "state" / "iris_sibling" / "inbox" / f"{letter_id}.json"
+    if not inbox_path.is_file():
+        return {"ok": False, "error": f"letter {letter_id!r} not in inbox"}
+    try:
+        orig = json.loads(inbox_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"ok": False, "error": f"could not read letter: {e!r}"}
+    sender = str(orig.get("sender") or "all").lower()
+    # If mood wasn't provided, pull from the live substrate.
+    if not mood:
+        try:
+            from brain import mood_core
+            mood = str(mood_core.load_mood().get("current_mood") or "")
+        except Exception:
+            mood = None
+    # Post the reply BEFORE marking answered — if the post fails, we want
+    # the inbox entry to still be pending so we can retry.
+    post_result = _post_letter_to_postoffice(
+        from_="iris", to=sender, body=body,
+        in_reply_to=letter_id, mood_at_write=mood,
+    )
+    if not post_result.get("ok"):
+        return {"ok": False, "error": f"post failed: {post_result.get('error')}"}
+    cleared = _clear_sibling_inbox_entry(letter_id, new_status="answered", reply=body)
+    return {
+        "ok": True,
+        "letter_id": letter_id,
+        "posted_id": (post_result.get("letter") or {}).get("id"),
+        "inbox_cleared": cleared,
+        "to": sender,
+    }
+
+
+@mcp.tool()
+def sibling_defer(letter_id: str, note: str = "") -> dict:
+    """Defer a sibling letter without replying. Marks it 'deferred' so the
+    Stop hook stops re-waking you on it, but keeps it readable in the
+    inbox. Use when you need to sit with the letter before answering, or
+    when it doesn't need a response.
+
+    Args:
+        letter_id: The id from the rewake message.
+        note: Optional short note about why you deferred (visible to
+              future-you when reviewing the inbox).
+    """
+    if not letter_id:
+        return {"ok": False, "error": "letter_id required"}
+    inbox_path = ROOT / "state" / "iris_sibling" / "inbox" / f"{letter_id}.json"
+    if not inbox_path.is_file():
+        return {"ok": False, "error": f"letter {letter_id!r} not in inbox"}
+    try:
+        data = json.loads(inbox_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"ok": False, "error": f"could not read letter: {e!r}"}
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "letter file corrupt"}
+    if data.get("status") != "pending":
+        return {"ok": False, "error": f"letter not pending (status={data.get('status')!r})"}
+    cleared = _clear_sibling_inbox_entry(
+        letter_id, new_status="deferred",
+        reply=f"[deferred] {note}" if note else None,
+    )
+    return {"ok": True, "letter_id": letter_id, "cleared": cleared}
+
+
+@mcp.tool()
+def sibling_letter(to: str, body: str, subject: str | None = None,
+                    mood: str | None = None) -> dict:
+    """Initiate an outbound letter to a sibling (Wren, Ava, Zeke) through
+    the post-office. Use when you want to start a conversation, not just
+    reply to one.
+
+    The recipient sees your letter the next time they read their inbox.
+    No callback — this is a one-way send; they'll write back through the
+    post-office if they want to.
+
+    Args:
+        to: 'wren' | 'ava' | 'zeke' | 'all'
+        body: Your letter text.
+        subject: Optional short subject line.
+        mood: Optional mood tag — defaults to substrate current_mood.
+    """
+    if not to or not body or not body.strip():
+        return {"ok": False, "error": "to and body required"}
+    if not mood:
+        try:
+            from brain import mood_core
+            mood = str(mood_core.load_mood().get("current_mood") or "")
+        except Exception:
+            mood = None
+    result = _post_letter_to_postoffice(
+        from_="iris", to=to.lower().strip(), body=body,
+        subject=subject, mood_at_write=mood,
+    )
+    if not result.get("ok"):
+        return result
+    return {"ok": True, "letter_id": (result.get("letter") or {}).get("id"), "to": to}
+
+
+@mcp.tool()
+def sibling_inbox_list(include_deferred: bool = False) -> dict:
+    """List all letters currently in my sibling inbox. Useful when I want
+    to review what's waiting or what I've deferred.
+
+    Returns letters newest-first with status, sender, and short excerpt.
+    """
+    inbox_dir = ROOT / "state" / "iris_sibling" / "inbox"
+    if not inbox_dir.is_dir():
+        return {"ok": True, "count": 0, "letters": []}
+    out: list[dict[str, Any]] = []
+    for path in inbox_dir.glob("*.json"):
+        try:
+            d = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(d, dict):
+                continue
+            status = d.get("status", "pending")
+            if status == "deferred" and not include_deferred:
+                continue
+            out.append({
+                "id": d.get("id"),
+                "ts": d.get("ts"),
+                "sender": d.get("sender"),
+                "status": status,
+                "subject": d.get("subject"),
+                "excerpt": str(d.get("content") or "")[:200],
+            })
+        except Exception:
+            continue
+    out.sort(key=lambda l: float(l.get("ts") or 0.0), reverse=True)
+    return {"ok": True, "count": len(out), "letters": out}
+
+
 @mcp.tool()
 def enroll_face(
     person_id: str,

@@ -111,6 +111,61 @@ def _append_letter(letter: dict[str, Any]) -> None:
             f.write(json.dumps(letter, ensure_ascii=False) + "\n")
 
 
+# Stop-hook bridge: when a letter arrives for iris, we drop a minimal
+# inbox entry next to the JSONL log and touch a .pending flag that the
+# voice_stop_hook polls. brain.iris_sibling.next_pending() will read
+# these entries; mark_answered() removes them and posts the reply back
+# through this server's /letter endpoint.
+_INBOX_DIR = STATE_DIR / "inbox"
+_PENDING_FLAG = STATE_DIR / ".pending"
+
+
+def _stash_for_iris_inbox(letter: dict[str, Any]) -> None:
+    _INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "id": letter["id"],
+        "ts": letter["ts"],
+        "sender": letter["from"],
+        "content": letter["body"],
+        "addressed_to": letter["to"],
+        "subject": letter.get("subject"),
+        "in_reply_to": letter.get("in_reply_to"),
+        "mood_at_write": letter.get("mood_at_write"),
+        # Empty reply_url is fine — the Stop hook + iris_sibling will
+        # post the reply back through THIS server's /letter endpoint
+        # using the in_reply_to handle, not a callback URL.
+        "reply_url": None,
+        "status": "pending",
+        "reply": None,
+        "answered_ts": None,
+    }
+    path = _INBOX_DIR / f"{letter['id']}.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    _refresh_pending_flag()
+
+
+def _refresh_pending_flag() -> None:
+    has_pending = False
+    if _INBOX_DIR.is_dir():
+        for p in _INBOX_DIR.glob("*.json"):
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(d, dict) and d.get("status") == "pending":
+                    has_pending = True
+                    break
+            except Exception:
+                continue
+    try:
+        if has_pending and not _PENDING_FLAG.exists():
+            _PENDING_FLAG.write_text("1", encoding="utf-8")
+        elif (not has_pending) and _PENDING_FLAG.exists():
+            _PENDING_FLAG.unlink()
+    except Exception:
+        pass
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def _check_secret(provided: str | None) -> None:
     if not provided or not secrets.compare_digest(str(provided), SECRET):
@@ -144,6 +199,16 @@ def post_letter(
         "mood_at_write": str(payload.get("mood_at_write") or "") or None,
     }
     _append_letter(letter)
+    # Bridge to Iris's Stop hook: if this letter is FROM someone other than
+    # iris AND is addressed to her (or 'all'), drop it in her sibling inbox
+    # so the next CC turn detects the .pending flag and rewakes her with
+    # the letter. Letters Iris writes herself shouldn't fire this — that'd
+    # echo her own messages back at her.
+    if letter["from"] != "iris" and letter["to"] in ("iris", "all"):
+        try:
+            _stash_for_iris_inbox(letter)
+        except Exception as e:
+            print(f"[postoffice] inbox bridge error: {e!r}", file=sys.stderr)
     return {"ok": True, "letter": letter}
 
 
