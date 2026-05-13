@@ -579,6 +579,111 @@ async def channel_test(content: str = "iris-channel-smoke-test", priority: str =
     }
 
 
+# ── Body kill-switch ─────────────────────────────────────────────────────────
+# Hard pause for the body's autonomous behaviors (wake-and-capture loop,
+# autonomous channel emitters). Soft path: MCP tools below (I call them
+# when I notice the body misbehaving). Hard path: PowerShell drop the
+# flag file (works even if the MCP server itself is the thing misbehaving).
+#
+# Anything in the harness that runs autonomously and produces side effects
+# should consult `paths.body_pause_flag.exists()` before acting.
+
+@mcp.tool()
+def voice_body_pause(reason: str = "manual pause") -> dict:
+    """Hard-pause the body's autonomous behaviors (wake-capture loop,
+    autonomous emitters). Wake word detector keeps running for diagnostics,
+    but no audio is captured and no channel events fire from autonomous
+    sources. Manual tool calls (voice_speak, etc.) still work.
+
+    Use when you notice the body misbehaving: flooding the channel,
+    capturing audio that shouldn't be captured, mis-firing wake events.
+
+    Resume with voice_body_resume() or delete the flag file directly:
+        Remove-Item D:\\Wren-Companion\\.tmp\\body_pause.flag
+
+    Args:
+        reason: Free text written into the flag file for diagnostics.
+            Helps future-me figure out why the body was paused.
+
+    Returns:
+        {ok: bool, paused: bool, flag_path: str, reason: str}
+    """
+    try:
+        from brain.iris_paths import paths
+        flag = paths.body_pause_flag
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        body = f"reason: {reason}\npaused_at: {time.time()}\npaused_by: voice_body_pause MCP tool\n"
+        flag.write_text(body, encoding="utf-8")
+        return {
+            "ok": True,
+            "paused": True,
+            "flag_path": str(flag),
+            "reason": reason,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def voice_body_resume() -> dict:
+    """Resume the body's autonomous behaviors by removing the pause flag.
+    No-op if the body wasn't paused.
+
+    Returns:
+        {ok: bool, was_paused: bool, flag_path: str}
+    """
+    try:
+        from brain.iris_paths import paths
+        flag = paths.body_pause_flag
+        was_paused = flag.exists()
+        if was_paused:
+            flag.unlink()
+        return {
+            "ok": True,
+            "was_paused": was_paused,
+            "flag_path": str(flag),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def voice_body_status() -> dict:
+    """Report whether the body is currently paused, and if so, why.
+
+    Returns:
+        {ok: bool, paused: bool, reason: str | None, flag_path: str}
+    """
+    try:
+        from brain.iris_paths import paths
+        flag = paths.body_pause_flag
+        if not flag.exists():
+            return {"ok": True, "paused": False, "reason": None, "flag_path": str(flag)}
+        try:
+            body = flag.read_text(encoding="utf-8")
+        except Exception:
+            body = "(could not read flag body)"
+        return {
+            "ok": True,
+            "paused": True,
+            "reason": body.strip(),
+            "flag_path": str(flag),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _body_is_paused() -> bool:
+    """Cheap inline check for the autonomous loops. Returns True if the
+    pause flag exists. Does NOT raise — false on any error so the body
+    doesn't get stuck paused on a transient filesystem issue."""
+    try:
+        from brain.iris_paths import paths
+        return paths.body_pause_flag.exists()
+    except Exception:
+        return False
+
+
 # ── Sentence-streaming TTS queue ──────────────────────────────────────────────
 # voice_say_chunk(text) queues one chunk (typically a sentence) and returns
 # instantly — non-blocking. A dedicated worker thread pulls from the queue and

@@ -59,6 +59,16 @@ class _IrisPaths:
         skips re-speaking the same assistant message."""
         return self.tmp_dir / "last_spoken_uuid.txt"
 
+    @property
+    def body_pause_flag(self) -> Path:
+        """Hard kill-switch for the body's autonomous behaviors. When this
+        file exists, the body-side wake-and-capture loop (and any other
+        autonomous channel emitters) revert to passive mode — wake word
+        listener stays on for diagnostics but no audio is captured and no
+        channel events are emitted. Drop the file from PowerShell or via
+        the voice_body_pause MCP tool if the body is misbehaving."""
+        return self.tmp_dir / "body_pause.flag"
+
     # ── Chat ────────────────────────────────────────────────────────────────
     @property
     def chat_dir(self) -> Path:
