@@ -206,6 +206,21 @@ def _ensure_wake() -> WakeWordDetector:
 # ── MCP server ────────────────────────────────────────────────────────────────
 mcp = FastMCP("iris")
 
+# Channel capability — declares `experimental['claude/channel']` so this
+# MCP server can push events into the running CC session. See
+# brain/iris_channel.py for details and the underlying private-API caveat.
+# Must be applied BEFORE mcp.run() so the initialize response advertises it.
+try:
+    from brain import iris_channel as _iris_channel
+    _iris_channel.apply_channel_capability(mcp)
+    # Rate-limit defaults — keep noisy sources from drowning quiet ones.
+    # Voice/chat/sibling are user-driven (sparse by nature), no limit.
+    _iris_channel.configure_rate_limit("iris-camera", 30.0)   # face-state changes max 1/30s
+    _iris_channel.configure_rate_limit("iris-mood", 60.0)     # mood salience max 1/min
+    _iris_channel.configure_rate_limit("iris-time", 300.0)    # time-orient max 1/5min
+except Exception as _ce:
+    print(f"[iris_runtime] channel capability setup failed (non-fatal — Stop hook fallback still works): {_ce!r}", file=sys.stderr, flush=True)
+
 
 @mcp.tool()
 def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> dict:
@@ -455,11 +470,13 @@ def voice_next_input(timeout: float = 300.0) -> dict:
 
 
 @mcp.tool()
-def voice_status() -> dict:
+def voice_status(ctx: _IrisContext = None) -> dict:
     """Report which engines are loaded and what backends they're using.
 
     Useful for Iris (and the orb) to know whether the body is fully online.
     """
+    if ctx is not None:
+        _record_session_safe(ctx)
     try:
         from brain import iris_time
         iris_time.mark_session_attached()
@@ -484,6 +501,81 @@ def voice_status() -> dict:
             "last_wake_ts": float(_g.get("_wake_word_ts") or 0.0),
             "last_source": _g.get("_wake_source"),
         },
+    }
+
+
+# ── Channel surface ──────────────────────────────────────────────────────────
+# Channel events are pushed via brain/iris_channel.emit(). Most callers don't
+# have a Context; they need the session pre-recorded. The helper below grabs
+# the session from a tool's Context arg and stashes it for later emit() calls.
+# We attach this to a few high-frequency tools so the session is always
+# captured early.
+
+from mcp.server.fastmcp import Context as _IrisContext
+
+
+def _record_session_safe(ctx: _IrisContext) -> None:
+    """Best-effort: pull the live ServerSession from ctx and stash it via
+    iris_channel.record_session(). Called from a handful of tools so the
+    session is captured no matter what Iris calls first. Idempotent — safe
+    to call from every tool."""
+    try:
+        from brain import iris_channel
+        if not iris_channel.is_attached():
+            session = ctx.request_context.session
+            iris_channel.record_session(session)
+    except Exception as _se:
+        # Don't propagate — channel is best-effort, never break the tool call.
+        pass
+
+
+@mcp.tool()
+async def channel_test(content: str = "iris-channel-smoke-test", priority: str = "ambient", ctx: _IrisContext = None) -> dict:
+    """Smoke-test the attention channel: emit one event and report whether it
+    went out. Use to verify the channel path is alive before relying on it
+    for real events.
+
+    Behavior:
+      1. Records the current ServerSession (idempotent) so async emitters
+         elsewhere in the process can reach the write stream.
+      2. Emits one notification with source="iris" and the given content.
+      3. Returns {ok, sent, attached, note}. `sent=true` means the JSON-RPC
+         frame was written to the transport — NOT that Claude saw it
+         (channel events queue and arrive on the next turn-boundary; if
+         CC is in the middle of this turn, the event arrives next turn).
+
+    Args:
+        content: Body of the test event. Free text.
+        priority: One of "interrupt" / "attend" / "ambient". Affects how
+            future-me will respond when the event lands.
+
+    Returns:
+        {ok: bool, sent: bool, attached: bool, note: str}
+    """
+    if ctx is not None:
+        _record_session_safe(ctx)
+    from brain import iris_channel
+    attached = iris_channel.is_attached()
+    if not attached:
+        return {
+            "ok": False,
+            "sent": False,
+            "attached": False,
+            "note": "no ServerSession recorded yet — pass ctx via FastMCP Context or call any other tool first",
+        }
+    sent = await iris_channel.emit(
+        content,
+        source="iris",
+        type="smoke_test",
+        priority=priority,
+    )
+    return {
+        "ok": True,
+        "sent": sent,
+        "attached": True,
+        "note": ("event written to transport — will arrive at me on the next "
+                 "turn-boundary if CC is willing to receive" if sent else
+                 "emit returned False — either rate-limited or write failed; check stderr"),
     }
 
 
@@ -1527,11 +1619,14 @@ def time_check() -> dict:
 
 
 @mcp.tool()
-def iris_health() -> dict:
+def iris_health(ctx: _IrisContext = None) -> dict:
     """Self-debug snapshot — returns ready/missing for every wired subsystem,
     plus current perception, mood, and memory counts. Useful when something
     feels off and I want to introspect without a full restart."""
     # Mark this call as a session attachment so time_awareness knows I'm here.
+    # Also opportunistically capture the ServerSession for channel emit().
+    if ctx is not None:
+        _record_session_safe(ctx)
     try:
         from brain import iris_time
         iris_time.mark_session_attached()
