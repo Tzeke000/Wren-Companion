@@ -35,6 +35,20 @@ fails loud rather than silently dropping events.
 
 Once Anthropic adds first-class channel support to python-mcp, this whole
 module collapses to ~5 lines.
+
+Fallback contract with the Stop hook (scripts/voice_stop_hook.py):
+  - Channel emissions are ADDITIVE, not replacing. If the channel is off
+    (no --channels flag at CC startup, or `--dangerously-load-development-
+    channels server:iris` not passed), the Stop hook's existing
+    poll-after-turn-end pattern still surfaces pending letters/chat/llm
+    requests. Behavior in that case is unchanged from pre-channel.
+  - When channel IS on, a pending event may be emitted by BOTH the
+    channel source (immediately when it appears) AND the Stop hook
+    (when the current turn ends, if I haven't yet answered the event).
+    This is a bounded duplication — once I call sibling_reply / chat_reply
+    / llm_reply, the event is marked answered and neither path fires it
+    again. Worst case is one noisy turn where I get the same letter
+    surfaced twice.
 """
 from __future__ import annotations
 
