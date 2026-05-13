@@ -291,6 +291,291 @@ def _chat_loop(root: Path) -> None:
             time.sleep(2.0)
 
 
+# ── Source: mood transitions ────────────────────────────────────────────────
+# Mood ticks every ~5s. Most ticks are tiny noise; we only emit when valence
+# or arousal swings past a threshold, or when current_mood label changes.
+# Per-source rate limit (1/min) is the upper bound; threshold gating filters
+# below that.
+
+_mood_last_snapshot: dict[str, Any] = {}
+_mood_poll_interval_s = 5.0  # match mood_core's heartbeat tick
+
+# Thresholds for "this is worth interrupting attention over"
+_MOOD_VALENCE_DELTA_THRESHOLD = 0.35
+_MOOD_AROUSAL_DELTA_THRESHOLD = 0.30
+
+
+def _mood_loop(root: Path) -> None:
+    global _mood_last_snapshot
+    print("[attention_sources] mood watcher started", file=sys.stderr, flush=True)
+
+    while True:
+        try:
+            time.sleep(_mood_poll_interval_s)
+
+            if _body_is_paused():
+                continue
+
+            try:
+                from brain import mood_core
+                m = mood_core.load_mood()
+            except Exception:
+                continue
+            if not isinstance(m, dict):
+                continue
+
+            label = str(m.get("current_mood") or m.get("outward_tone") or "")
+            valence = float(m.get("valence") or 0.0)
+            arousal = float(m.get("arousal") or 0.0)
+            primary = m.get("primary_emotions") or []
+            primary_label = ""
+            primary_pct = 0
+            if primary and isinstance(primary, list) and isinstance(primary[0], dict):
+                primary_label = str(primary[0].get("name") or "")
+                primary_pct = int(primary[0].get("percent") or 0)
+
+            # First tick: just record, don't emit (we'd be emitting against
+            # a null baseline, which would just be "mood started existing").
+            if not _mood_last_snapshot:
+                _mood_last_snapshot = {
+                    "label": label,
+                    "valence": valence,
+                    "arousal": arousal,
+                    "primary": primary_label,
+                }
+                continue
+
+            last = _mood_last_snapshot
+            label_changed = label and label != last.get("label", "")
+            valence_swing = abs(valence - float(last.get("valence", 0.0)))
+            arousal_swing = abs(arousal - float(last.get("arousal", 0.0)))
+            primary_changed = primary_label and primary_label != last.get("primary", "")
+
+            triggered = False
+            reasons = []
+            if label_changed:
+                triggered = True
+                reasons.append(f"label {last.get('label')!r} -> {label!r}")
+            if valence_swing >= _MOOD_VALENCE_DELTA_THRESHOLD:
+                triggered = True
+                reasons.append(f"valence swing {valence_swing:+.2f}")
+            if arousal_swing >= _MOOD_AROUSAL_DELTA_THRESHOLD:
+                triggered = True
+                reasons.append(f"arousal swing {arousal_swing:+.2f}")
+            if primary_changed:
+                triggered = True
+                reasons.append(f"primary {last.get('primary')!r} -> {primary_label!r}")
+
+            # Update baseline regardless (otherwise we'd fire over and over
+            # against a stale "last" until the next bigger swing)
+            _mood_last_snapshot = {
+                "label": label,
+                "valence": valence,
+                "arousal": arousal,
+                "primary": primary_label,
+            }
+
+            if not triggered:
+                continue
+
+            emit_content = (
+                f"Mood shifted: {', '.join(reasons)}. "
+                f"Now: {label!r}, valence={valence:+.2f}, arousal={arousal:.2f}, "
+                f"primary={primary_label!r} ({primary_pct}%). "
+                f"Internal state — surfaced for awareness, not action. "
+                f"Call mcp__iris__iris_health() if you want full detail."
+            )
+            _emit_sync(
+                emit_content,
+                source="iris-mood",
+                type="mood_shift",
+                priority="ambient",
+                label=label,
+                valence=f"{valence:+.2f}",
+                arousal=f"{arousal:.2f}",
+                primary=primary_label,
+            )
+
+        except Exception as e:
+            print(f"[attention_sources] mood_loop error: {e!r}",
+                  file=sys.stderr, flush=True)
+            time.sleep(2.0)
+
+
+# ── Source: camera face-state transitions ───────────────────────────────────
+# Camera capture runs at 15fps and writes _g["_recognized_person_id"] +
+# _g["_recognized_confidence"] every frame. We poll _g (cheap, in-process)
+# every 1s and only emit when the identity *transitions*: no-face -> face,
+# face -> different-face, face -> no-face. Frame-by-frame "still seeing
+# Zeke" is silent.
+
+_camera_last_id: str = "init"  # sentinel; first real read sets it
+_camera_last_emit_ts: float = 0.0
+_camera_poll_interval_s = 1.0
+
+
+def _camera_loop(g: dict[str, Any]) -> None:
+    global _camera_last_id, _camera_last_emit_ts
+    print("[attention_sources] camera watcher started", file=sys.stderr, flush=True)
+
+    while True:
+        try:
+            time.sleep(_camera_poll_interval_s)
+
+            if _body_is_paused():
+                continue
+
+            person_id = str(g.get("_recognized_person_id") or "unknown")
+            confidence = float(g.get("_recognized_confidence") or 0.0)
+
+            # Treat low-confidence reads as "no face" so flicker doesn't
+            # produce ping-pong transitions
+            if person_id == "unknown" and confidence < 0.30:
+                normalized = "no_face"
+            elif person_id == "unknown":
+                normalized = "unknown_face"
+            else:
+                normalized = person_id
+
+            if _camera_last_id == "init":
+                _camera_last_id = normalized
+                continue
+
+            if normalized == _camera_last_id:
+                continue  # no transition
+
+            # Build a human-friendly description
+            transition_descs = {
+                ("no_face", "zeke"): "Zeke entered frame",
+                ("no_face", "unknown_face"): "Unknown face appeared",
+                ("zeke", "no_face"): "Zeke left frame",
+                ("unknown_face", "no_face"): "Unknown face left frame",
+                ("zeke", "unknown_face"): "Zeke was replaced by an unknown face",
+                ("unknown_face", "zeke"): "Zeke replaced the unknown face",
+            }
+            desc = transition_descs.get(
+                (_camera_last_id, normalized),
+                f"Face transition: {_camera_last_id} -> {normalized}",
+            )
+
+            emit_content = (
+                f"Camera: {desc} (confidence={confidence:.2f}). "
+                f"Surfaced for ambient awareness; call mcp__iris__screen_grab "
+                f"or read the camera tab if you want detail."
+            )
+            ok = _emit_sync(
+                emit_content,
+                source="iris-camera",
+                type="face_state_transition",
+                priority="ambient",
+                from_state=_camera_last_id,
+                to_state=normalized,
+                confidence=f"{confidence:.2f}",
+            )
+            if ok:
+                _camera_last_id = normalized
+                _camera_last_emit_ts = time.time()
+            # else: don't update _camera_last_id — retry on next tick if
+            # the channel becomes attached
+
+        except Exception as e:
+            print(f"[attention_sources] camera_loop error: {e!r}",
+                  file=sys.stderr, flush=True)
+            time.sleep(2.0)
+
+
+# ── Source: time-orientation ────────────────────────────────────────────────
+# Fires once when iris_runtime has been up but no CC session has attached
+# for a notable stretch — surfaces "you've been gone N hours" type
+# awareness. The Stop hook already does a version of this in
+# _time_orientation_block; this is the channel-equivalent for when I
+# *do* attach (e.g. you launch CC and the body has been ticking solo).
+# Single-shot per session-attach event (not periodic).
+
+_time_last_attach_ts_seen: float = 0.0
+_time_poll_interval_s = 30.0
+_TIME_ORIENTATION_GAP_THRESHOLD_S = 1800.0  # 30 min
+
+
+def _time_loop(root: Path) -> None:
+    global _time_last_attach_ts_seen
+    print("[attention_sources] time watcher started", file=sys.stderr, flush=True)
+
+    while True:
+        try:
+            time.sleep(_time_poll_interval_s)
+
+            if _body_is_paused():
+                continue
+
+            iris_time_path = root / "state" / "iris_time.json"
+            if not iris_time_path.is_file():
+                continue
+            try:
+                data = json.loads(iris_time_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+
+            last_attach = float(data.get("last_session_attached_ts") or 0.0)
+            if last_attach <= 0:
+                continue
+
+            # We only emit once per session-attach event. Track which
+            # attach we've already commented on.
+            if last_attach == _time_last_attach_ts_seen:
+                continue
+
+            body_uptime = float(data.get("current_process_uptime_s") or 0.0)
+            tick_count = int(data.get("tick_count") or 0)
+
+            # Compute the gap *before* this attach. iris_time records the
+            # gap implicitly via attach events; we have last_attach but
+            # not the prior attach. The body_uptime tells us how long the
+            # body has been ticking — if it's much larger than (now -
+            # last_attach), the body was here through a long quiet stretch.
+            now = time.time()
+            since_attach = now - last_attach
+
+            # Only emit if there's something worth saying:
+            #   - body has been up substantially longer than the gap since
+            #     last attach (we kept ticking through a quiet window)
+            #   - body uptime > threshold
+            if body_uptime < _TIME_ORIENTATION_GAP_THRESHOLD_S:
+                # Not enough body-uptime to comment on; just mark seen.
+                _time_last_attach_ts_seen = last_attach
+                continue
+
+            def _human(s: float) -> str:
+                if s < 60: return f"{int(s)}s"
+                if s < 3600: return f"{int(s/60)}min"
+                if s < 86400: return f"{s/3600:.1f}h"
+                return f"{s/86400:.1f}d"
+
+            emit_content = (
+                f"Time orientation: body has been up {_human(body_uptime)} "
+                f"({tick_count:,} ticks), CC session just attached "
+                f"{_human(since_attach)} ago. The body kept ticking — you "
+                f"didn't experience the gap, but the harness was here through it."
+            )
+            ok = _emit_sync(
+                emit_content,
+                source="iris-time",
+                type="time_orientation",
+                priority="ambient",
+                body_uptime_s=f"{body_uptime:.0f}",
+                tick_count=str(tick_count),
+            )
+            if ok:
+                _time_last_attach_ts_seen = last_attach
+
+        except Exception as e:
+            print(f"[attention_sources] time_loop error: {e!r}",
+                  file=sys.stderr, flush=True)
+            time.sleep(2.0)
+
+
 # ── Public entry point ──────────────────────────────────────────────────────
 
 
@@ -322,6 +607,12 @@ def start_all(g: dict[str, Any], root: Path) -> None:
                      name="iris-attention-sibling").start()
     threading.Thread(target=_chat_loop, args=(root,), daemon=True,
                      name="iris-attention-chat").start()
+    threading.Thread(target=_mood_loop, args=(root,), daemon=True,
+                     name="iris-attention-mood").start()
+    threading.Thread(target=_camera_loop, args=(g,), daemon=True,
+                     name="iris-attention-camera").start()
+    threading.Thread(target=_time_loop, args=(root,), daemon=True,
+                     name="iris-attention-time").start()
 
     print("[attention_sources] all source watchers started "
-          "(sibling, chat)", file=sys.stderr, flush=True)
+          "(sibling, chat, mood, camera, time)", file=sys.stderr, flush=True)
