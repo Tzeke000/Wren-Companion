@@ -161,6 +161,12 @@ _g: dict[str, Any] = {
 # Wake event: WakeWordDetector callback sets this; voice.next_input awaits it.
 _wake_event = threading.Event()
 
+# Mic-ownership flag: voice_next_input sets this while running so the
+# autonomous body_capture loop yields. Without this, both could try to
+# open the mic simultaneously and one would error. See brain/iris_body_capture.
+_voice_input_busy = threading.Event()
+
+
 def _on_wake() -> None:
     _wake_event.set()
 
@@ -273,6 +279,20 @@ def voice_next_input(timeout: float = 300.0) -> dict:
         iris_time.mark_session_attached()
     except Exception:
         pass
+
+    # Mic ownership — set the busy flag so the autonomous body_capture
+    # loop yields. Cleared via try/finally at the end so we don't leak
+    # the flag on exception paths.
+    _voice_input_busy.set()
+    try:
+        return _voice_next_input_inner(stt, timeout)
+    finally:
+        _voice_input_busy.clear()
+
+
+def _voice_next_input_inner(stt: Any, timeout: float) -> dict:
+    """Body of voice_next_input split out so the mic-busy flag can be
+    managed in a try/finally without indenting the original logic."""
 
     # Follow-up window: if voice flag is set AND I (Iris) just finished
     # speaking within the last few seconds, hold the mic open without
@@ -3116,6 +3136,30 @@ def _eager_init_engines() -> None:
             iris_attention_sources.start_all(_g, ROOT)
         except Exception as _ase:
             print(f"[iris_runtime] attention sources skipped (non-fatal — Stop hook fallback still works): {_ase!r}", file=sys.stderr, flush=True)
+
+        # Body-side autonomous wake-and-capture state machine. When voice
+        # mode is OFF (the common idle case), this loop listens for the
+        # wake word, captures the full utterance, and emits a transcript
+        # event to the channel — no CC turn-cycling required. Inside voice
+        # mode, this loop yields to voice_next_input's existing flow.
+        # Requires STT + wake engines to be up; if either isn't, the loop
+        # would just sit idle on _channel_attached/_wake_word_ts polls.
+        try:
+            from brain import iris_body_capture
+            if _stt is not None and _wake is not None:
+                iris_body_capture.start(
+                    g=_g,
+                    root=ROOT,
+                    stt=_stt,
+                    wake=_wake,
+                    wake_event=_wake_event,
+                    is_voice_input_busy=lambda: _voice_input_busy.is_set(),
+                    is_tts_speaking=lambda: bool(_g.get("_tts_speaking")) or _say_queue.qsize() > 0,
+                )
+            else:
+                print("[iris_runtime] body_capture not started (STT or wake not ready)", file=sys.stderr, flush=True)
+        except Exception as _bce:
+            print(f"[iris_runtime] body_capture skipped (non-fatal — voice_next_input still works): {_bce!r}", file=sys.stderr, flush=True)
     except Exception as e:
         print(f"[iris_runtime] eager engine init failed: {e!r}", file=sys.stderr, flush=True)
 
