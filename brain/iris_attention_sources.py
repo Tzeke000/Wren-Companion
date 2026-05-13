@@ -79,16 +79,46 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
     return _loop
 
 
+# The shared globals dict + repo root — populated by start_all(), used by
+# _emit_sync to build the ambient snapshot for every event. Module-level so
+# all source threads can read without passing them through each emit call.
+_g_ref: Optional[dict[str, Any]] = None
+_root_ref: Optional[Path] = None
+
+
+def _build_snapshot_for_meta() -> str:
+    """Cheap compact ambient snapshot for channel event meta. Never raises.
+    Returns empty string on any error or if the module isn't initialized."""
+    if _g_ref is None or _root_ref is None:
+        return ""
+    try:
+        from brain import iris_ambient_snapshot
+        return iris_ambient_snapshot.build_compact(_g_ref, _root_ref)
+    except Exception:
+        return ""
+
+
 def _emit_sync(content: str, source: str, **meta: Any) -> bool:
     """Schedule iris_channel.emit() on the shared loop and wait for the
     write to complete. Blocking from the caller's perspective, but the
-    underlying I/O is async. Returns whatever emit() returned."""
+    underlying I/O is async. Returns whatever emit() returned.
+
+    Automatically attaches a `snapshot` meta attribute with the current
+    ambient snapshot, so every channel event arrives with peripheral
+    context attached."""
     try:
         from brain import iris_channel
     except Exception as e:
         print(f"[attention_sources] iris_channel import failed: {e!r}",
               file=sys.stderr, flush=True)
         return False
+
+    # Inject the ambient snapshot unless the caller already provided one
+    if "snapshot" not in meta:
+        snap = _build_snapshot_for_meta()
+        if snap:
+            meta["snapshot"] = snap
+
     loop = _ensure_loop()
     coro = iris_channel.emit(content, source=source, **meta)
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -594,11 +624,15 @@ def start_all(g: dict[str, Any], root: Path) -> None:
         root: Repository root (D:\\Wren-Companion). Used to locate
             state/ subdirectories.
     """
-    global _started
+    global _started, _g_ref, _root_ref
     with _started_lock:
         if _started:
             return
         _started = True
+
+    # Stash refs so _build_snapshot_for_meta can read live state on every emit
+    _g_ref = g
+    _root_ref = root
 
     # Start the shared async loop first so emit() calls don't race init
     _ensure_loop()

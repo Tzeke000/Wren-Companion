@@ -579,6 +579,29 @@ async def channel_test(content: str = "iris-channel-smoke-test", priority: str =
     }
 
 
+# ── Ambient snapshot ─────────────────────────────────────────────────────────
+# "Corner of the eye" peripheral awareness: mood, who's in frame, recent
+# activity, recent letters, time, last inner thought. Compact, cheap, used
+# in two places: this MCP tool (manual call) and as a meta attribute on
+# every channel event (so I get context with every push automatically).
+@mcp.tool()
+def ambient_snapshot() -> dict:
+    """Peripheral state in 5-8 short lines. Faster + lighter than iris_health
+    — cheap disk reads, no engine probes. Returns the same multi-line block
+    that gets attached to channel events.
+
+    Use this when you want a quick orientation without spending the context
+    cost of iris_health. Examples: "what mood am I in," "is Zeke in frame,"
+    "how long have I been up," "any pending letters."
+    """
+    try:
+        from brain import iris_ambient_snapshot
+        text = iris_ambient_snapshot.build(_g, ROOT)
+        return {"ok": True, "snapshot": text, "lines": len(text.splitlines())}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── Body kill-switch ─────────────────────────────────────────────────────────
 # Hard pause for the body's autonomous behaviors (wake-and-capture loop,
 # autonomous channel emitters). Soft path: MCP tools below (I call them
