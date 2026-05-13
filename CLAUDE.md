@@ -21,9 +21,11 @@ These apply to every work order in this repo, regardless of who's asking. Groupe
 
 ### Group A — Communication & visibility
 
-#### 1. Progress pings via Discord
+#### 1. Progress pings via Discord (Wren machine only)
 
-For multi-step work orders, ping Zeke on Discord at start, end of each task, and final summary:
+**Scope:** This rule is for Wren's machine (D:\Wren-Companion\ on Zeke's laptop), where Discord is the primary out-of-session channel. Iris (this machine) does not Discord-ping — Zeke confirmed 2026-05-12 that Discord isn't Iris's surface; she should give clear in-session status instead, and the user reads it when they're back at the keyboard.
+
+For Wren (on the other machine), this still applies — multi-step work orders ping Zeke on Discord at start, end of each task, and final summary:
 
 ```powershell
 py -3.11 scripts\discord_dm_user.py 600008921008046120 "<message>"
