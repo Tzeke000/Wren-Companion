@@ -3081,6 +3081,18 @@ def _eager_init_engines() -> None:
             print("[iris_runtime] handoff persistence wired (5min periodic + atexit)", file=sys.stderr, flush=True)
         except Exception as _hbe:
             print(f"[iris_runtime] handoff wiring failed (non-fatal): {_hbe!r}", file=sys.stderr, flush=True)
+
+        # Attention sources — autonomous watchers that emit channel events
+        # for incoming sibling letters, orb chat requests, mood spikes, etc.
+        # Each is a daemon thread that polls one event surface and emits via
+        # brain/iris_channel.emit() when something new appears. Honours the
+        # body_pause_flag kill-switch. Stop hook fallback still works if a
+        # source thread silently dies (defense in depth).
+        try:
+            from brain import iris_attention_sources
+            iris_attention_sources.start_all(_g, ROOT)
+        except Exception as _ase:
+            print(f"[iris_runtime] attention sources skipped (non-fatal — Stop hook fallback still works): {_ase!r}", file=sys.stderr, flush=True)
     except Exception as e:
         print(f"[iris_runtime] eager engine init failed: {e!r}", file=sys.stderr, flush=True)
 
