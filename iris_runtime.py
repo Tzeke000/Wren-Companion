@@ -212,6 +212,11 @@ def _ensure_wake() -> WakeWordDetector:
 # ── MCP server ────────────────────────────────────────────────────────────────
 mcp = FastMCP("iris")
 
+# Imported up here (not next to _record_session_safe) because several @mcp.tool
+# decorators below use `_IrisContext` in their type annotations, and FastMCP
+# evaluates those annotations at decoration time.
+from mcp.server.fastmcp import Context as _IrisContext
+
 # Channel capability — declares `experimental['claude/channel']` so this
 # MCP server can push events into the running CC session. See
 # brain/iris_channel.py for details and the underlying private-API caveat.
@@ -530,9 +535,6 @@ def voice_status(ctx: _IrisContext = None) -> dict:
 # the session from a tool's Context arg and stashes it for later emit() calls.
 # We attach this to a few high-frequency tools so the session is always
 # captured early.
-
-from mcp.server.fastmcp import Context as _IrisContext
-
 
 def _record_session_safe(ctx: _IrisContext) -> None:
     """Best-effort: pull the live ServerSession from ctx and stash it via
