@@ -237,14 +237,16 @@ class VoiceLoop:
         that fire BEFORE listen_session in each loop body, so the user can
         still interrupt Ava mid-sentence.
 
-        200ms trailing window after last_speak_end_ts catches the audio
+        350ms trailing window after last_speak_end_ts catches the audio
         buffer's trailing edge — Kokoro's last samples can still be on the
-        OutputStream when _tts_speaking drops to False.
+        OutputStream when _tts_speaking drops to False, plus room reverb.
+        Was 200ms; bumped 2026-05-13 after research pass on self-trigger
+        loops — ESPHome / WebRTC implementations use 300-400ms typical.
         """
         if bool(self._g.get("_tts_speaking")):
             return True
         last_end = float(self._g.get("_last_speak_end_ts") or 0.0)
-        if last_end > 0 and (time.time() - last_end) < 0.2:
+        if last_end > 0 and (time.time() - last_end) < 0.35:
             return True
         return False
 

@@ -220,6 +220,14 @@ class TTSWorker:
         self._sd: Any = None
         self._np: Any = None
 
+        # XTTS-specific (persistent subprocess running in .venv_xtts)
+        self._xtts_proc: Any = None
+        self._xtts_stdout_lock = threading.Lock()
+        self._xtts_req_counter = 0
+        self._xtts_pending: dict[int, threading.Event] = {}
+        self._xtts_responses: dict[int, dict] = {}
+        self._xtts_reader_thread: Any = None
+
         # pyttsx3-specific
         self._pyttsx3: Any = None
         self._voice_name: str = "unknown"
@@ -227,8 +235,8 @@ class TTSWorker:
         self._init_done = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name="ava-tts-worker")
         self._thread.start()
-        # Kokoro can take ~5-8s to load; allow generous init window.
-        self._init_done.wait(timeout=20.0)
+        # Kokoro ~5-8s, XTTS ~15-20s incl warmup; allow generous init window.
+        self._init_done.wait(timeout=45.0)
 
     def attach_globals(self, g: dict[str, Any]) -> None:
         """Late-bind globals if the worker was constructed before startup
@@ -289,7 +297,9 @@ class TTSWorker:
             # can flip back via AVA_TTS_ENGINE=kokoro.
             engine_pref = (os.environ.get("AVA_TTS_ENGINE") or "piper").strip().lower()
             inited = False
-            if engine_pref == "kokoro":
+            if engine_pref == "xtts":
+                inited = self._try_init_xtts() or self._try_init_kokoro() or self._try_init_piper()
+            elif engine_pref == "kokoro":
                 inited = self._try_init_kokoro() or self._try_init_piper()
             elif engine_pref == "piper":
                 inited = self._try_init_piper() or self._try_init_kokoro()
@@ -329,7 +339,9 @@ class TTSWorker:
                             self._g["_conversation_active"] = True
                         except Exception:
                             pass
-                    if self._engine_type == "kokoro":
+                    if self._engine_type == "xtts":
+                        self._speak_xtts(text, emotion, intensity)
+                    elif self._engine_type == "kokoro":
                         self._speak_kokoro(text, emotion, intensity)
                     elif self._engine_type == "piper":
                         self._speak_piper(text, emotion, intensity)
@@ -357,6 +369,231 @@ class TTSWorker:
             self._set_speaking_state(False, 0.0)
 
     # ── engine init ────────────────────────────────────────────────────────────
+
+    def _try_init_xtts(self) -> bool:
+        """Initialize XTTS-v2 via a persistent subprocess in .venv_xtts.
+
+        XTTS deps (transformers 4.57, torch 2.6, coqui-tts) conflict hard
+        with the main venv's pinning (transformers 5.8, torch 2.11), so
+        we run it out-of-process. brain/xtts_server.py is a long-lived
+        JSON-over-stdio server. We spawn it once at init and reuse for
+        every synth call — model stays loaded, per-synth cost is just
+        the inference (1-3s for typical replies).
+        """
+        try:
+            import subprocess
+            import json as _json
+            import sounddevice as sd  # type: ignore
+            import numpy as np  # type: ignore
+            import soundfile as _sf  # type: ignore
+            from pathlib import Path as _P
+        except Exception as e:
+            self._init_error = f"xtts: missing deps in main venv: {e!r}"
+            print(f"[tts_worker] XTTS init failed: {e!r}")
+            return False
+
+        xtts_python = _P(r"D:\Wren-Companion\.venv_xtts\Scripts\python.exe")
+        xtts_server = _P(r"D:\Wren-Companion\brain\xtts_server.py")
+        if not xtts_python.is_file():
+            self._init_error = f"xtts: venv_xtts python not found at {xtts_python}"
+            print(f"[tts_worker] XTTS init failed: {self._init_error}")
+            return False
+        if not xtts_server.is_file():
+            self._init_error = f"xtts: server script not found at {xtts_server}"
+            print(f"[tts_worker] XTTS init failed: {self._init_error}")
+            return False
+
+        print(f"[tts_worker] spawning xtts_server (model load takes ~15s)...")
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUNBUFFERED"] = "1"
+        try:
+            proc = subprocess.Popen(
+                [str(xtts_python), str(xtts_server)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                bufsize=1,
+            )
+        except Exception as e:
+            self._init_error = f"xtts: spawn failed: {e!r}"
+            print(f"[tts_worker] XTTS spawn failed: {e!r}")
+            return False
+
+        self._xtts_proc = proc
+        self._xtts_json = _json
+        self._sd = sd
+        self._np = np
+        self._sf = _sf
+
+        # Start reader thread to consume stdout and dispatch to pending events.
+        def _reader():
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = _json.loads(line)
+                except _json.JSONDecodeError:
+                    print(f"[tts_worker] xtts non-json stdout: {line[:200]!r}")
+                    continue
+                rid = obj.get("id", -1)
+                with self._xtts_stdout_lock:
+                    self._xtts_responses[rid] = obj
+                    evt = self._xtts_pending.get(rid)
+                if evt is not None:
+                    evt.set()
+        # Also drain stderr to a log thread so it doesn't fill the pipe buffer.
+        def _stderr_drain():
+            for line in proc.stderr:
+                line = line.rstrip()
+                if line:
+                    print(f"[xtts_server.stderr] {line}")
+        self._xtts_reader_thread = threading.Thread(target=_reader, daemon=True, name="xtts-stdout-reader")
+        self._xtts_reader_thread.start()
+        threading.Thread(target=_stderr_drain, daemon=True, name="xtts-stderr-drain").start()
+
+        # Wait for ready signal (id=0).
+        ready_evt = threading.Event()
+        with self._xtts_stdout_lock:
+            self._xtts_pending[0] = ready_evt
+        if not ready_evt.wait(timeout=60.0):
+            self._init_error = "xtts: ready signal timeout (60s)"
+            print(f"[tts_worker] XTTS init: server did not signal ready within 60s")
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            return False
+        with self._xtts_stdout_lock:
+            resp = self._xtts_responses.pop(0, {})
+            self._xtts_pending.pop(0, None)
+        if not resp.get("ready"):
+            self._init_error = f"xtts: bad ready response {resp}"
+            print(f"[tts_worker] XTTS init: bad ready response {resp}")
+            return False
+
+        self._engine_type = "xtts"
+        self._available = True
+        self._voice_name = "xtts-clone-bella"
+        if self._g is not None:
+            try:
+                self._g["_xtts_ready"] = True
+            except Exception:
+                pass
+        print(f"[tts_worker] XTTS ready (voice=cloned-from-kokoro-bella, server pid={proc.pid})")
+        return True
+
+    def respawn_xtts(self) -> dict:
+        """Re-spawn the xtts_server subprocess in place.
+
+        Used when the child died (crash, manual kill, OOM) without restarting
+        iris_runtime. Clears stale proc/state, then re-runs _try_init_xtts.
+        Returns {ok, error?} so callers can surface the result.
+        """
+        # If a process handle exists and is alive, try to shut it down cleanly.
+        if self._xtts_proc is not None and self._xtts_proc.poll() is None:
+            try:
+                self._xtts_proc.stdin.write('{"id": -1, "cmd": "shutdown"}\n')
+                self._xtts_proc.stdin.flush()
+                self._xtts_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    self._xtts_proc.terminate()
+                except Exception:
+                    pass
+        # Reset state — pending events from the dead child can never fire,
+        # responses dict can have stale entries.
+        with self._xtts_stdout_lock:
+            for _evt in list(self._xtts_pending.values()):
+                try:
+                    _evt.set()  # unblock anyone waiting; they'll see no response
+                except Exception:
+                    pass
+            self._xtts_pending.clear()
+            self._xtts_responses.clear()
+        self._xtts_proc = None
+        ok = self._try_init_xtts()
+        if ok:
+            return {"ok": True, "pid": self._xtts_proc.pid}
+        return {"ok": False, "error": self._init_error or "unknown"}
+
+    def _xtts_synth(self, text: str, out_path: str, timeout: float = 60.0) -> bool:
+        """Send synth request to xtts_server, wait for ack. Returns True on success."""
+        if self._xtts_proc is None or self._xtts_proc.poll() is not None:
+            print("[tts_worker] xtts_proc is not running")
+            return False
+        with self._xtts_stdout_lock:
+            self._xtts_req_counter += 1
+            rid = self._xtts_req_counter
+            evt = threading.Event()
+            self._xtts_pending[rid] = evt
+        req = {"id": rid, "text": text, "out": out_path}
+        try:
+            self._xtts_proc.stdin.write(self._xtts_json.dumps(req) + "\n")
+            self._xtts_proc.stdin.flush()
+        except Exception as e:
+            print(f"[tts_worker] xtts stdin write failed: {e!r}")
+            with self._xtts_stdout_lock:
+                self._xtts_pending.pop(rid, None)
+            return False
+        if not evt.wait(timeout=timeout):
+            print(f"[tts_worker] xtts synth timeout rid={rid}")
+            with self._xtts_stdout_lock:
+                self._xtts_pending.pop(rid, None)
+            return False
+        with self._xtts_stdout_lock:
+            resp = self._xtts_responses.pop(rid, {})
+            self._xtts_pending.pop(rid, None)
+        if not resp.get("ok"):
+            print(f"[tts_worker] xtts synth error: {resp.get('error')}")
+            return False
+        return True
+
+    def _speak_xtts(self, text: str, emotion: str, intensity: float) -> None:
+        """Synthesize text via xtts_server, play the resulting WAV.
+
+        XTTS doesn't stream — it generates the full utterance then we play.
+        Latency is acceptable (1-3s for typical replies) given the quality
+        and the model staying resident.
+        """
+        _synth_t0 = time.time()
+        _trace(f"tts.synth_start chars={len(text)}")
+        # Write to a temp WAV file in state/, then play.
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="xtts_", suffix=".wav", delete=False, dir=os.environ.get("TEMP") or None
+        )
+        tmp.close()
+        out_path = tmp.name
+        try:
+            ok = self._xtts_synth(text, out_path, timeout=60.0)
+            if not ok:
+                print("[tts_worker] xtts synth failed — text not spoken")
+                return
+            _trace(f"tts.synth_done ms={int((time.time()-_synth_t0)*1000)}")
+            # Read back the audio and play through existing amplitude pipeline.
+            audio_np, sr = self._sf.read(out_path, dtype="float32")
+            if audio_np.ndim > 1:
+                audio_np = audio_np.mean(axis=1)
+            _speech_set(full=text, spoken="", current="")
+            words = text.split()
+            self._play_with_amplitude(audio_np, int(sr), words=words)
+            _speech_set(full=text, spoken=text, current="")
+            preview = text[:60].replace("\n", " ")
+            print(f"[tts_worker] xtts spoke chars={len(text)}: {preview!r}")
+        finally:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
 
     def _try_init_kokoro(self) -> bool:
         try:
@@ -983,7 +1220,9 @@ class TTSWorker:
             print("[tts_worker] stop() called without mute — ignoring (audio protected)")
             return
         try:
-            if self._engine_type == "kokoro" and self._sd is not None:
+            if self._engine_type == "xtts" and self._sd is not None:
+                self._sd.stop()
+            elif self._engine_type == "kokoro" and self._sd is not None:
                 self._sd.stop()
             elif self._engine_type == "pyttsx3" and self._pyttsx3 is not None:
                 self._pyttsx3.stop()
@@ -998,6 +1237,17 @@ class TTSWorker:
             self._queue.put(None)
         except Exception:
             pass
+        # Tear down xtts_server subprocess if running.
+        if self._xtts_proc is not None and self._xtts_proc.poll() is None:
+            try:
+                self._xtts_proc.stdin.write('{"id": -1, "cmd": "shutdown"}\n')
+                self._xtts_proc.stdin.flush()
+                self._xtts_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    self._xtts_proc.terminate()
+                except Exception:
+                    pass
 
     # ── status ─────────────────────────────────────────────────────────────────
 

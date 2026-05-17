@@ -87,22 +87,56 @@ def load(state_dir: Path) -> int:
 def _choose_bucket(transcript: str) -> Optional[str]:
     """Pick a bucket (or None) based on transcript shape. ~5ms heuristic.
 
-    Mirrors the research's tonight-shippable rules: long/thinky -> compute,
-    short question -> ack, medium -> hesitate-long sometimes, short other
-    -> ack sometimes, else nothing.
+    Buckets in priority order:
+      - lookup: explicit research/search-shaped requests ("look up X",
+        "search for Y", "what's the latest", "find me Z"). Per Zeke
+        2026-05-17 — when I'm about to do a tool call rather than reason.
+      - think: cognition-without-lookup ("explain", "why", "how does",
+        "what do you think about"). Per Zeke 2026-05-17 — when I'm about
+        to reason through rather than research.
+      - compute: legacy long-form / catch-all for queries that don't fit
+        lookup or think but still need a longer pause.
+      - ack: short questions and brief acknowledgments.
+      - hesitate-long: medium-length non-categorized queries, sometimes.
+
+    Per Anthropic-mobile-app research 2026-05-17: a real low-latency
+    pipeline (ElevenLabs Flash) skips fillers entirely. After XTTS
+    chunk-pipeline upgrade lands, this heuristic may become noise rather
+    than feature; revisit then.
     """
     if not transcript:
         return None
     t = transcript.strip().lower()
     words = t.split()
     n = len(words)
+
+    # Lookup signals — explicit research/search intent
+    lookup_terms = (
+        "look up", "search for", "search the web", "find me", "find out",
+        "google ", "what's the latest", "what is the latest",
+        "look that up", "look it up", "pull up", "show me a",
+        "what time is", "what's the weather", "news about",
+    )
+    if any(term in t for term in lookup_terms):
+        return "lookup"
+
+    # Think signals — cognition without lookup
+    think_terms = (
+        "explain ", "why does ", "why do ", "why is ",
+        "how does ", "how do ", "how come",
+        "what do you think", "what's your take", "your opinion",
+        "difference between", "what does it mean",
+        "thoughts on ", "thought about ", "feel about ",
+    )
+    if any(term in t for term in think_terms):
+        return "think"
+
     is_q = (
         "?" in t
         or any(t.startswith(w + " ") for w in ("what", "why", "how", "where", "when", "who", "is", "do", "can", "could", "would", "should", "are", "did"))
     )
-    thinky_terms = ("why ", "how ", "explain", "difference between", "what's the")
 
-    if n > 18 or any(k in t for k in thinky_terms):
+    if n > 18:
         return "compute"
     if is_q and n < 6:
         return "ack"

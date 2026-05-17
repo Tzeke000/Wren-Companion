@@ -323,7 +323,10 @@ class WakeWordDetector:
                     time.sleep(0.5)
                     continue
                 last_speak = float(self._g.get("_last_speak_end_ts") or 0.0)
-                if last_speak > 0 and (time.time() - last_speak) < 0.2:
+                # 350ms tail catches speaker decay + room reverb after Kokoro
+                # finishes the last sample. 200ms was tight on this hardware
+                # and let openWakeWord re-trigger on its own utterance tail.
+                if last_speak > 0 and (time.time() - last_speak) < 0.35:
                     time.sleep(0.2)
                     continue
                 import numpy as np
