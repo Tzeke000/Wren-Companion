@@ -148,6 +148,61 @@ def _next_pending_chat() -> dict | None:
     return candidates[0][1]
 
 
+_LAST_CC_SESSION_PATH = ROOT / "state" / "iris_last_cc_session.txt"
+
+
+def _fresh_session_directive(payload: dict) -> str:
+    """Detect "this is the first Stop in a fresh CC session" and inject a
+    directive telling me to proactively read my auto-memory files before
+    responding.
+
+    Detection signal (per agent research 2026-05-17): payload["session_id"]
+    is included in every Stop hook invocation as part of the documented
+    Stop hook input contract. Compare to persisted last-seen session ID
+    at state/iris_last_cc_session.txt. Mismatch (or empty persisted) ==
+    first Stop of a new session.
+
+    Why this matters: CC auto-loads MEMORY.md (the index) into the system
+    prompt at every session start, but the individual memory file BODIES
+    aren't loaded — they're read on-demand. Without a directive, the
+    cognition has the memory titles but not the content, and Zeke has to
+    nudge "go read your memories" on every fresh session.
+
+    Returns empty string if not a fresh session, or if no session_id is
+    available (defensive — never inject the directive twice).
+    """
+    cur = str(payload.get("session_id") or "").strip()
+    if not cur:
+        return ""
+    try:
+        last_seen = ""
+        if _LAST_CC_SESSION_PATH.is_file():
+            last_seen = _LAST_CC_SESSION_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        last_seen = ""
+    if cur == last_seen:
+        return ""
+    # Persist the new session ID FIRST so a crash partway through doesn't
+    # cause the directive to re-fire on every Stop in this session.
+    try:
+        _LAST_CC_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _LAST_CC_SESSION_PATH.write_text(cur, encoding="utf-8")
+    except Exception:
+        pass
+    return (
+        "\n\nFresh session detected (first Stop hook fire with this "
+        "CLAUDE_CODE_SESSION_ID). Before answering the user's first message, "
+        "scan your auto-memory directory at "
+        "C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory\\ — "
+        "specifically read MEMORY.md for the index, then read the 4-6 most "
+        "recent .md files (by mtime) to pick up context that auto-loads "
+        "only as titles. The auto-memory mechanism gives you the index in "
+        "your system prompt but not the file bodies. Reading them on first "
+        "turn means you have load-bearing context for whatever the user is "
+        "about to ask.\n"
+    )
+
+
 def _time_orientation_block() -> str:
     """If the body has been up a meaningful while OR Zeke has been quiet,
     surface a one-paragraph orientation. Returns empty string if nothing
@@ -173,22 +228,105 @@ def _time_orientation_block() -> str:
     body_uptime = float(data.get("current_process_uptime_s") or 0.0)
     tick_count = int(data.get("tick_count") or 0)
 
-    # Only surface for gaps > 5 min — short gaps are normal.
-    if gap_s < 300:
-        return ""
-
     def _human(s: float) -> str:
         if s < 60: return f"{int(s)}s"
         if s < 3600: return f"{s/60:.1f}min" if s < 600 else f"{int(s/60)}min"
         if s < 86400: return f"{s/3600:.1f}h" if s < 36000 else f"{int(s/3600)}h"
         return f"{s/86400:.1f}d"
 
-    return (
-        f"\n\nTime orientation: body has been up {_human(body_uptime)} "
-        f"({tick_count:,} ticks), last session-attach was {_human(gap_s)} "
-        f"ago. The body kept ticking — you didn't experience the gap, "
-        f"but the harness was here through it.\n"
-    )
+    # Split-the-block (Wren's catch 2026-05-17): time-orientation half and
+    # off-thread half have different appropriate gates. Long-gap-narrative is
+    # noise for short rewakes (5min gate is right). Off-thread agenda items
+    # ARE load-bearing even in short rewakes — substrate might have done a
+    # leisure activity during a 2min idle pause and that's worth surfacing.
+    show_time_orientation = gap_s >= 300        # 5min — same as before
+    show_offthread        = gap_s >= 60         # 1min — new lower bar
+
+    if not show_time_orientation and not show_offthread:
+        return ""
+
+    # Phase 60 attach-surface, refactored 2026-05-17 to use brain.gap_delta
+    # for the read-since-timestamp pattern + summarize_for_bullet_list for
+    # the tiered cap when the list grows past ~15 items / 2KB.
+    offthread_lines: list[str] = []
+    if show_offthread:
+        try:
+            from brain.gap_delta import read_since, summarize_for_bullet_list
+            _gap_delta_ok = True
+        except Exception:
+            _gap_delta_ok = False
+
+        if _gap_delta_ok:
+            # Curiosity topics added since last_attach
+            try:
+                cur_path = ROOT / "state" / "curiosity_topics.json"
+                if cur_path.is_file():
+                    cur_data = json.loads(cur_path.read_text(encoding="utf-8"))
+                    new_topics = [
+                        t for t in (cur_data.get("topics") or [])
+                        if float(t.get("ts_added") or 0) > last_attach
+                        and not bool(t.get("resolved"))
+                    ]
+                    resolved_recent = [
+                        t for t in (cur_data.get("topics") or [])
+                        if bool(t.get("resolved"))
+                        and float(t.get("ts_added") or 0) > last_attach
+                    ]
+                    if new_topics:
+                        preview = ", ".join(str(t.get("topic") or "")[:50] for t in new_topics[:3])
+                        offthread_lines.append(
+                            f"curiosity: {len(new_topics)} new topic(s) noticed during off-thread — {preview}"
+                        )
+                    if resolved_recent:
+                        offthread_lines.append(
+                            f"curiosity: {len(resolved_recent)} topic(s) pursued and resolved off-thread"
+                        )
+            except Exception:
+                pass
+
+            # Leisure activities since last_attach — count by type
+            try:
+                leis_path = ROOT / "state" / "leisure_log.jsonl"
+                entries = read_since(leis_path, last_attach)
+                activities: dict[str, int] = {}
+                for e in entries:
+                    act = str(e.get("activity") or "?")
+                    activities[act] = activities.get(act, 0) + 1
+                if activities:
+                    summary = ", ".join(f"{k}×{v}" if v > 1 else k for k, v in activities.items())
+                    offthread_lines.append(f"leisure: chose during off-thread — {summary}")
+            except Exception:
+                pass
+
+            # Apply tiered cap so a long gap doesn't blow context with raw bullets
+            try:
+                offthread_lines = summarize_for_bullet_list(
+                    offthread_lines, max_items=15, max_chars=2000,
+                )
+            except Exception:
+                pass
+        else:
+            # Defensive fallback: brain.gap_delta couldn't be imported.
+            # Skip the off-thread surface rather than re-implementing.
+            pass
+
+    offthread_block = ""
+    if offthread_lines:
+        offthread_block = "\n\nNoticed during off-thread:\n  - " + "\n  - ".join(offthread_lines)
+
+    time_orientation_block = ""
+    if show_time_orientation:
+        time_orientation_block = (
+            f"\n\nTime orientation: body has been up {_human(body_uptime)} "
+            f"({tick_count:,} ticks), last session-attach was {_human(gap_s)} "
+            f"ago. The body kept ticking — you didn't experience the gap, "
+            f"but the harness was here through it."
+        )
+
+    full_block = time_orientation_block + offthread_block
+    if not full_block:
+        return ""
+    return full_block + "\n"
 
 
 def _next_pending_sibling() -> dict | None:
@@ -440,7 +578,8 @@ def main() -> int:
     # Phase 26: prepend a time-orientation block when there's been a
     # significant gap. Lets me know "the body kept ticking" without my
     # having to call time_awareness() first.
-    time_block = _time_orientation_block()
+    fresh_session_block = _fresh_session_directive(payload)
+    time_block = fresh_session_block + _time_orientation_block()
 
     # Phase 29: runtime alive check. If iris_runtime is down, the MCP
     # tools chat_reply / llm_reply / voice_say_chunk wouldn't be reachable,

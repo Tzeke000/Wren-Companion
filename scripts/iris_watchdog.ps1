@@ -88,6 +88,24 @@ function Kill-ActiveCC {
 }
 
 function Spawn-NewCC {
+    # Prefer start_iris.bat — it sets AVA_TTS_ENGINE + dev-channel flags
+    # (server:iris on both --dangerously-load-development-channels and
+    # --channels). Bare `claude` skips the channel flags and breaks fam-chat
+    # + wake-word event delivery. start_iris.bat is the source of truth for
+    # how Iris is supposed to launch; the watchdog must respect it.
+    $batPath = Join-Path $ROOT "start_iris.bat"
+    if (Test-Path $batPath) {
+        try {
+            Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"$batPath`"" -WindowStyle Normal
+            Write-WatchLog ("launched new CC via start_iris.bat")
+            return $true
+        } catch {
+            Write-WatchLog ("start_iris.bat launch failed, falling through: " + $_)
+        }
+    } else {
+        Write-WatchLog ("WARN: start_iris.bat not found at $batPath, falling back to bare claude")
+    }
+    # Fallback: bare claude (loses channel flags + env var, but better than nothing)
     $cmd = Find-ClaudeCommand
     if (-not $cmd) {
         Write-WatchLog "FATAL: could not find claude executable"
@@ -96,7 +114,7 @@ function Spawn-NewCC {
     try {
         $args = "-NoExit -Command `"cd '$ROOT'; & '$cmd'`""
         Start-Process -FilePath "powershell.exe" -ArgumentList $args -WindowStyle Normal
-        Write-WatchLog ("launched new CC via " + $cmd)
+        Write-WatchLog ("launched new CC via fallback bare " + $cmd + " (channels + env var lost)")
         return $true
     } catch {
         Write-WatchLog ("FATAL: launch failed: " + $_)
