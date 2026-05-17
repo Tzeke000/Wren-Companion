@@ -73,6 +73,7 @@ _FLUSH_EVERY_TICKS = 10  # write to disk every 10s, not every 1s
 _THREAD_STARTED = False
 _PROCESS_STARTED_TS = time.time()
 _PROCESS_STARTED_ISO = datetime.now().isoformat(timespec="seconds")
+_LAST_TICK_TS: float = _PROCESS_STARTED_TS
 _LIVE_STATE: dict[str, Any] = {
     "tick_count": 0,
     "last_tick_ts": _PROCESS_STARTED_TS,
@@ -92,13 +93,22 @@ def configure(base_dir: Path | str) -> None:
 
 
 def _load_persisted() -> dict[str, Any]:
+    # Retry once on read failure: _save_persisted uses tmp.replace(p) which
+    # has a brief window where another reader can hit ENOENT or an empty
+    # file. Without the retry, _build_full_state can race the heartbeat and
+    # spuriously report is_new_process=True (since persisted={} loses the
+    # process_started_ts identity check). 2026-05-18.
     p = _state_path()
-    if not p.is_file():
-        return {}
-    try:
-        return json.loads(p.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
+    for _ in range(2):
+        try:
+            if p.is_file():
+                txt = p.read_text(encoding="utf-8")
+                if txt:
+                    return json.loads(txt) or {}
+        except Exception:
+            pass
+        time.sleep(0.01)
+    return {}
 
 
 def _save_persisted(state: dict[str, Any]) -> None:
@@ -141,7 +151,10 @@ def _build_full_state() -> dict[str, Any]:
         "current_process_uptime_s": current_uptime,
         "total_lifetime_uptime_s": previous_lifetime + current_uptime,
         "tick_interval_s": _TICK_INTERVAL_S,
-        "tick_loop_alive": _THREAD_STARTED,
+        # Liveness, not just startedness: thread can be started yet stuck
+        # in the except: time.sleep(2.0) swallow-loop. 5s window covers
+        # the 1Hz cadence with margin for a missed tick. 2026-05-18.
+        "tick_loop_alive": _THREAD_STARTED and (time.time() - _LAST_TICK_TS) < 5.0,
     }
 
 
@@ -166,10 +179,12 @@ def mark_session_attached() -> dict[str, Any]:
 def tick_now() -> dict[str, Any]:
     """Manual tick — also useful for tests. Normally the heartbeat thread
     drives this."""
+    global _LAST_TICK_TS
     now = time.time()
     with _LOCK:
         _LIVE_STATE["tick_count"] = int(_LIVE_STATE["tick_count"]) + 1
         _LIVE_STATE["last_tick_ts"] = now
+    _LAST_TICK_TS = now
     return {"tick_count": _LIVE_STATE["tick_count"], "ts": now}
 
 
@@ -352,13 +367,16 @@ def in_session_pause_signal(g: dict[str, Any]) -> dict[str, Any]:
 def _tick_loop() -> None:
     """1Hz heartbeat. Increments tick_count, updates last_tick_ts, flushes
     to disk every _FLUSH_EVERY_TICKS seconds."""
+    global _LAST_TICK_TS
     flush_counter = 0
     while True:
         try:
             time.sleep(_TICK_INTERVAL_S)
+            now_ts = time.time()
             with _LOCK:
                 _LIVE_STATE["tick_count"] = int(_LIVE_STATE["tick_count"]) + 1
-                _LIVE_STATE["last_tick_ts"] = time.time()
+                _LIVE_STATE["last_tick_ts"] = now_ts
+            _LAST_TICK_TS = now_ts
             flush_counter += 1
             if flush_counter >= _FLUSH_EVERY_TICKS:
                 flush_counter = 0

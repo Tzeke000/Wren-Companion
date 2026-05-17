@@ -113,10 +113,11 @@ def submit(user_text: str) -> str:
         "reply": None,
         "answered_ts": None,
     }
+    path = _request_path(request_id)
+    tmp = path.with_suffix(".json.tmp")
     with _LOCK:
-        _request_path(request_id).write_text(
-            json.dumps(entry, ensure_ascii=False), encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
         _refresh_flag()
     return request_id
 
@@ -190,16 +191,24 @@ def wait_for_reply(request_id: str, timeout_s: float = 60.0) -> Optional[str]:
     path = _request_path(request_id)
     while time.time() < deadline:
         if path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    status = data.get("status")
-                    if status == "answered":
-                        return str(data.get("reply") or "")
-                    if status == "expired":
-                        return None
-            except Exception:
-                pass
+            data = None
+            for _ in range(3):
+                try:
+                    with _LOCK:
+                        raw = path.read_text(encoding="utf-8")
+                    data = json.loads(raw)
+                    break
+                except json.JSONDecodeError:
+                    time.sleep(0.05)
+                    continue
+                except Exception:
+                    break
+            if isinstance(data, dict):
+                status = data.get("status")
+                if status == "answered":
+                    return str(data.get("reply") or "")
+                if status == "expired":
+                    return None
         time.sleep(0.2)
     return None
 

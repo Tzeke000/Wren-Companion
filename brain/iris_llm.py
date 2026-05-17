@@ -152,10 +152,11 @@ def submit(prompt: str, kind: str = "general",
         entry["has_image"] = True
     else:
         entry["has_image"] = False
+    path = _request_path(request_id)
+    tmp = path.with_suffix(".json.tmp")
     with _LOCK:
-        _request_path(request_id).write_text(
-            json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
         _refresh_flag()
     return request_id
 
@@ -222,12 +223,20 @@ def wait_for_reply(request_id: str, timeout_s: float = 120.0) -> Optional[str]:
     path = _request_path(request_id)
     while time.time() < deadline:
         if path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and data.get("status") == "answered":
-                    return str(data.get("reply") or "")
-            except Exception:
-                pass
+            data = None
+            for _ in range(3):
+                try:
+                    with _LOCK:
+                        raw = path.read_text(encoding="utf-8")
+                    data = json.loads(raw)
+                    break
+                except json.JSONDecodeError:
+                    time.sleep(0.05)
+                    continue
+                except Exception:
+                    break
+            if isinstance(data, dict) and data.get("status") == "answered":
+                return str(data.get("reply") or "")
         time.sleep(0.5)
     return None
 

@@ -41,6 +41,43 @@ except Exception:
     pass
 
 ROOT = Path(r"D:\Wren-Companion")
+_LOCK_PATH = ROOT / ".tmp" / "stop_hook.lock"
+
+
+def _acquire_singleton_lock():
+    """Filesystem-level singleton lock. Returns the file handle on success,
+    None if another hook is already running, or the sentinel string
+    "lock_unavailable" if the lock primitive itself failed (caller should
+    proceed without locking — no-worse-than-before).
+
+    OS releases the lock automatically on process exit, so no stale-lock
+    cleanup is needed. Verified: Windows refuses to delete a file with an
+    open handle, so the lockfile can't be removed while held.
+    """
+    try:
+        import msvcrt
+    except Exception:
+        return "lock_unavailable"
+    try:
+        _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(_LOCK_PATH, "a+b")
+    except Exception:
+        return "lock_unavailable"
+    try:
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        return fh
+    except OSError:
+        try:
+            fh.close()
+        except Exception:
+            pass
+        return None
+    except Exception:
+        try:
+            fh.close()
+        except Exception:
+            pass
+        return "lock_unavailable"
 
 # Paths sourced via brain/iris_paths to keep one source of truth across
 # iris_runtime, brain/orb_http, brain/iris_chat, brain/iris_llm, and this hook.
@@ -619,6 +656,24 @@ def _llm_rewake(req: dict) -> str:
 
 
 def main() -> int:
+    # Singleton across concurrent Stop fires — cron polls + voice + chat can
+    # land in the same window. Without this, two hooks both see the same
+    # pending request and both emit rewake → CC queues two turns for the same
+    # work. "lock_unavailable" falls through unlocked (no-worse-than-before).
+    _lock_fh = _acquire_singleton_lock()
+    if _lock_fh is None:
+        return 0
+    try:
+        return _main_locked()
+    finally:
+        if _lock_fh != "lock_unavailable":
+            try:
+                _lock_fh.close()
+            except Exception:
+                pass
+
+
+def _main_locked() -> int:
     # Cheap hygiene pass — mark sibling letters older than 6h as expired so
     # they don't accumulate forever as `pending` on disk. Bounded to 50
     # files per pass. Runs before the pending check so the sweep applies

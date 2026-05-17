@@ -74,13 +74,13 @@ def _process_dropped_file(params: dict[str, Any], g: dict[str, Any]) -> dict[str
 
     if ext in PDF_EXTS:
         try:
-            import subprocess, sys
-            result = subprocess.run(
-                [sys.executable, "-c",
-                 f"import pypdf; r=pypdf.PdfReader('{path_str}'); print('\\n'.join(p.extract_text() or '' for p in r.pages[:5]))"],
-                capture_output=True, text=True, timeout=15,
-            )
-            text = result.stdout[:3000] if result.returncode == 0 else "(PDF text extraction failed)"
+            try:
+                import pypdf  # type: ignore
+            except ImportError:
+                return {"ok": True, "type": "pdf", "path": path_str,
+                        "content": "(pypdf not available)", "size_bytes": size}
+            reader = pypdf.PdfReader(path_str)
+            text = "\n".join((p.extract_text() or "") for p in reader.pages[:5])[:3000]
             return {"ok": True, "type": "pdf", "path": path_str, "content": text, "size_bytes": size}
         except Exception:
             return {"ok": True, "type": "pdf", "path": path_str, "content": "(could not extract PDF text)", "size_bytes": size}

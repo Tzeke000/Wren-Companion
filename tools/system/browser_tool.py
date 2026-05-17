@@ -46,7 +46,7 @@ def _focus_browser_window() -> bool:
                         titles.append((hwnd, t))
             return True
 
-        EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+        EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_ssize_t)
         user32.EnumWindows(EnumProc(cb), 0)
         if titles:
             hwnd = titles[0][0]

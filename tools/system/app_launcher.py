@@ -394,7 +394,7 @@ def _tool_get_open_apps(params: dict[str, Any], g: dict[str, Any]) -> dict[str, 
                         titles.append(t)
             return True
 
-        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_ssize_t)
         user32.EnumWindows(EnumWindowsProc(enum_callback), 0)
         return {"ok": True, "windows": titles[:80]}
     except Exception as e:

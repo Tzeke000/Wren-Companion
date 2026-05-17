@@ -348,15 +348,20 @@ def main() -> int:
         back to sys.stdin.read(1).
         """
         try:
-            # Probe: msvcrt only works against a real console. If stdin was
-            # redirected (rare for this script — it's launched from a .bat
-            # inside Windows Terminal), kbhit() raises OSError and we use
-            # the legacy path.
-            try:
-                msvcrt.kbhit()
-                use_raw = True
-            except Exception:
+            # Gate raw-mode on whether the outer console-setup block actually
+            # found a real console (old_console_mode is None when
+            # GetConsoleMode failed → stdin is piped/redirected, not a tty).
+            # Belt-and-suspenders: also catch kbhit() raising OSError, since
+            # on some redirected-stdin configs msvcrt may still misbehave
+            # even when GetConsoleMode reported success.
+            if old_console_mode is None:
                 use_raw = False
+            else:
+                try:
+                    msvcrt.kbhit()
+                    use_raw = True
+                except Exception:
+                    use_raw = False
 
             while proc.isalive():
                 if use_raw:

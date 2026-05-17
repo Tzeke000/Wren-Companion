@@ -39,7 +39,7 @@ def _start_bot_process() -> bool:
     try:
         _proc = subprocess.Popen(
             ["node", str(_BOT_JS)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             cwd=str(_BOT_JS.parent), text=True, bufsize=1,
         )
         _reader_thread = threading.Thread(target=_reader_loop, daemon=True)

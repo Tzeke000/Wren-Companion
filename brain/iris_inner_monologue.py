@@ -47,6 +47,16 @@ _LOCK = threading.Lock()
 _DEFAULT_TICK_INTERVAL_S = 900.0  # 15 min nominal cadence
 _DEFAULT_MIN_INTERVAL_S = 600.0   # 10 min min between thoughts even on rich signal
 _DEFAULT_MAX_QUIET_S = 3600.0     # never go silent for >1h while system is awake
+# Hard floor independent of iris_tune so a mis-set knob (or a bug elsewhere
+# writing a 1s value) can't burn the 5-hr CC window. 5 min covers any plausible
+# legitimate cadence and is well below the 10-min default.
+_HARD_MIN_INTERVAL_S = 300.0
+# Cap reflect blocking time. 180s wedges the thread for 3 min/cycle if Iris is
+# mid-restart or otherwise not draining the Stop hook.
+_REFLECT_TIMEOUT_S = 60.0
+# Min cooldown after a failed reflect (timeout / exception). Prevents the
+# retry storm when last_thought_ts can't advance because reflect returned None.
+_FAILED_REFLECT_COOLDOWN_S = 900.0
 _TICK_THREAD_STARTED = False
 
 
@@ -97,7 +107,7 @@ def _load_state() -> dict[str, Any]:
             return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {"last_thought_ts": 0.0, "thought_count": 0}
+    return {"last_thought_ts": 0.0, "thought_count": 0, "last_attempt_ts": 0.0}
 
 
 def _save_state(state: dict[str, Any]) -> None:
@@ -105,6 +115,15 @@ def _save_state(state: dict[str, Any]) -> None:
         p = _state_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _record_failed_attempt() -> None:
+    try:
+        state = _load_state()
+        state["last_attempt_ts"] = time.time()
+        _save_state(state)
     except Exception:
         pass
 
@@ -169,15 +188,25 @@ def _has_signal_to_think_about(g: dict[str, Any]) -> tuple[bool, str]:
     (should_tick, trigger_label)."""
     state = _load_state()
     last_ts = float(state.get("last_thought_ts") or 0.0)
+    last_attempt = float(state.get("last_attempt_ts") or 0.0)
     now = time.time()
     elapsed = now - last_ts
+    since_attempt = now - last_attempt
 
-    # Hard floor — don't tick more often than the min interval.
-    if elapsed < _min_interval_s():
+    # Backoff after a failed reflect: prevents retry storm when reflect keeps
+    # returning None (CC mid-restart, Stop hook not draining). last_thought_ts
+    # can't advance in that path, so elapsed-vs-min wouldn't gate the retry.
+    if last_attempt > last_ts and since_attempt < _FAILED_REFLECT_COOLDOWN_S:
+        return (False, "post_failure_cooldown")
+
+    # Hard floor — don't tick more often than the min interval. max() against
+    # _HARD_MIN_INTERVAL_S so a mis-tuned knob can't drop below the floor.
+    if elapsed < max(_min_interval_s(), _HARD_MIN_INTERVAL_S):
         return (False, "too_recent")
 
-    # Soft floor — if we've been totally silent too long, force a tick.
-    if elapsed > _max_quiet_s():
+    # Soft floor — if we've been totally silent too long, force a tick. Also
+    # clamped against the hard floor so a tiny max_quiet knob can't bypass it.
+    if elapsed > max(_max_quiet_s(), _HARD_MIN_INTERVAL_S):
         return (True, "quiet_too_long")
 
     # First thought after a long gap (resumption signal) — pre-empts other
@@ -359,13 +388,16 @@ def tick_once(g: dict[str, Any], force: bool = False) -> Optional[str]:
 
     try:
         from brain import iris_llm
-        thought = iris_llm.reflect(prompt, context=context, timeout_s=180.0)
+        thought = iris_llm.reflect(prompt, context=context, timeout_s=_REFLECT_TIMEOUT_S)
     except Exception as e:
         print(f"[inner_monologue] reflect error: {e}")
+        _record_failed_attempt()
         return None
 
     if not thought:
-        # Timeout — Iris was busy. Skip.
+        # Timeout — Iris was busy. Record so the next cron doesn't immediately
+        # re-fire (would burn tokens during a CC mid-restart window).
+        _record_failed_attempt()
         return None
 
     thought = thought.strip()

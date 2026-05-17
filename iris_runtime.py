@@ -1769,14 +1769,87 @@ def sibling_inbox_list(
 # If the watchdog isn't running, calling this tool drops the flag but
 # nothing happens — CC keeps running, Iris notices nothing changed.
 
+_PRE_RESTART_MEMORY_WINDOW_S = 600  # 10 min — pre-restart save must land inside this window
+_AUTO_MEMORY_DIR = Path(
+    r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory"
+)
+
+
+def _check_recent_memory_save(window_seconds: int = _PRE_RESTART_MEMORY_WINDOW_S) -> dict:
+    """Check that a memory file was modified within the recent window.
+
+    Enforces the Zeke 2026-05-17 directive: never restart without saving to
+    memory first. See pre_restart_save_and_boot_sequence.md.
+
+    Returns: {ok, age_seconds, file, message}
+    """
+    if not _AUTO_MEMORY_DIR.is_dir():
+        return {
+            "ok": False,
+            "age_seconds": None,
+            "file": None,
+            "message": f"memory dir not found at {_AUTO_MEMORY_DIR}",
+        }
+    now = time.time()
+    most_recent_ts = 0.0
+    most_recent_name = ""
+    for f in _AUTO_MEMORY_DIR.glob("*.md"):
+        try:
+            mt = f.stat().st_mtime
+        except Exception:
+            continue
+        if mt > most_recent_ts:
+            most_recent_ts = mt
+            most_recent_name = f.name
+    if most_recent_ts == 0.0:
+        return {
+            "ok": False,
+            "age_seconds": None,
+            "file": None,
+            "message": f"no .md files found under {_AUTO_MEMORY_DIR}",
+        }
+    age = now - most_recent_ts
+    if age > window_seconds:
+        return {
+            "ok": False,
+            "age_seconds": age,
+            "file": most_recent_name,
+            "message": (
+                f"pre-restart contract violation: most recent memory file "
+                f"({most_recent_name}) is {age/60:.1f}min old; required "
+                f"within {window_seconds//60}min. Save handoff to memory "
+                f"first, then retry — or pass force=True to override "
+                f"(emergency only)."
+            ),
+        }
+    return {
+        "ok": True,
+        "age_seconds": age,
+        "file": most_recent_name,
+        "message": (
+            f"pre-restart save verified ({most_recent_name}, {age:.0f}s old)"
+        ),
+    }
+
+
 @mcp.tool()
-def restart_self(reason: str = "", skip_handoff: bool = False) -> dict:
+def restart_self(
+    reason: str = "",
+    skip_handoff: bool = False,
+    force: bool = False,
+) -> dict:
     """Request a Claude Code restart of this session.
 
     Writes a handoff snapshot (via brain.handoff.write_handoff — no LLM,
     cheap), then drops a trigger flag at .tmp/restart_cc.flag. An external
     watchdog (scripts/iris_watchdog.ps1) polls for the flag and respawns
     a fresh CC session.
+
+    Pre-restart contract (Zeke 2026-05-17): refuses to restart unless a
+    memory file was modified in the last 10 minutes. Pass force=True only
+    in emergencies (e.g. the restart is unblocking a hung process and
+    waiting to save memory would do more harm). See
+    pre_restart_save_and_boot_sequence.md.
 
     Use this when:
       - Code changes you've made need a CC restart to load (new MCP tools
@@ -1797,11 +1870,30 @@ def restart_self(reason: str = "", skip_handoff: bool = False) -> dict:
         skip_handoff: If True, don't write the handoff snapshot first.
             Default False. Skip only if you've already written one this
             turn.
+        force: Bypass the pre-restart memory-save check. Default False.
+            Use ONLY for emergencies — the memory-save contract is there
+            so post-restart-me has a record of why this happened.
 
     Returns:
-        {ok, flag_written, handoff_written, watchdog_running, reason}
+        {ok, flag_written, handoff_written, watchdog_running, reason,
+         memory_check}
     """
     try:
+        mem_check = _check_recent_memory_save()
+        if not mem_check["ok"] and not force:
+            return {
+                "ok": False,
+                "error": "pre_restart_save_required",
+                "memory_check": mem_check,
+                "message": mem_check["message"],
+                "hint": (
+                    "Save a handoff memory file to "
+                    f"{_AUTO_MEMORY_DIR} (e.g. handoff_YYYY-MM-DD_<context>.md), "
+                    "update MEMORY.md, then retry restart_self. "
+                    "Or pass force=True to override (emergencies only)."
+                ),
+            }
+
         flag_dir = ROOT / ".tmp"
         flag_dir.mkdir(parents=True, exist_ok=True)
         flag_path = flag_dir / "restart_cc.flag"
