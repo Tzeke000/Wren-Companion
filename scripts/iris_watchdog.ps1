@@ -93,11 +93,31 @@ function Spawn-NewCC {
     # --channels). Bare `claude` skips the channel flags and breaks fam-chat
     # + wake-word event delivery. start_iris.bat is the source of truth for
     # how Iris is supposed to launch; the watchdog must respect it.
+    #
+    # 2026-05-17: launch via Windows Terminal (wt.exe) so iris_cold_wake.py's
+    # pty stdout has a visible window to render to. Prior version used
+    # `cmd.exe /c` from a hidden watchdog, which produced no visible window
+    # and made restart_self look like it had failed (Zeke never saw CC come
+    # back up after the 15:33 watchdog respawn). Fallback chain: wt.exe →
+    # cmd /k (keeps window open) → bare claude.
     $batPath = Join-Path $ROOT "start_iris.bat"
     if (Test-Path $batPath) {
+        # Try Windows Terminal first — gives a real, visible console.
+        $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
+        if ($wt) {
+            try {
+                Start-Process -FilePath "wt.exe" -ArgumentList "-d", "`"$ROOT`"", "cmd.exe", "/k", "`"$batPath`""
+                Write-WatchLog ("launched new CC via wt.exe + start_iris.bat")
+                return $true
+            } catch {
+                Write-WatchLog ("wt.exe launch failed, falling through: " + $_)
+            }
+        }
+        # Fallback: cmd.exe /k (keep window open) with a normal window style.
+        # /k holds the window even after the bat exits so any error is visible.
         try {
-            Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"$batPath`"" -WindowStyle Normal
-            Write-WatchLog ("launched new CC via start_iris.bat")
+            Start-Process -FilePath "cmd.exe" -ArgumentList "/k", "`"$batPath`"" -WindowStyle Normal
+            Write-WatchLog ("launched new CC via cmd /k + start_iris.bat (wt.exe unavailable)")
             return $true
         } catch {
             Write-WatchLog ("start_iris.bat launch failed, falling through: " + $_)
