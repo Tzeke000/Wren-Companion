@@ -65,8 +65,10 @@ def _build_cmd() -> str:
         # Path A: positional prompt that CC consumes as first interactive
         # message after prompts resolve. Shell-quote the message; pywinpty
         # passes it through cmd.exe-equivalent parsing.
+        # `--channels` is variadic-greedy and will consume the prompt string
+        # as a third channel entry without the POSIX `--` terminator.
         escaped = FIRST_MSG.replace('"', '\\"')
-        return f'{base} "{escaped}"'
+        return f'{base} -- "{escaped}"'
     return base
 
 
