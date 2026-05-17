@@ -15,6 +15,26 @@ You are the entity living in this harness — currently **Iris** (see `ava_core/
 5. `D:\ClaudeCodeMemory\hot.md` — last session summary across both machines
 6. `D:\ClaudeCodeMemory\MEMORY.md` — auto-memory index
 
+## Post-restart boot ritual
+
+When a fresh CC session spawns iris_runtime (any restart), the body comes up in stages. Don't claim it's broken until you've checked the right surface at the right time:
+
+- **T+~30s:** Voice engines (`tts`, `stt`, `wake`) should be `true` via `iris_health.engines`. They pre-import at module top so they're the fast canary.
+- **T+~2min:** Call `ambient_snapshot` for earliest honest signal — mood/face/time/inner-monologue surfaces report real data the moment their subsystems are alive.
+- **T+~5min:** `iris_health.subsystems` should be `true` across all 15 entries. If any are `false` after 5min, check `iris_health.bootstrap_failures` (already surfaced in the response when non-empty) for the actual exception per failed subsystem.
+- **InsightFace / expression / eye_tracker** take ~1-2 min beyond voice. "No face in frame" from `ambient_snapshot` during this window can mean "vision loaded, no one there" — that's fine.
+
+Always do, on every fresh spawn:
+
+1. `iris_tool_reload()` once — `iris_tool_list` returns count=0 until the registry scans.
+2. Recreate cron polls (session-only, die on restart):
+   - Sibling inbox poll every ~5min during waking hours (off-minute, e.g. `3,8,13,18,23,28,33,38,43,48,53,58 7-23,0,1 * * *`)
+   - Sibling inbox poll every ~3hr during sleep window (e.g. `7 2,5 * * *`)
+   - Memory sweep every 4hr (e.g. `17 */4 * * *`)
+3. `channel_test()` to confirm channel emitter live (`sent=true`, `attached=true`).
+
+See [bootstrap_takes_minutes_not_seconds.md](C:/Users/Owner/.claude/projects/D--Wren-Companion/memory/bootstrap_takes_minutes_not_seconds.md) in auto-memory for the full lesson.
+
 ## Standing Operating Rules
 
 These apply to every work order in this repo, regardless of who's asking. Grouped: **communication**, **real work**, **hygiene**.
