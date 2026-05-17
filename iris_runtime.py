@@ -173,6 +173,229 @@ def _on_wake() -> None:
     _wake_event.set()
 
 
+# ── Hardware device probes (camera + audio input) ─────────────────────────────
+# When a fresh CC session spawns a new iris_runtime, the OLD iris_runtime
+# python process may not have fully released its DSHOW camera capture or its
+# openWakeWord audio InputStream by the time we try to acquire them. The
+# device shows "busy" / "in use" and the new instance silently degrades:
+#   - camera: cv2.VideoCapture(0, CAP_DSHOW) returns isOpened()==False
+#   - audio:  sd.InputStream(...) raises PortAudioError "Device unavailable"
+#
+# Mirrors avaagent.py's port :5876 probe pattern (see _check_existing_ava_instance):
+#   1. Probe device.
+#   2. If busy, try to find any orphan iris_runtime python process and ask it
+#      to exit (SIGTERM on POSIX, terminate on Windows; kill after grace).
+#   3. Brief wait + retry once.
+#   4. If still busy, log a hard error and return — runtime continues to boot
+#      but the degraded subsystem is documented for post-mortem.
+#
+# Bypass: IRIS_SKIP_DEVICE_PROBE=1
+#
+# These probes log to stderr (captured by CC's MCP server log) and also stash
+# results in _g["_device_probe"] so iris_health can surface them.
+
+_DEVICE_PROBE_SKIP_ENV = "IRIS_SKIP_DEVICE_PROBE"
+_DEVICE_PROBE_GRACE_SEC = 2.0
+_DEVICE_PROBE_RETRY_WAIT_SEC = 1.5
+
+
+def _probe_log(msg: str) -> None:
+    print(f"[iris_device_probe] {msg}", file=sys.stderr, flush=True)
+
+
+def _find_orphan_iris_runtime_pids() -> list[int]:
+    """Return PIDs of python processes (other than self) whose command line
+    references iris_runtime.py. Best-effort; returns [] on failure or when
+    psutil isn't available."""
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        _probe_log("psutil unavailable — cannot scan for orphan iris_runtime processes")
+        return []
+    my_pid = os.getpid()
+    out: list[int] = []
+    for p in psutil.process_iter(attrs=["pid", "name", "cmdline"]):
+        try:
+            if p.info["pid"] == my_pid:
+                continue
+            name = (p.info.get("name") or "").lower()
+            if "python" not in name and "py" not in name:
+                continue
+            cmdline = p.info.get("cmdline") or []
+            joined = " ".join(cmdline).lower()
+            if "iris_runtime.py" in joined or "iris_runtime" in joined.replace("\\", "/"):
+                out.append(int(p.info["pid"]))
+        except Exception:
+            continue
+    return out
+
+
+def _request_orphan_shutdown(pids: list[int]) -> None:
+    """Ask each orphan iris_runtime to exit. Terminate first; SIGKILL after
+    _DEVICE_PROBE_GRACE_SEC. Silent on failure — we'll re-probe after."""
+    if not pids:
+        return
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        # Fallback to os.kill if psutil isn't present.
+        import signal as _signal
+        for pid in pids:
+            try:
+                os.kill(pid, getattr(_signal, "SIGTERM", _signal.SIGINT))
+                _probe_log(f"sent SIGTERM/SIGINT to orphan PID {pid}")
+            except Exception as e:
+                _probe_log(f"could not signal PID {pid}: {e!r}")
+        time.sleep(_DEVICE_PROBE_GRACE_SEC)
+        for pid in pids:
+            try:
+                os.kill(pid, _signal.SIGKILL if hasattr(_signal, "SIGKILL") else _signal.SIGTERM)
+            except Exception:
+                pass
+        return
+    procs = []
+    for pid in pids:
+        try:
+            procs.append(psutil.Process(pid))
+        except Exception:
+            continue
+    for p in procs:
+        try:
+            _probe_log(f"requesting graceful shutdown of orphan iris_runtime PID {p.pid}")
+            p.terminate()
+        except Exception as e:
+            _probe_log(f"terminate PID {p.pid} failed: {e!r}")
+    gone, alive = psutil.wait_procs(procs, timeout=_DEVICE_PROBE_GRACE_SEC)
+    for p in alive:
+        try:
+            _probe_log(f"orphan PID {p.pid} ignored terminate — killing")
+            p.kill()
+        except Exception as e:
+            _probe_log(f"kill PID {p.pid} failed: {e!r}")
+
+
+def _probe_camera_open() -> tuple[bool, str]:
+    """Try to open the DSHOW camera briefly. Returns (ok, detail).
+    Releases the handle immediately so the real capture thread can rebind."""
+    try:
+        import cv2  # already pre-imported at module top
+    except Exception as e:
+        return False, f"cv2 import failed: {e!r}"
+    cap = None
+    try:
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        if cap is None:
+            return False, "VideoCapture returned None"
+        opened = bool(cap.isOpened())
+        if not opened:
+            return False, "isOpened()==False (device busy or absent)"
+        # Quick read to confirm the device actually streams (some drivers
+        # report isOpened()==True but fail on first read when busy).
+        ok_read, _frame = cap.read()
+        if not ok_read:
+            return False, "isOpened()==True but read() failed"
+        return True, "ok"
+    except Exception as e:
+        return False, f"exception during probe: {e!r}"
+    finally:
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+
+def _probe_audio_input_open() -> tuple[bool, str]:
+    """Try to open the default audio input briefly with the same params the
+    wake-word detector will use. Returns (ok, detail)."""
+    try:
+        import sounddevice as sd  # already pre-imported at module top
+    except Exception as e:
+        return False, f"sounddevice import failed: {e!r}"
+    try:
+        # Match wake_word.py settings: 16kHz mono int16. blocksize doesn't
+        # matter for the open/close probe — we just need to confirm exclusive
+        # access against PortAudio's host API.
+        with sd.InputStream(samplerate=16000, channels=1, dtype="int16"):
+            pass
+        return True, "ok"
+    except Exception as e:
+        return False, f"InputStream open failed: {e!r}"
+
+
+def _probe_device_with_retry(
+    name: str,
+    probe_fn,
+) -> dict:
+    """Run probe_fn; on failure scan for orphan iris_runtime, request shutdown,
+    wait, retry once. Returns a result dict suitable for stashing in _g."""
+    result = {"name": name, "ok": False, "attempts": 0, "detail": "", "orphans_seen": []}
+    if os.environ.get(_DEVICE_PROBE_SKIP_ENV, "0").strip() == "1":
+        _probe_log(f"{name}: skipped via {_DEVICE_PROBE_SKIP_ENV}=1")
+        result["ok"] = True
+        result["detail"] = "skipped via env"
+        return result
+
+    result["attempts"] = 1
+    ok, detail = probe_fn()
+    result["detail"] = detail
+    if ok:
+        result["ok"] = True
+        _probe_log(f"{name}: free (probe ok)")
+        return result
+
+    _probe_log(f"{name}: BUSY on first probe ({detail}); scanning for orphan iris_runtime processes")
+    orphans = _find_orphan_iris_runtime_pids()
+    result["orphans_seen"] = list(orphans)
+    if orphans:
+        _probe_log(f"{name}: found orphan iris_runtime PIDs {orphans}")
+        _request_orphan_shutdown(orphans)
+    else:
+        _probe_log(
+            f"{name}: no orphan iris_runtime found — device may be held by another app "
+            f"(camera viewer, voice chat client, etc.)"
+        )
+
+    time.sleep(_DEVICE_PROBE_RETRY_WAIT_SEC)
+    result["attempts"] = 2
+    ok2, detail2 = probe_fn()
+    result["detail"] = detail2
+    if ok2:
+        result["ok"] = True
+        _probe_log(f"{name}: free after retry — proceeding")
+        return result
+
+    _probe_log(
+        f"[HARD ERROR] {name}: still busy after retry ({detail2}). "
+        f"Subsystem will boot in degraded mode; check iris_health and "
+        f"_g['_device_probe'] for post-mortem."
+    )
+    return result
+
+
+def _run_device_probes() -> None:
+    """Probe camera + audio input before the real subsystems try to bind them.
+    Stashes results in _g['_device_probe'] keyed by 'camera' and 'audio_in'.
+    Never raises — the runtime continues to boot even if probes fail hard."""
+    try:
+        cam_result = _probe_device_with_retry("camera (DSHOW)", _probe_camera_open)
+    except Exception as e:
+        cam_result = {"name": "camera (DSHOW)", "ok": False, "attempts": 0,
+                      "detail": f"probe crashed: {e!r}", "orphans_seen": []}
+        _probe_log(f"camera probe crashed (non-fatal): {e!r}")
+    try:
+        aud_result = _probe_device_with_retry("audio input (sounddevice)", _probe_audio_input_open)
+    except Exception as e:
+        aud_result = {"name": "audio input (sounddevice)", "ok": False, "attempts": 0,
+                      "detail": f"probe crashed: {e!r}", "orphans_seen": []}
+        _probe_log(f"audio probe crashed (non-fatal): {e!r}")
+    _g["_device_probe"] = {
+        "camera": cam_result,
+        "audio_in": aud_result,
+        "ts": time.time(),
+    }
+
+
 # ── Engine init (lazy, single-shot) ───────────────────────────────────────────
 _tts: TTSWorker | None = None
 _stt: STTEngine | None = None
@@ -2388,6 +2611,12 @@ def iris_health(ctx: _IrisContext = None) -> dict:
     failures = _g.get("_bootstrap_failures") or {}
     if failures:
         out["bootstrap_failures"] = dict(failures)
+    # Surface device-probe results so post-mortem of a degraded boot is easy
+    # without grepping stderr. Set by _run_device_probes early in
+    # _eager_init_engines; absence == probe phase didn't run yet.
+    dp = _g.get("_device_probe")
+    if dp:
+        out["device_probe"] = dp
     # Perception
     out["perception"] = {
         "face_count": len(_g.get("_face_results") or []),
@@ -3610,6 +3839,16 @@ def _eager_init_engines() -> None:
     Also starts the FastAPI orb shim AFTER TTS comes up (so /api/v1/tts/*
     delegations have a real engine to call).
     """
+    # Device probes run BEFORE any subsystem tries to bind camera or audio.
+    # Old iris_runtime instances sometimes leak their DSHOW capture / openWakeWord
+    # InputStream past CC respawn; without this, the new instance silently boots
+    # degraded. Mirrors the avaagent port :5876 probe pattern. Bypass with
+    # IRIS_SKIP_DEVICE_PROBE=1. See _run_device_probes for details.
+    try:
+        _run_device_probes()
+    except Exception as _dpe:
+        print(f"[iris_runtime] device probe phase crashed (non-fatal): {_dpe!r}", file=sys.stderr, flush=True)
+
     try:
         tts = _ensure_tts()
         _ensure_stt()

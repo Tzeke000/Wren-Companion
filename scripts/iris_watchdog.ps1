@@ -27,6 +27,19 @@ function Write-WatchLog($msg) {
         if (-not (Test-Path $logDir)) {
             New-Item -ItemType Directory -Path $logDir -Force | Out-Null
         }
+        # W4: cap log at 1MB; rotate to .old on overflow.
+        if (Test-Path $WATCHDOG_LOG) {
+            try {
+                $sz = (Get-Item $WATCHDOG_LOG -ErrorAction SilentlyContinue).Length
+                if ($sz -gt 1048576) {
+                    $old = "$WATCHDOG_LOG.old"
+                    if (Test-Path $old) { Remove-Item -Path $old -Force -ErrorAction SilentlyContinue }
+                    Move-Item -Path $WATCHDOG_LOG -Destination $old -Force -ErrorAction SilentlyContinue
+                }
+            } catch {
+                # rotation failed -- keep appending
+            }
+        }
         Add-Content -Path $WATCHDOG_LOG -Value $line -Encoding UTF8
     } catch {
         # log write failed -- nothing to do
@@ -35,12 +48,13 @@ function Write-WatchLog($msg) {
 }
 
 function Find-ClaudeCommand {
-    $cli = Get-Command claude -ErrorAction SilentlyContinue
-    if ($cli) {
-        return $cli.Source
-    }
+    # W2: npm shim ships claude.cmd, not .exe. Check both, and fall back to
+    # Get-Command if the hardcoded paths miss.
     $candidates = @(
+        "$env:APPDATA\npm\claude.cmd",
+        "$env:LOCALAPPDATA\Programs\claude\claude.cmd",
         "$env:LOCALAPPDATA\Programs\claude\Claude.exe",
+        "$env:LOCALAPPDATA\Programs\Claude Code\claude.cmd",
         "$env:LOCALAPPDATA\Programs\Claude Code\Claude Code.exe"
     )
     foreach ($p in $candidates) {
@@ -48,30 +62,65 @@ function Find-ClaudeCommand {
             return $p
         }
     }
+    $cli = Get-Command claude -ErrorAction SilentlyContinue
+    if ($cli) {
+        return $cli.Source
+    }
     return $null
 }
 
 function Find-ActiveCC {
+    # W6: distinguish WMI failure ($null) from "no matches" (@()).
+    # Caller treats $null as "unknown, skip kill" to avoid double-spawn
+    # when the WMI service is unhealthy.
     try {
-        $names = @("Claude.exe", "Claude Code.exe", "node.exe")
+        $names = @("Claude.exe", "Claude Code.exe", "claude.exe", "node.exe")
         $all = @()
+        $wmiOk = $false
         foreach ($n in $names) {
-            $p = Get-CimInstance Win32_Process -Filter "Name='$n'" -ErrorAction SilentlyContinue
-            if ($p) {
-                $all += $p
+            try {
+                $p = Get-CimInstance Win32_Process -Filter "Name='$n'" -ErrorAction Stop
+                $wmiOk = $true
+                if ($p) { $all += $p }
+            } catch {
+                Write-WatchLog ("[WMI ERROR] query for $n failed: " + $_)
+                return $null
             }
         }
+        if (-not $wmiOk) {
+            Write-WatchLog "[WMI ERROR] no successful query across any name"
+            return $null
+        }
+        # W1: require BOTH claude-shaped cmdline AND Wren-Companion path.
+        # For .exe-named claude processes we accept either (claude.exe alone
+        # in this repo is ours); for node.exe we require both signals so we
+        # don't reap unrelated npm/npx node children.
         $matching = $all | Where-Object {
-            $_.CommandLine -and ($_.CommandLine -like "*Wren-Companion*" -or $_.CommandLine -like "*claude*")
+            if (-not $_.CommandLine) { return $false }
+            $cl = $_.CommandLine
+            $isClaudeExe = ($_.Name -ieq "Claude.exe") -or ($_.Name -ieq "claude.exe") -or ($_.Name -ieq "Claude Code.exe")
+            if ($isClaudeExe) {
+                return ($cl -like "*Wren-Companion*") -or ($cl -like "*claude*")
+            }
+            # node.exe path: require Wren-Companion AND a claude-code marker
+            return ($cl -like "*Wren-Companion*") -and (
+                ($cl -like "*claude-code*") -or ($cl -like "*claude\node_modules*") -or ($cl -like "*\claude\*")
+            )
         }
         return @($matching)
     } catch {
-        return @()
+        Write-WatchLog ("[WMI ERROR] Find-ActiveCC outer catch: " + $_)
+        return $null
     }
 }
 
 function Kill-ActiveCC {
     $procs = Find-ActiveCC
+    # W6: $null means WMI failed -- skip kill rather than assuming clean.
+    if ($null -eq $procs) {
+        Write-WatchLog "Find-ActiveCC returned null (WMI error); skipping kill step to avoid double-spawn"
+        return
+    }
     if ($procs.Count -eq 0) {
         Write-WatchLog "no active CC session found"
         return
@@ -87,6 +136,81 @@ function Kill-ActiveCC {
     Start-Sleep -Seconds 1
 }
 
+# ---- claude.exe presence check (used for bat-crash detection) ----
+# Returns a hashtable of claude.exe-family PIDs currently running. We compare
+# pre-spawn vs post-spawn snapshots: if no new PID appeared after the wait
+# window, the bat must have crashed inside its window (pywinpty error,
+# python syntax error, etc.) and we need to fall through to bare-claude.
+#
+# We include node.exe because CC's actual cognition runs as node child
+# processes under the claude CLI on Windows — a healthy launch produces
+# new node.exe PIDs with "claude" or "Wren-Companion" in the command line.
+function Get-ClaudeProcessSet {
+    $set = @{}
+    try {
+        $names = @("claude.exe", "Claude.exe", "Claude Code.exe", "node.exe")
+        foreach ($n in $names) {
+            $procs = Get-CimInstance Win32_Process -Filter "Name='$n'" -ErrorAction SilentlyContinue
+            if ($procs) {
+                foreach ($p in $procs) {
+                    if ($p.CommandLine -and (
+                            $p.CommandLine -like "*claude*" -or
+                            $p.CommandLine -like "*Wren-Companion*"
+                        )) {
+                        $set[[int]$p.ProcessId] = $true
+                    }
+                }
+            }
+        }
+    } catch {
+        # if WMI fails, return whatever we collected — caller treats empty
+        # set as "no claude running" which is the safe default for detection
+    }
+    return $set
+}
+
+# Wait up to $TimeoutS seconds for a new claude/node PID (not in $Baseline)
+# to appear. Returns $true on success, $false on timeout. Polls every 2s so
+# we don't bail too early on a slow cold start (CC + iris_runtime can take
+# 15-30s on the first launch after reboot before any node child spawns).
+function Wait-ForNewClaudeProcess {
+    param(
+        [hashtable]$Baseline,
+        [int]$TimeoutS = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutS)
+    while ((Get-Date) -lt $deadline) {
+        $current = Get-ClaudeProcessSet
+        foreach ($procId in $current.Keys) {
+            if (-not $Baseline.ContainsKey($procId)) {
+                return $true
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
+function Spawn-BareClaude {
+    # Last-resort tier: bare `claude` via powershell -NoExit. Loses the
+    # --channels flag + AVA_TTS_ENGINE env var that start_iris.bat would
+    # have set, but a degraded CC is better than no CC at all.
+    $cmd = Find-ClaudeCommand
+    if (-not $cmd) {
+        Write-WatchLog "FATAL: bare-claude fallback unreachable — claude executable not found"
+        return $false
+    }
+    try {
+        $args = "-NoExit -Command `"cd '$ROOT'; & '$cmd'`""
+        Start-Process -FilePath "powershell.exe" -ArgumentList $args -WindowStyle Normal
+        Write-WatchLog ("tier 3 fired: bare " + $cmd + " (channels + env var lost)")
+        return $true
+    } catch {
+        Write-WatchLog ("FATAL: bare-claude launch failed: " + $_)
+        return $false
+    }
+}
+
 function Spawn-NewCC {
     # Prefer start_iris.bat — it sets AVA_TTS_ENGINE + dev-channel flags
     # (server:iris on both --dangerously-load-development-channels and
@@ -100,46 +224,68 @@ function Spawn-NewCC {
     # and made restart_self look like it had failed (Zeke never saw CC come
     # back up after the 15:33 watchdog respawn). Fallback chain: wt.exe →
     # cmd /k (keeps window open) → bare claude.
+    #
+    # 2026-05-17 (later): added crash-detection between tiers. Tier 1 (wt)
+    # and tier 2 (cmd /k) both route through start_iris.bat → iris_cold_wake.py.
+    # If that script crashes (pywinpty error, syntax error, anything that
+    # exits before claude actually launches), the wt/cmd window opens fine
+    # — Start-Process reports success — but no claude.exe ever spawns inside
+    # it. So we snapshot claude PIDs BEFORE spawning, wait up to 30s, and
+    # check whether any new PID appeared. If not, fall through to the next
+    # tier. This makes tier 3 (bare claude) actually reachable when the
+    # cold-wake script itself is the failure point.
     $batPath = Join-Path $ROOT "start_iris.bat"
     if (Test-Path $batPath) {
-        # Try Windows Terminal first — gives a real, visible console.
+        # Snapshot existing claude/node PIDs so we can detect "no new PID
+        # spawned" — the signature of an inside-the-window bat crash.
+        $baseline = Get-ClaudeProcessSet
+        Write-WatchLog ("baseline claude/node PIDs before spawn: " + $baseline.Count)
+
+        # ---- Tier 1: Windows Terminal (visible, real console) ----
+        # W3: use `-w 0 nt` form so wt parses subcommand grammar explicitly;
+        # quote paths defensively. wt.exe doesn't surface launch errors via
+        # $? — verify by checking WindowsTerminal process presence and the
+        # 30s claude-pid wait. The wait is still the load-bearing detector.
         $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
         if ($wt) {
             try {
-                Start-Process -FilePath "wt.exe" -ArgumentList "-d", "`"$ROOT`"", "cmd.exe", "/k", "`"$batPath`""
-                Write-WatchLog ("launched new CC via wt.exe + start_iris.bat")
-                return $true
+                $wtBefore = @(Get-Process WindowsTerminal -ErrorAction SilentlyContinue).Count
+                $wtArgs = @("-w", "0", "nt", "-d", "`"$ROOT`"", "cmd.exe", "/k", "`"$batPath`"")
+                Start-Process -FilePath "wt.exe" -ArgumentList $wtArgs
+                Start-Sleep -Milliseconds 500
+                $wtAfter = @(Get-Process WindowsTerminal -ErrorAction SilentlyContinue).Count
+                Write-WatchLog ("tier 1 spawned: wt.exe + start_iris.bat (WindowsTerminal procs " + $wtBefore + "->" + $wtAfter + ") — waiting up to 30s for claude PID")
+                if (Wait-ForNewClaudeProcess -Baseline $baseline -TimeoutS 30) {
+                    Write-WatchLog ("tier 1 confirmed: new claude/node PID detected")
+                    return $true
+                }
+                Write-WatchLog ("tier 1 spawn returned but no claude PID appeared within 30s — bat likely crashed or wt args malformed; trying tier 2")
             } catch {
-                Write-WatchLog ("wt.exe launch failed, falling through: " + $_)
+                Write-WatchLog ("tier 1 spawn threw: " + $_)
             }
         }
-        # Fallback: cmd.exe /k (keep window open) with a normal window style.
-        # /k holds the window even after the bat exits so any error is visible.
+
+        # ---- Tier 2: cmd /k (visible cmd window) ----
+        # Refresh baseline so any side-effect of tier 1 (in case a PID
+        # appeared juuust after the timeout) doesn't mask a tier 2 crash.
+        $baseline = Get-ClaudeProcessSet
         try {
             Start-Process -FilePath "cmd.exe" -ArgumentList "/k", "`"$batPath`"" -WindowStyle Normal
-            Write-WatchLog ("launched new CC via cmd /k + start_iris.bat (wt.exe unavailable)")
-            return $true
+            Write-WatchLog ("tier 2 spawned: cmd /k + start_iris.bat — waiting up to 30s for claude PID")
+            if (Wait-ForNewClaudeProcess -Baseline $baseline -TimeoutS 30) {
+                Write-WatchLog ("tier 2 confirmed: new claude/node PID detected")
+                return $true
+            }
+            Write-WatchLog ("tier 2 spawn returned but no claude PID appeared within 30s — bat likely crashed; falling to tier 3 (bare claude)")
         } catch {
-            Write-WatchLog ("start_iris.bat launch failed, falling through: " + $_)
+            Write-WatchLog ("tier 2 spawn threw: " + $_)
         }
     } else {
-        Write-WatchLog ("WARN: start_iris.bat not found at $batPath, falling back to bare claude")
+        Write-WatchLog ("WARN: start_iris.bat not found at $batPath, jumping to tier 3 (bare claude)")
     }
-    # Fallback: bare claude (loses channel flags + env var, but better than nothing)
-    $cmd = Find-ClaudeCommand
-    if (-not $cmd) {
-        Write-WatchLog "FATAL: could not find claude executable"
-        return $false
-    }
-    try {
-        $args = "-NoExit -Command `"cd '$ROOT'; & '$cmd'`""
-        Start-Process -FilePath "powershell.exe" -ArgumentList $args -WindowStyle Normal
-        Write-WatchLog ("launched new CC via fallback bare " + $cmd + " (channels + env var lost)")
-        return $true
-    } catch {
-        Write-WatchLog ("FATAL: launch failed: " + $_)
-        return $false
-    }
+
+    # ---- Tier 3: bare claude (loses channel flags + env var) ----
+    return Spawn-BareClaude
 }
 
 # ---- Main loop ----
@@ -157,7 +303,14 @@ while ($true) {
         if (Test-Path $TRIGGER_FILE) {
             $sinceLast = (Get-Date) - $lastRespawn
             if ($sinceLast.TotalSeconds -lt $DEBOUNCE_S) {
-                Write-WatchLog ("trigger seen within debounce window (" + [int]$sinceLast.TotalSeconds + "s) -- clearing")
+                # W5: capture reason before deleting so post-mortem is possible.
+                $dbReason = ""
+                try {
+                    $dbReason = (Get-Content $TRIGGER_FILE -Raw -ErrorAction SilentlyContinue).Trim()
+                } catch {
+                    $dbReason = "(could not read reason)"
+                }
+                Write-WatchLog ("[DEBOUNCED] trigger swallowed within debounce window (" + [int]$sinceLast.TotalSeconds + "s of " + $DEBOUNCE_S + "s); reason=" + $dbReason)
                 Remove-Item -Path $TRIGGER_FILE -Force -ErrorAction SilentlyContinue
             } else {
                 $reason = ""

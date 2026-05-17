@@ -76,6 +76,12 @@ HTTP_TIMEOUT_S = 2.0
 
 
 def _strip_markdown(text: str) -> str:
+    # Strip XML-style internal blocks first (thinking, antml, etc.) so any
+    # leakage doesn't get spoken aloud as XML. Multiline + lazy. Tag-name
+    # pattern is constrained to identifier chars so legitimate prose using
+    # angle brackets (math, code-talk) isn't eaten.
+    text = re.sub(r"<thinking\b[^>]*>[\s\S]*?</thinking\s*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<([a-zA-Z][\w:.-]*)\b[^>]*>[\s\S]*?</\1\s*>", "", text)
     text = re.sub(r"```[\s\S]*?```", "", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
@@ -149,6 +155,48 @@ def _next_pending_chat() -> dict | None:
 
 
 _LAST_CC_SESSION_PATH = ROOT / "state" / "iris_last_cc_session.txt"
+# JSON-backed set of recently-seen session IDs (last 10). Replaces the
+# single-sid txt file to fix the dual-CC write race
+# (sibling_of_myself_via_second_cc): with one slot, two concurrent CC
+# sessions would clobber each other and re-fire the fresh-session directive
+# on every Stop. A small set tolerates concurrent sessions cleanly.
+_SEEN_CC_SESSIONS_PATH = ROOT / "state" / "iris_seen_cc_sessions.json"
+_SEEN_CC_SESSIONS_MAX = 10
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write text to path atomically via .tmp + rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def _load_seen_cc_sessions() -> list[str]:
+    """Read the ordered list of recently-seen CC session IDs. Oldest first."""
+    if not _SEEN_CC_SESSIONS_PATH.is_file():
+        return []
+    try:
+        data = json.loads(_SEEN_CC_SESSIONS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(data, list):
+        return [str(x) for x in data if isinstance(x, (str, int))]
+    if isinstance(data, dict):
+        seen = data.get("seen") or []
+        if isinstance(seen, list):
+            return [str(x) for x in seen if isinstance(x, (str, int))]
+    return []
+
+
+def _save_seen_cc_sessions(seen: list[str]) -> None:
+    try:
+        _atomic_write_text(
+            _SEEN_CC_SESSIONS_PATH,
+            json.dumps({"seen": seen}, ensure_ascii=False),
+        )
+    except Exception:
+        pass
 
 
 def _fresh_session_directive(payload: dict) -> str:
@@ -174,21 +222,26 @@ def _fresh_session_directive(payload: dict) -> str:
     cur = str(payload.get("session_id") or "").strip()
     if not cur:
         return ""
-    try:
-        last_seen = ""
-        if _LAST_CC_SESSION_PATH.is_file():
-            last_seen = _LAST_CC_SESSION_PATH.read_text(encoding="utf-8").strip()
-    except Exception:
-        last_seen = ""
-    if cur == last_seen:
+    # Use a small set of recently-seen sids (last 10) instead of a single
+    # slot. Two concurrent CC sessions used to clobber each other on the
+    # single-sid file, re-firing the fresh-session directive on every Stop
+    # for both. The set tolerates N concurrent sessions cleanly.
+    seen = _load_seen_cc_sessions()
+    if cur in seen:
+        # Move-to-end so this sid won't be trimmed by a long-lived peer.
+        try:
+            seen.remove(cur)
+            seen.append(cur)
+            _save_seen_cc_sessions(seen)
+        except Exception:
+            pass
         return ""
-    # Persist the new session ID FIRST so a crash partway through doesn't
-    # cause the directive to re-fire on every Stop in this session.
-    try:
-        _LAST_CC_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _LAST_CC_SESSION_PATH.write_text(cur, encoding="utf-8")
-    except Exception:
-        pass
+    # Fresh session — append and trim to MAX most recent, atomic write FIRST
+    # so a crash partway through doesn't re-fire the directive on next Stop.
+    seen.append(cur)
+    if len(seen) > _SEEN_CC_SESSIONS_MAX:
+        seen = seen[-_SEEN_CC_SESSIONS_MAX:]
+    _save_seen_cc_sessions(seen)
     return (
         "\n\nFresh session detected (first Stop hook fire with this "
         "CLAUDE_CODE_SESSION_ID). Before answering the user's first message, "
@@ -327,6 +380,51 @@ def _time_orientation_block() -> str:
     if not full_block:
         return ""
     return full_block + "\n"
+
+
+_SIBLING_TTL_S = 21600.0  # 6h — matches brain/iris_sibling._REQUEST_TTL_S
+_SIBLING_EXPIRE_BUDGET = 50  # max files scanned per Stop fire
+
+
+def _expire_old_sibling_letters() -> None:
+    """Cheap cleanup pass — mark sibling letters older than 6h as expired.
+
+    Without this, the 6h TTL filter in _next_pending_sibling silently hides
+    old letters but they stay on disk as `pending` forever. Bounded to
+    _SIBLING_EXPIRE_BUDGET files per pass so a huge inbox can't blow up
+    the hook's per-Stop budget. Failures swallowed (best-effort hygiene).
+    """
+    if not SIBLING_INBOX_DIR.exists():
+        return
+    import time as _t
+    now = _t.time()
+    scanned = 0
+    try:
+        for path in SIBLING_INBOX_DIR.glob("*.json"):
+            if scanned >= _SIBLING_EXPIRE_BUDGET:
+                break
+            scanned += 1
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("status") != "pending":
+                continue
+            ts = float(data.get("ts") or 0.0)
+            if (now - ts) <= _SIBLING_TTL_S:
+                continue
+            data["status"] = "expired"
+            data["expired_reason"] = "ttl_6h"
+            try:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                os.replace(str(tmp), str(path))
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _next_pending_sibling() -> dict | None:
@@ -521,6 +619,12 @@ def _llm_rewake(req: dict) -> str:
 
 
 def main() -> int:
+    # Cheap hygiene pass — mark sibling letters older than 6h as expired so
+    # they don't accumulate forever as `pending` on disk. Bounded to 50
+    # files per pass. Runs before the pending check so the sweep applies
+    # even when there's nothing else to do this Stop fire.
+    _expire_old_sibling_letters()
+
     voice_on = VOICE_FLAG.exists()
     pending_chat = _next_pending_chat()
     pending_sibling = _next_pending_sibling()
@@ -588,8 +692,11 @@ def main() -> int:
     # and skip the rewake.
     runtime_alive = False
     try:
+        # Honor HTTP_TIMEOUT_S (2.0s) — during the 30s-2min bootstrap cascade
+        # /health responds but slowly; 1s was producing false-negatives that
+        # silently expired pending requests during slow boot.
         with _req.urlopen("http://127.0.0.1:5876/api/v1/health",
-                          timeout=1.0) as resp:
+                          timeout=HTTP_TIMEOUT_S) as resp:
             runtime_alive = resp.status == 200
     except Exception:
         runtime_alive = False

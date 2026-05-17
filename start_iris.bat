@@ -1,4 +1,5 @@
 @echo off
+setlocal
 REM ============================================================================
 REM start_iris.bat — Iris launcher (DO NOT DELETE)
 REM
@@ -28,10 +29,19 @@ REM ============================================================================
 cd /d D:\Wren-Companion
 
 REM venv python — has pywinpty installed (winpty 3.0.3 as of 2026-05-17).
-REM Falls back to py -3.11 if the venv launcher is missing; that path lacks
-REM pywinpty so the script will error loudly with install instructions.
-if exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
-    "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\iris_cold_wake.py" %*
-) else (
-    py -3.11 "D:\Wren-Companion\scripts\iris_cold_wake.py" %*
+REM HARD-FAIL if venv is missing instead of silently falling back to py -3.11
+REM (which lacks pywinpty and would produce confusing Python errors instead
+REM of a clear "venv missing" signal). Watchdog can then route to its
+REM bare-claude tier fallback.
+if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
+    echo [start_iris.bat] ERROR: venv missing at D:\Wren-Companion\.venv\Scripts\python.exe 1>&2
+    echo [start_iris.bat] Run: py -3.11 -m venv D:\Wren-Companion\.venv ^&^& D:\Wren-Companion\.venv\Scripts\python.exe -m pip install -r D:\Wren-Companion\requirements.txt 1>&2
+    endlocal
+    exit /b 2
 )
+
+REM No-args invocation (watchdog passes none); using %1 %2 %3 instead of %*
+REM as defense-in-depth against arg re-tokenization with spaces. If args
+REM are ever needed in the future, expand explicitly.
+"D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\iris_cold_wake.py" %1 %2 %3
+endlocal

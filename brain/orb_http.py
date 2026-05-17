@@ -17,7 +17,9 @@ Wire-up: `iris_runtime.py` calls `start(g, root_dir)` once at boot.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
+import os
 import sys
 import threading
 import time
@@ -1397,27 +1399,99 @@ def start(g: dict[str, Any], root: Path, tts: Any | None = None) -> None:
 
     Idempotent: subsequent calls return without effect. iris_runtime.py invokes
     this once after engines come up.
+
+    Single-instance enforcement (mirrors avaagent.py's _check_existing_ava_instance):
+      1. Port probe — try to bind :5876. If busy, refuse and log the holder PID.
+      2. PID lockfile at state/iris_orb_http.pid. Stale lockfiles (process gone)
+         are overwritten silently; live ones cause hard-exit of the shim only
+         (iris_runtime keeps booting — MCP-over-stdio doesn't need the orb).
+    Bypass with IRIS_SKIP_ORB_HTTP_INSTANCE_CHECK=1.
     """
     global _g, _root, _tts_ref
     _g = g
     _root = root
     _tts_ref = tts
 
-    # Port-busy probe per CLAUDE.md hygiene rule #8 — refuse to bind if
-    # something else is already on :5876 (probably an avaagent.py dev process).
-    import socket as _socket
-    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    try:
-        s.bind((_HOST, _PORT))
-    except OSError:
-        print(
-            f"[orb_http] port {_PORT} already in use — not starting shim. "
-            f"Stop the other process and restart iris_runtime.",
-            file=sys.stderr, flush=True,
-        )
+    _skip = os.environ.get("IRIS_SKIP_ORB_HTTP_INSTANCE_CHECK", "0").strip() == "1"
+    if _skip:
+        print("[orb_http] WARNING: IRIS_SKIP_ORB_HTTP_INSTANCE_CHECK=1 — single-instance check bypassed", file=sys.stderr, flush=True)
+
+    _pid_file = root / "state" / "iris_orb_http.pid"
+
+    if not _skip:
+        # Port-busy probe per CLAUDE.md hygiene rule #8 — refuse to bind if
+        # something else is already on :5876 (probably an avaagent.py dev process
+        # or a zombie iris_runtime that didn't free the port). bind() is the
+        # canonical test; if it raises, the port is taken.
+        import socket as _socket
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        try:
+            s.bind((_HOST, _PORT))
+        except OSError:
+            # Surface the holder PID from the lockfile if we have one — gives
+            # the operator a kill target without resorting to netstat.
+            _holder_hint = ""
+            try:
+                if _pid_file.is_file():
+                    _holder_hint = f" (lockfile says PID {_pid_file.read_text(encoding='utf-8').strip()})"
+            except Exception:
+                pass
+            print(
+                f"[orb_http] port {_PORT} already in use{_holder_hint} — not starting shim. "
+                f"Stop the other process and restart iris_runtime.",
+                file=sys.stderr, flush=True,
+            )
+            s.close()
+            return
         s.close()
-        return
-    s.close()
+
+        # PID lockfile — check stale processes too. If the file exists and the
+        # named process is still alive (and isn't us), refuse. Stale lockfiles
+        # are cleaned silently.
+        try:
+            if _pid_file.is_file():
+                try:
+                    _existing_pid = int(_pid_file.read_text(encoding="utf-8").strip())
+                except Exception:
+                    _existing_pid = 0
+                if _existing_pid > 0 and _existing_pid != os.getpid():
+                    _alive = False
+                    try:
+                        os.kill(_existing_pid, 0)
+                        _alive = True
+                    except (OSError, PermissionError, ProcessLookupError):
+                        _alive = False
+                    if _alive:
+                        print(
+                            f"[orb_http] ERROR: stale lockfile {_pid_file} points at PID "
+                            f"{_existing_pid}, which is still alive. Shut it down first.",
+                            file=sys.stderr, flush=True,
+                        )
+                        return
+                    print(
+                        f"[orb_http] note: cleaning stale lockfile (PID {_existing_pid} no longer running)",
+                        file=sys.stderr, flush=True,
+                    )
+            _pid_file.parent.mkdir(parents=True, exist_ok=True)
+            _pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        except OSError as _e:
+            # Non-fatal — port probe is the primary guard.
+            print(f"[orb_http] WARNING: pid-lockfile write failed: {_e!r}", file=sys.stderr, flush=True)
+
+        def _release_orb_pid_lock() -> None:
+            """Remove the PID lockfile on graceful shutdown — only if it points at us."""
+            try:
+                if _pid_file.is_file():
+                    try:
+                        pid_in_file = int(_pid_file.read_text(encoding="utf-8").strip())
+                    except Exception:
+                        pid_in_file = 0
+                    if pid_in_file == os.getpid():
+                        _pid_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        atexit.register(_release_orb_pid_lock)
 
     config = uvicorn.Config(
         app, host=_HOST, port=_PORT, log_level="warning", access_log=False,
