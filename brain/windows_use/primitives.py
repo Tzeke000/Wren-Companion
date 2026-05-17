@@ -559,6 +559,217 @@ def type_text_via_clipboard(window_title_substring: str, text: str) -> bool:
     return ok
 
 
+# ── Atomic input primitives ───────────────────────────────────────────
+# These hold foreground through a click+keystroke sequence in one process,
+# avoiding the focus race that breaks separate MCP-tool calls. The pattern:
+# focus target window, click at coords, immediately send keystroke combo,
+# all inside one function call. No round-trip back to the MCP layer means
+# CC's terminal can't reclaim foreground mid-sequence.
+
+
+def _send_key_combo(vks: list[int]) -> None:
+    """Press all virtual-keys in `vks` in order, then release in reverse.
+    Used for chord keystrokes like Ctrl+V, Ctrl+A, Ctrl+S, Alt+Tab, etc.
+    """
+    import ctypes
+    from ctypes import wintypes
+    u32 = ctypes.windll.user32
+
+    KEYEVENTF_KEYUP = 0x0002
+    INPUT_KEYBOARD = 1
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [("type", wintypes.DWORD), ("u", _INPUT_UNION)]
+
+    def _send(vk: int, up: bool) -> None:
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp.ki = KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, None)
+        u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+
+    for vk in vks:
+        _send(vk, False)
+    for vk in reversed(vks):
+        _send(vk, True)
+
+
+def _click_at_atomic(x: int, y: int) -> None:
+    """SetCursorPos + mouse_event left-click. Called inline inside the
+    atomic functions to avoid an MCP round-trip."""
+    import ctypes
+    u32 = ctypes.windll.user32
+    u32.SetCursorPos(int(x), int(y))
+    time.sleep(0.03)
+    u32.mouse_event(0x02, 0, 0, 0, 0)  # LEFTDOWN
+    u32.mouse_event(0x04, 0, 0, 0, 0)  # LEFTUP
+
+
+# Virtual-key codes used by the atomic helpers
+_VK = {
+    "ctrl": 0x11,
+    "alt": 0x12,
+    "shift": 0x10,
+    "win": 0x5B,
+    "a": 0x41, "b": 0x42, "c": 0x43, "d": 0x44, "e": 0x45, "f": 0x46,
+    "g": 0x47, "h": 0x48, "i": 0x49, "j": 0x4A, "k": 0x4B, "l": 0x4C,
+    "m": 0x4D, "n": 0x4E, "o": 0x4F, "p": 0x50, "q": 0x51, "r": 0x52,
+    "s": 0x53, "t": 0x54, "u": 0x55, "v": 0x56, "w": 0x57, "x": 0x58,
+    "y": 0x59, "z": 0x5A,
+    "0": 0x30, "1": 0x31, "2": 0x32, "3": 0x33, "4": 0x34,
+    "5": 0x35, "6": 0x36, "7": 0x37, "8": 0x38, "9": 0x39,
+    "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74,
+    "f6": 0x75, "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79,
+    "f11": 0x7A, "f12": 0x7B,
+    "enter": 0x0D, "esc": 0x1B, "tab": 0x09, "space": 0x20,
+    "backspace": 0x08, "delete": 0x2E, "home": 0x24, "end": 0x23,
+    "pageup": 0x21, "pagedown": 0x22, "left": 0x25, "up": 0x26,
+    "right": 0x27, "down": 0x28, "insert": 0x2D,
+}
+
+
+def paste_at(window_title_substring: str, x: int, y: int, text: str) -> bool:
+    """Atomic paste: set clipboard, focus target window, click at (x,y),
+    Ctrl+V. All in one process — no MCP round-trip between steps, so
+    CC's terminal can't reclaim foreground mid-sequence.
+
+    Returns True if window was found and the sequence ran. Caller should
+    verify with a screen_grab; this does not confirm the paste landed.
+
+    Args:
+        window_title_substring: substring match for the target window title.
+        x, y: virtual-desktop coords to click before pasting.
+        text: content to set on the clipboard and paste.
+    """
+    if text is None:
+        return False
+    # Save prior clipboard for restore.
+    prior: str | None = None
+    try:
+        import win32clipboard  # type: ignore
+        import win32con  # type: ignore
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                    prior = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+    except ImportError:
+        pass
+
+    if not set_clipboard(text):
+        return False
+
+    win = find_window_by_title_substring(window_title_substring, timeout=1.5)
+    if win is None:
+        return False
+    hwnd = _resolve_hwnd(win)
+    if hwnd is not None:
+        _force_foreground(hwnd)
+    else:
+        try:
+            win.SetActive()
+        except Exception:
+            pass
+
+    try:
+        time.sleep(0.08)  # settle after foreground swap
+        _click_at_atomic(x, y)
+        time.sleep(0.05)  # let the click register
+        _send_key_combo([_VK["ctrl"], _VK["v"]])
+        ok = True
+    except Exception:
+        ok = False
+
+    # Best-effort clipboard restore.
+    if prior is not None:
+        try:
+            time.sleep(0.08)
+            set_clipboard(prior)
+        except Exception:
+            pass
+    return ok
+
+
+def select_all_clear(window_title_substring: str, x: int, y: int) -> bool:
+    """Atomic select-all-delete: focus target window, click at (x,y),
+    Ctrl+A, Delete. Clears the active edit control's content. One process,
+    no MCP round-trip — same reason as paste_at.
+    """
+    win = find_window_by_title_substring(window_title_substring, timeout=1.5)
+    if win is None:
+        return False
+    hwnd = _resolve_hwnd(win)
+    if hwnd is not None:
+        _force_foreground(hwnd)
+    else:
+        try:
+            win.SetActive()
+        except Exception:
+            pass
+    try:
+        time.sleep(0.08)
+        _click_at_atomic(x, y)
+        time.sleep(0.05)
+        _send_key_combo([_VK["ctrl"], _VK["a"]])
+        time.sleep(0.04)
+        _send_key_combo([_VK["delete"]])
+        return True
+    except Exception:
+        return False
+
+
+def hotkey_at(window_title_substring: str, x: int, y: int, combo: str) -> bool:
+    """Atomic click-then-hotkey: focus window, click at (x,y), send a key
+    combo. `combo` is a "+"-joined string of keys, e.g. "ctrl+s",
+    "ctrl+shift+t", "alt+f4", "f5", "enter". One process, no race.
+    """
+    parts = [p.strip().lower() for p in combo.split("+") if p.strip()]
+    if not parts:
+        return False
+    vks: list[int] = []
+    for p in parts:
+        vk = _VK.get(p)
+        if vk is None:
+            return False
+        vks.append(vk)
+
+    win = find_window_by_title_substring(window_title_substring, timeout=1.5)
+    if win is None:
+        return False
+    hwnd = _resolve_hwnd(win)
+    if hwnd is not None:
+        _force_foreground(hwnd)
+    else:
+        try:
+            win.SetActive()
+        except Exception:
+            pass
+    try:
+        time.sleep(0.08)
+        _click_at_atomic(x, y)
+        time.sleep(0.05)
+        _send_key_combo(vks)
+        return True
+    except Exception:
+        return False
+
+
 # ── Window candidates / close primitives ──────────────────────────────
 
 
