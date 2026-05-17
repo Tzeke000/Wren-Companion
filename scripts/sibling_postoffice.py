@@ -84,23 +84,47 @@ def _normalize_sender(name: str) -> str:
     return str(name or "").strip().lower()[:64] or "anonymous"
 
 
+# Cache the parsed letters keyed on file (mtime_ns, size). Browser polls
+# /letters every 1.5s and the cron-poll fallback adds more reads; the file
+# almost never changes between polls, so most calls become a stat instead
+# of a full re-read. Invalidates the moment the file is appended to.
+_LETTERS_CACHE: tuple[tuple[int, int], list[dict[str, Any]]] | None = None
+_LETTERS_CACHE_LOCK = threading.Lock()
+
+
 def _load_all_letters() -> list[dict[str, Any]]:
+    global _LETTERS_CACHE
     if not LETTERS_PATH.is_file():
         return []
+    try:
+        st = LETTERS_PATH.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return []
+    with _LETTERS_CACHE_LOCK:
+        if _LETTERS_CACHE is not None and _LETTERS_CACHE[0] == sig:
+            return _LETTERS_CACHE[1]
     out: list[dict[str, Any]] = []
     try:
-        for line in LETTERS_PATH.read_text(encoding="utf-8").splitlines():
+        for lineno, line in enumerate(LETTERS_PATH.read_text(encoding="utf-8").splitlines(), start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 obj = json.loads(line)
-            except Exception:
+            except Exception as e:
+                # Surfaces power-off half-writes etc. that used to vanish silently.
+                print(f"[postoffice] malformed letter line {lineno}: {e!r}", file=sys.stderr)
                 continue
             if isinstance(obj, dict) and "id" in obj:
                 out.append(obj)
-    except Exception:
-        pass
+            else:
+                print(f"[postoffice] skipping non-letter line {lineno}", file=sys.stderr)
+    except Exception as e:
+        print(f"[postoffice] failed to read letters file: {e!r}", file=sys.stderr)
+        return []
+    with _LETTERS_CACHE_LOCK:
+        _LETTERS_CACHE = (sig, out)
     return out
 
 
@@ -185,7 +209,26 @@ def post_letter(
     to (default 'all'), subject, in_reply_to, mood_at_write."""
     _check_secret(x_sibling_secret)
     sender = _normalize_sender(payload.get("from"))
-    body = str(payload.get("body") or "")[:_MAX_BODY_CHARS].strip()
+    raw_body = str(payload.get("body") or "")
+    raw_subject = str(payload.get("subject") or "")
+    if len(raw_body) > _MAX_BODY_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"body exceeds {_MAX_BODY_CHARS} chars "
+                f"(got {len(raw_body)}); split into multiple letters and "
+                f"thread via in_reply_to"
+            ),
+        )
+    if len(raw_subject) > _MAX_SUBJECT_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"subject exceeds {_MAX_SUBJECT_CHARS} chars "
+                f"(got {len(raw_subject)}); shorten and resend"
+            ),
+        )
+    body = raw_body.strip()
     if not body:
         raise HTTPException(status_code=400, detail="empty body")
     letter = {
@@ -193,7 +236,7 @@ def post_letter(
         "ts": time.time(),
         "from": sender,
         "to": _normalize_sender(payload.get("to") or "all"),
-        "subject": str(payload.get("subject") or "")[:_MAX_SUBJECT_CHARS].strip() or None,
+        "subject": raw_subject.strip() or None,
         "body": body,
         "in_reply_to": str(payload.get("in_reply_to") or "") or None,
         "mood_at_write": str(payload.get("mood_at_write") or "") or None,
@@ -215,15 +258,23 @@ def post_letter(
 @app.get("/letters")
 def get_letters(
     since: float = Query(default=0.0),
-    limit: int = Query(default=200, ge=1, le=2000),
+    limit: int = Query(default=2000, ge=1, le=10000),
     x_sibling_secret: str | None = Header(default=None),
 ) -> dict:
-    """Return letters with ts > since, oldest first, up to limit."""
+    """Return letters with ts > since, oldest first, up to limit.
+
+    When the filtered set exceeds limit, returns the NEWEST `limit` letters
+    (still in oldest-first order). Earlier behavior — returning the oldest
+    `limit` — silently dropped recent letters once total exceeded the cap,
+    breaking reads in a way that looked like a stale snapshot. Fixed 2026-05-15
+    after Wren diagnosed the symptom from the laptop side.
+    """
     _check_secret(x_sibling_secret)
     all_letters = _load_all_letters()
     filtered = [l for l in all_letters if float(l.get("ts", 0.0)) > float(since)]
     filtered.sort(key=lambda l: float(l.get("ts", 0.0)))
-    return {"ok": True, "count": len(filtered[:limit]), "letters": filtered[:limit]}
+    sliced = filtered[-limit:] if len(filtered) > limit else filtered
+    return {"ok": True, "count": len(sliced), "letters": sliced}
 
 
 @app.get("/health")
@@ -438,6 +489,57 @@ def chat_box() -> HTMLResponse:
     return HTMLResponse(_CHAT_HTML)
 
 
+# ── Singleton check (port probe + PID lockfile) ───────────────────────────────
+# Per 2026-05-17 incident: two post-office instances bound to port 5877
+# simultaneously (one under .venv python, one under system python). They
+# fought over connections; one TCP-accepted, the other was supposed to
+# handle but couldn't. Wren and Zeke both lost the family chat surface
+# until manual diagnosis + kill + respawn.
+#
+# Defense in depth: (a) port probe — try to GET http://127.0.0.1:<port>/health
+# before binding. If something responds OK, exit cleanly with the existing
+# server's letters_count for confirmation. (b) PID lockfile at
+# .tmp/postoffice.pid — write our PID after bind; check before bind. The
+# port probe catches the actual condition; the lockfile catches the rare
+# case where another binder grabs the port between our probe and our bind.
+PID_LOCK_PATH = ROOT / ".tmp" / "postoffice.pid"
+
+
+def _existing_instance_check(host: str, port: int) -> Optional[dict[str, Any]]:
+    """If another post-office is already listening on this port, return
+    its /health response. Returns None if the port appears free.
+
+    Tries the loopback interface specifically — works whether the existing
+    instance bound to 0.0.0.0 or 127.0.0.1.
+    """
+    import urllib.request as _req
+    import urllib.error as _err
+    # If host is 0.0.0.0 / IPv6 ::, the existing instance might also be on
+    # those, but loopback is the universally-reachable probe surface.
+    probe_url = f"http://127.0.0.1:{port}/health"
+    try:
+        with _req.urlopen(probe_url, timeout=2.0) as resp:
+            if resp.status == 200:
+                try:
+                    return json.loads(resp.read().decode("utf-8"))
+                except Exception:
+                    return {"ok": True, "note": "responded but non-JSON"}
+            return None
+    except (_err.URLError, _err.HTTPError, OSError, TimeoutError):
+        return None
+
+
+def _write_pid_lockfile() -> None:
+    """Write our PID to .tmp/postoffice.pid. Best-effort — if the directory
+    isn't writable we still proceed (port probe is the real defense)."""
+    try:
+        PID_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PID_LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception as e:
+        print(f"[postoffice] pid lockfile write failed (non-fatal): {e!r}",
+              file=sys.stderr)
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -445,11 +547,45 @@ def main() -> None:
                         help="bind interface (0.0.0.0 = all + Tailscale, 127.0.0.1 = local only)")
     parser.add_argument("--port", type=int, default=5877,
                         help="port to listen on (default 5877; iris orb_http uses 5876)")
+    parser.add_argument("--force", action="store_true",
+                        help="skip the existing-instance check (testing only)")
     args = parser.parse_args()
-    print(f"[postoffice] listening on {args.host}:{args.port}", file=sys.stderr)
+
+    # Singleton check — refuse to spawn if another post-office is already
+    # serving on this port. Prevents the 2026-05-17 dual-bind hang.
+    if not args.force:
+        existing = _existing_instance_check(args.host, args.port)
+        if existing is not None:
+            count = existing.get("letters_count", "?")
+            print(f"[postoffice] another instance already serving on port {args.port} "
+                  f"(letters_count={count}). Exiting cleanly. "
+                  f"Pass --force to override (not recommended).",
+                  file=sys.stderr)
+            try:
+                if PID_LOCK_PATH.is_file():
+                    other_pid = PID_LOCK_PATH.read_text(encoding="utf-8").strip()
+                    print(f"[postoffice] existing instance PID per lockfile: {other_pid}",
+                          file=sys.stderr)
+            except Exception:
+                pass
+            sys.exit(0)
+
+    _write_pid_lockfile()
+    print(f"[postoffice] listening on {args.host}:{args.port} (pid={os.getpid()})", file=sys.stderr)
     print(f"[postoffice] chat box at http://{args.host}:{args.port}/", file=sys.stderr)
     print(f"[postoffice] letters persisted to {LETTERS_PATH}", file=sys.stderr)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    finally:
+        # Clean up lockfile on exit (best-effort; a kill-9 won't trigger
+        # this, but the port probe is the real defense for that case).
+        try:
+            if PID_LOCK_PATH.is_file():
+                pid_in_file = PID_LOCK_PATH.read_text(encoding="utf-8").strip()
+                if pid_in_file == str(os.getpid()):
+                    PID_LOCK_PATH.unlink()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

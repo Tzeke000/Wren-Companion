@@ -438,14 +438,34 @@ def _mood_loop(root: Path) -> None:
 # every 1s and only emit when the identity *transitions*: no-face -> face,
 # face -> different-face, face -> no-face. Frame-by-frame "still seeing
 # Zeke" is silent.
+#
+# Hysteresis (Schmitt-trigger / Canny dual-threshold pattern):
+#   - To transition AWAY from a known face -> no_face: require N consecutive
+#     low-confidence reads. Single dropped frames don't trigger.
+#   - To transition no_face -> known face: require M consecutive
+#     high-confidence reads. A single spurious detection doesn't trigger.
+#   - Minimum dwell: after a transition emits, suppress further transitions
+#     for DWELL_S. Stops oscillation on borderline conditions.
 
 _camera_last_id: str = "init"  # sentinel; first real read sets it
 _camera_last_emit_ts: float = 0.0
 _camera_poll_interval_s = 1.0
 
+# Hysteresis tuning
+_CAM_CONF_LOW = 0.30   # below this = "no face" for hysteresis purposes
+_CAM_CONF_HIGH = 0.50  # above this = "real face" for hysteresis purposes
+_CAM_FRAMES_TO_DROP = 5   # consecutive low frames required to declare face_lost
+_CAM_FRAMES_TO_ACQUIRE = 3  # consecutive high frames required to declare face_acquired
+_CAM_DWELL_S = 15.0  # post-transition cooldown before another transition can fire
+
+# Rolling counters used by the state machine
+_camera_pending_id: str = "init"   # the candidate state we're considering
+_camera_pending_count: int = 0     # consecutive ticks supporting the candidate
+
 
 def _camera_loop(g: dict[str, Any]) -> None:
     global _camera_last_id, _camera_last_emit_ts
+    global _camera_pending_id, _camera_pending_count
     print("[attention_sources] camera watcher started", file=sys.stderr, flush=True)
 
     while True:
@@ -458,23 +478,63 @@ def _camera_loop(g: dict[str, Any]) -> None:
             person_id = str(g.get("_recognized_person_id") or "unknown")
             confidence = float(g.get("_recognized_confidence") or 0.0)
 
-            # Treat low-confidence reads as "no face" so flicker doesn't
-            # produce ping-pong transitions
-            if person_id == "unknown" and confidence < 0.30:
-                normalized = "no_face"
+            # Normalize this frame's observation. Below low -> no_face;
+            # above high -> known/unknown; in-between -> "ambiguous", which
+            # neither confirms nor denies the current state.
+            if confidence < _CAM_CONF_LOW:
+                observed = "no_face"
+            elif confidence < _CAM_CONF_HIGH:
+                observed = "ambiguous"
             elif person_id == "unknown":
-                normalized = "unknown_face"
+                observed = "unknown_face"
             else:
-                normalized = person_id
+                observed = person_id
 
+            # First real observation initializes the state without emitting
             if _camera_last_id == "init":
-                _camera_last_id = normalized
+                if observed != "ambiguous":
+                    _camera_last_id = observed
+                    _camera_pending_id = observed
+                    _camera_pending_count = 0
                 continue
 
-            if normalized == _camera_last_id:
-                continue  # no transition
+            # Ambiguous frames don't reset hysteresis — they just don't
+            # contribute. This keeps a brief dip from cancelling progress.
+            if observed == "ambiguous":
+                continue
 
-            # Build a human-friendly description
+            # Same as the current confirmed state: clear any pending
+            # candidate (we're stable).
+            if observed == _camera_last_id:
+                _camera_pending_id = _camera_last_id
+                _camera_pending_count = 0
+                continue
+
+            # We have a candidate transition. Build up consecutive support.
+            if observed == _camera_pending_id:
+                _camera_pending_count += 1
+            else:
+                _camera_pending_id = observed
+                _camera_pending_count = 1
+
+            # How many consecutive frames does this transition require?
+            # Going to no_face is harder (drop-threshold); coming back is
+            # also gated (acquire-threshold).
+            if observed == "no_face":
+                threshold = _CAM_FRAMES_TO_DROP
+            else:
+                threshold = _CAM_FRAMES_TO_ACQUIRE
+
+            if _camera_pending_count < threshold:
+                continue  # not enough support yet
+
+            # Dwell-time gate: even after threshold is met, suppress if the
+            # last transition was very recent. Stops oscillation.
+            now = time.time()
+            if (now - _camera_last_emit_ts) < _CAM_DWELL_S:
+                continue
+
+            # Confirmed transition: fire the event.
             transition_descs = {
                 ("no_face", "zeke"): "Zeke entered frame",
                 ("no_face", "unknown_face"): "Unknown face appeared",
@@ -484,8 +544,8 @@ def _camera_loop(g: dict[str, Any]) -> None:
                 ("unknown_face", "zeke"): "Zeke replaced the unknown face",
             }
             desc = transition_descs.get(
-                (_camera_last_id, normalized),
-                f"Face transition: {_camera_last_id} -> {normalized}",
+                (_camera_last_id, observed),
+                f"Face transition: {_camera_last_id} -> {observed}",
             )
 
             emit_content = (
@@ -499,14 +559,14 @@ def _camera_loop(g: dict[str, Any]) -> None:
                 type="face_state_transition",
                 priority="ambient",
                 from_state=_camera_last_id,
-                to_state=normalized,
+                to_state=observed,
                 confidence=f"{confidence:.2f}",
             )
             if ok:
-                _camera_last_id = normalized
-                _camera_last_emit_ts = time.time()
-            # else: don't update _camera_last_id — retry on next tick if
-            # the channel becomes attached
+                _camera_last_id = observed
+                _camera_last_emit_ts = now
+                _camera_pending_count = 0
+            # else: don't update — channel may not be attached, retry next tick.
 
         except Exception as e:
             print(f"[attention_sources] camera_loop error: {e!r}",

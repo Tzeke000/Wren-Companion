@@ -84,6 +84,22 @@ _session_lock = threading.Lock()
 _rate_limits: dict[str, float] = {}  # source_name -> min_interval_s
 _last_emit_ts: dict[str, float] = {}  # source_name -> last emit timestamp
 
+# Subsumption window: when an `interrupt` or `attend` event fires (voice
+# wake, chat-pending, sibling letter), open a window during which
+# `ambient`-priority emits are dropped. This is the Brooks-1986
+# subsumption pattern — voice doesn't compete with ambient vision events
+# at the queue level; it overrides them for a brief follow-up window.
+# Without this, a flapping camera source can push voice events deep in
+# CC's incoming buffer where they don't surface until the next turn end.
+_SUBSUMPTION_WINDOW_S = 30.0
+_subsumption_until_ts: float = 0.0
+
+# Habituation gate floor — ambient events whose habituation-weighted score
+# falls below this are dropped at the channel layer. Non-ambient priorities
+# (attend/interrupt) ignore the gate entirely. Soft floor; tune via
+# iris_tune later if it eats too aggressively or not enough.
+_HABITUATION_GATE_FLOOR = 0.30
+
 
 def configure_rate_limit(source: str, min_interval_s: float) -> None:
     """Set a per-source rate limit. Events emitted faster than min_interval_s
@@ -136,11 +152,69 @@ async def emit(content: str, source: str = "iris", **meta: str) -> bool:
         - Write error (logs to stderr but doesn't raise — losing one event
           shouldn't kill the producer)
     """
-    global _session
+    global _session, _subsumption_until_ts
+    now = time.time()
+
+    # Diagnostic bypass: tools like channel_test pass bypass_gates=True so
+    # smoke tests aren't affected by habituation or subsumption state. The
+    # flag is removed from meta so it doesn't leak into the channel tag.
+    bypass_gates = bool(meta.pop("bypass_gates", False))
+
+    # Subsumption gate. Priority is conveyed via meta["priority"] — values
+    # are "interrupt" (voice/chat: highest), "attend" (sibling letters,
+    # mood crossings), "ambient" (camera, time-orientation, default).
+    # Higher-priority emits OPEN a subsumption window during which
+    # ambient emits are suppressed.
+    priority = str(meta.get("priority") or "ambient").lower()
+    if not bypass_gates:
+        if priority in ("interrupt", "attend"):
+            # Voice / chat / sibling: open (or extend) the subsumption window.
+            _subsumption_until_ts = now + _SUBSUMPTION_WINDOW_S
+        elif priority == "ambient":
+            # Camera / time / mood: drop if we're inside an active window.
+            if now < _subsumption_until_ts:
+                return False
+
+    # Habituation gate (ambient only). Bucket key is (source, semantic_bucket).
+    # Bucket comes from meta["habituation_bucket"] if provided, else from a
+    # composite of meta["from_state"]+meta["to_state"] (for face transitions
+    # this gives independent habituation per transition pair), else
+    # meta["type"], else "default". Different buckets habituate independently.
+    if priority == "ambient" and not bypass_gates:
+        try:
+            from brain import iris_habituation as _hab
+            # Build a specific bucket key. For camera events, (from_state,
+            # to_state) is the natural bucket. For mood events, the label
+            # is the bucket. For others, fall back to type.
+            explicit = meta.get("habituation_bucket")
+            if explicit:
+                bucket = str(explicit)
+            elif meta.get("from_state") and meta.get("to_state"):
+                bucket = f"{meta['from_state']}->{meta['to_state']}"
+            elif meta.get("label"):
+                bucket = str(meta["label"])
+            elif meta.get("type"):
+                bucket = str(meta["type"])
+            else:
+                bucket = "default"
+            key = (source, bucket)
+            # uuid suffix avoids collisions on same-millisecond emits
+            import uuid as _uuid
+            event_id = f"{source}:{bucket}:{int(now * 1000)}:{_uuid.uuid4().hex[:8]}"
+            s = _hab.score(key, base_priority=1.0, event_id=event_id, now=now)
+            if s < _HABITUATION_GATE_FLOOR:
+                return False
+            # Sweep expired actions opportunistically to bound pending dict
+            # size. Cheap — most calls find nothing to sweep.
+            _hab.sweep_expired(now=now)
+        except Exception as e:
+            # Habituation should never crash the channel. Log once and skip.
+            print(f"[iris_channel] habituation gate error (skipped): {e!r}",
+                  file=sys.stderr, flush=True)
+
     # Rate-limit gate (per source)
     limit = _rate_limits.get(source)
     if limit is not None:
-        now = time.time()
         last = _last_emit_ts.get(source, 0.0)
         if (now - last) < limit:
             return False
