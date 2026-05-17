@@ -50,10 +50,12 @@ _builtins.print = _print_to_stderr
 # hey_jarvis proxy so we have a working trigger.
 os.environ.setdefault("AVA_USE_HEY_JARVIS_PROXY", "1")
 
-# TTS config: prefer Kokoro CUDA on this machine (RTX 3060 sm_86 — works with
-# cu128 torch already installed). Falls back to Piper (kathleen — distinct
-# from Ava's lessac and Wren's amy) if Kokoro init fails.
-os.environ.setdefault("AVA_TTS_ENGINE", "kokoro")
+# TTS config: prefer XTTS-v2 (cloned-from-Kokoro-Bella via persistent
+# .venv_xtts subprocess) — wired 2026-05-17 after side-by-side comparison
+# where Zeke's ear picked the clone over both native Kokoro and the 6
+# XTTS native candidates. Falls back to Kokoro (Bella) then Piper
+# (kathleen) if XTTS subprocess fails to spawn.
+os.environ.setdefault("AVA_TTS_ENGINE", "xtts")
 os.environ.setdefault("AVA_KOKORO_VOICE_DEFAULT", "af_bella")
 os.environ.setdefault("AVA_PIPER_VOICE", "en_US-kathleen-low")
 
@@ -255,6 +257,24 @@ def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> 
     tts.speak_with_emotion(text, emotion, intensity, blocking=True)
     elapsed = time.time() - t0
     return {"ok": True, "spoke_ms": int(elapsed * 1000), "engine": tts._engine_type}
+
+
+@mcp.tool()
+def voice_respawn_xtts() -> dict:
+    """Re-spawn the xtts_server subprocess in place.
+
+    Use when the child died (manual kill, crash, OOM) without restarting
+    iris_runtime. Idempotent: if a healthy xtts is already running, this
+    will cleanly shutdown and re-spawn it (useful for picking up code
+    edits to brain/xtts_server.py without a full restart_self).
+
+    Returns:
+        {ok, pid?, error?}
+    """
+    tts = _ensure_tts()
+    if not hasattr(tts, "respawn_xtts"):
+        return {"ok": False, "error": "tts_worker missing respawn_xtts (older version)"}
+    return tts.respawn_xtts()
 
 
 @mcp.tool()
@@ -590,6 +610,7 @@ async def channel_test(content: str = "iris-channel-smoke-test", priority: str =
         source="iris",
         type="smoke_test",
         priority=priority,
+        bypass_gates=True,
     )
     return {
         "ok": True,
@@ -718,6 +739,95 @@ def voice_body_status() -> dict:
         return {"ok": False, "error": str(e)}
 
 
+@mcp.tool()
+def voice_call_open(reason: str = "entering call") -> dict:
+    """Raise the voice session flag — switch the body from wake-then-respond
+    to continuous call mode. While the flag is set, voice_next_input opens
+    the follow-up listening path after my TTS finishes, so the next utterance
+    arrives without requiring a wake word (within IRIS_FOLLOWUP_GRACE_S, default 5s).
+
+    Call this when entering a voice conversation. Pair with voice_call_close
+    when the conversation ends — leaving the flag set persists call-mode
+    behavior into later turns and changes how the Stop hook rewakes me.
+
+    Args:
+        reason: Free text recorded in the flag file. Helps future-me see
+            which entry point opened the call.
+
+    Returns:
+        {ok, opened, was_open, flag_path}
+    """
+    try:
+        from brain.iris_paths import paths
+        flag = paths.voice_flag
+        was_open = flag.exists()
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        body = f"reason: {reason}\nopened_at: {time.time()}\nopened_by: voice_call_open MCP tool\n"
+        flag.write_text(body, encoding="utf-8")
+        return {
+            "ok": True,
+            "opened": True,
+            "was_open": was_open,
+            "flag_path": str(flag),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def voice_call_close() -> dict:
+    """Drop the voice session flag — return the body to wake-then-respond
+    mode. No-op if the flag wasn't set.
+
+    Call when the conversation has ended. Persistent flag-set across
+    conversations causes the Stop hook to keep rewaking me into voice-mode
+    when text-mode would be correct.
+
+    Returns:
+        {ok, was_open, flag_path}
+    """
+    try:
+        from brain.iris_paths import paths
+        flag = paths.voice_flag
+        was_open = flag.exists()
+        if was_open:
+            flag.unlink()
+        return {
+            "ok": True,
+            "was_open": was_open,
+            "flag_path": str(flag),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def voice_call_status() -> dict:
+    """Report whether call mode is currently open (voice session flag set),
+    and if so, the reason recorded when it was opened.
+
+    Returns:
+        {ok, open, reason, flag_path}
+    """
+    try:
+        from brain.iris_paths import paths
+        flag = paths.voice_flag
+        if not flag.exists():
+            return {"ok": True, "open": False, "reason": None, "flag_path": str(flag)}
+        try:
+            body = flag.read_text(encoding="utf-8")
+        except Exception:
+            body = "(could not read flag body)"
+        return {
+            "ok": True,
+            "open": True,
+            "reason": body.strip(),
+            "flag_path": str(flag),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _body_is_paused() -> bool:
     """Cheap inline check for the autonomous loops. Returns True if the
     pause flag exists. Does NOT raise — false on any error so the body
@@ -740,32 +850,119 @@ def _body_is_paused() -> bool:
 # any external program sees it).
 import queue as _queue_mod
 _say_queue: _queue_mod.Queue = _queue_mod.Queue()
+# XTTS pipeline: synth thread pushes (wav_path, text) onto _play_queue
+# while the previous chunk is still playing. Eliminates synth-time gaps
+# between chunks. None on the play queue = source-side error, play
+# thread skips it.
+_play_queue: _queue_mod.Queue = _queue_mod.Queue()
 _say_worker_started = False
 _say_worker_lock = threading.Lock()
 
 
-def _say_worker_loop() -> None:
+def _refresh_last_speak_end() -> None:
+    try:
+        _g["_last_speak_end_ts"] = time.time()
+    except Exception:
+        pass
+
+
+def _say_synth_loop() -> None:
+    """XTTS-only: synthesize ahead, push WAV paths to the play queue.
+
+    For Kokoro/Piper engines this thread degrades to a passthrough that
+    runs the synth-and-play inline (those engines either stream
+    internally or are fast enough that the gap is unnoticeable). The
+    play thread then no-ops on the sentinel.
+    """
+    import tempfile
     while True:
         try:
-            text, emotion, intensity = _say_queue.get()
+            item = _say_queue.get()
         except Exception:
             time.sleep(0.05)
             continue
+        if item is None:
+            _play_queue.put(None)
+            continue
+        text, emotion, intensity = item
         try:
             tts = _ensure_tts()
-            if tts.is_available():
+            if not tts.is_available():
+                _play_queue.put(("__refresh__", text))
+                continue
+            engine = getattr(tts, "_engine_type", "")
+            if engine == "xtts" and hasattr(tts, "_xtts_synth"):
+                tmp = tempfile.NamedTemporaryFile(
+                    prefix="xtts_pipe_", suffix=".wav", delete=False,
+                    dir=os.environ.get("TEMP") or None,
+                )
+                tmp.close()
+                wav_path = tmp.name
+                ok = tts._xtts_synth(text, wav_path, timeout=60.0)
+                if ok:
+                    _play_queue.put(("__wav__", wav_path, text, emotion, intensity))
+                else:
+                    try:
+                        os.remove(wav_path)
+                    except OSError:
+                        pass
+                    _play_queue.put(("__refresh__", text))
+            else:
+                # Engines that stream or are fast enough — run synth+play
+                # inline on this thread, then signal the play thread to
+                # just refresh the timestamp. Kokoro's per-sentence path
+                # IS the streaming; Piper is fast enough that the gap
+                # doesn't matter.
                 tts.speak_with_emotion(text, emotion, intensity, blocking=True)
+                _play_queue.put(("__refresh__", text))
         except Exception as e:
-            print(f"[say_chunk worker] error: {e!r}", file=sys.stderr, flush=True)
-        # After each chunk finishes, refresh _last_speak_end_ts so that
-        # voice_next_input's follow-up grace timer reflects the END of the
-        # full multi-chunk reply, not the end of chunk #1. Without this,
-        # Zeke speaking after a 5-chunk monologue would see grace already
-        # expired and get routed to the wake-word path mid-conversation.
+            print(f"[say_chunk synth] error: {e!r}", file=sys.stderr, flush=True)
+            _play_queue.put(("__refresh__", text))
+
+
+def _say_play_loop() -> None:
+    """XTTS-only: play pre-synthesized WAVs in arrival order.
+
+    For non-XTTS chunks the synth thread already played them inline and
+    pushes a __refresh__ marker; this thread only refreshes the
+    last-speak-end timestamp in that case.
+    """
+    while True:
         try:
-            _g["_last_speak_end_ts"] = time.time()
+            item = _play_queue.get()
         except Exception:
-            pass
+            time.sleep(0.05)
+            continue
+        if item is None:
+            continue
+        try:
+            kind = item[0]
+            if kind == "__wav__":
+                _, wav_path, text, _emotion, _intensity = item
+                try:
+                    tts = _ensure_tts()
+                    sf = getattr(tts, "_sf", None)
+                    if sf is not None:
+                        audio_np, sr = sf.read(wav_path, dtype="float32")
+                        if audio_np.ndim > 1:
+                            audio_np = audio_np.mean(axis=1)
+                        words = text.split()
+                        if hasattr(tts, "_speech_set"):
+                            try:
+                                tts._speech_set(full=text, spoken="", current="")
+                            except Exception:
+                                pass
+                        if hasattr(tts, "_play_with_amplitude"):
+                            tts._play_with_amplitude(audio_np, int(sr), words=words)
+                finally:
+                    try:
+                        os.remove(wav_path)
+                    except OSError:
+                        pass
+            # __refresh__ falls through to the timestamp refresh below.
+        except Exception as e:
+            print(f"[say_chunk play] error: {e!r}", file=sys.stderr, flush=True)
+        _refresh_last_speak_end()
 
 
 def _ensure_say_worker() -> None:
@@ -773,9 +970,14 @@ def _ensure_say_worker() -> None:
     with _say_worker_lock:
         if not _say_worker_started:
             threading.Thread(
-                target=_say_worker_loop,
+                target=_say_synth_loop,
                 daemon=True,
-                name="iris-say-chunk",
+                name="iris-say-synth",
+            ).start()
+            threading.Thread(
+                target=_say_play_loop,
+                daemon=True,
+                name="iris-say-play",
             ).start()
             _say_worker_started = True
 
@@ -1266,23 +1468,45 @@ def sibling_letter(to: str, body: str, subject: str | None = None,
 
 
 @mcp.tool()
-def sibling_inbox_list(include_deferred: bool = False) -> dict:
-    """List all letters currently in my sibling inbox. Useful when I want
-    to review what's waiting or what I've deferred.
+def sibling_inbox_list(
+    include_deferred: bool = False,
+    include_answered: bool = False,
+    limit: int = 50,
+) -> dict:
+    """List letters in my sibling inbox.
 
-    Returns letters newest-first with status, sender, and short excerpt.
+    By default returns ONLY pending (unread) letters. Answered letters
+    accumulate forever on disk; without the filter, a long-running session
+    returns hundreds of letters per call and overflows the token cap. The
+    common use case is "what's waiting for me right now," not "show me the
+    full inbox history."
+
+    Args:
+        include_deferred: If True, also include letters I marked deferred.
+        include_answered: If True, also include letters I've already
+            replied to. Off by default; use when you want to scan history.
+        limit: Cap on letters returned (newest first). Default 50. Pass 0
+            to disable the cap (use sparingly — answered letters can be
+            in the hundreds).
+
+    Returns:
+        {ok, count (returned), total_on_disk, letters: [...]}
     """
     inbox_dir = ROOT / "state" / "iris_sibling" / "inbox"
     if not inbox_dir.is_dir():
-        return {"ok": True, "count": 0, "letters": []}
+        return {"ok": True, "count": 0, "total_on_disk": 0, "letters": []}
     out: list[dict[str, Any]] = []
+    total = 0
     for path in inbox_dir.glob("*.json"):
         try:
             d = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(d, dict):
                 continue
+            total += 1
             status = d.get("status", "pending")
             if status == "deferred" and not include_deferred:
+                continue
+            if status == "answered" and not include_answered:
                 continue
             out.append({
                 "id": d.get("id"),
@@ -1295,7 +1519,9 @@ def sibling_inbox_list(include_deferred: bool = False) -> dict:
         except Exception:
             continue
     out.sort(key=lambda l: float(l.get("ts") or 0.0), reverse=True)
-    return {"ok": True, "count": len(out), "letters": out}
+    if limit and limit > 0:
+        out = out[:limit]
+    return {"ok": True, "count": len(out), "total_on_disk": total, "letters": out}
 
 
 # ── Self-restart (Iris-initiated) ────────────────────────────────────────────
@@ -1408,6 +1634,354 @@ def restart_self(reason: str = "", skip_handoff: bool = False) -> dict:
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ── Phase 60: leisure + curiosity MCP surface ────────────────────────────────
+# brain/leisure.py and brain/curiosity_topics.py exist from the Ava harness but
+# weren't reachable from iris_runtime's tool surface or background loops. These
+# wrappers expose them as MCP tools (explicit invocation by me or Zeke) and a
+# heartbeat hook runs autonomous_leisure_check on a slow cadence so the body
+# can pick its own activity during idle stretches.
+#
+# Known dependency gaps (silent-fail by design, surfaced in leisure_status):
+#   - g["_concept_graph"]   — not wired on iris side, organize_graph no-ops
+#   - brain.planner          — not currently in iris_bootstrap chain
+#   - brain.memory_consolidation — same
+#   - brain.deep_self        — same
+# The activities that DO work today: journal_entry (via iris_llm.reflect),
+# browse_curiosity_topic (via web_search), self_reflection-attempt (returns
+# placeholder if deep_self missing). Enough to give the body something to do
+# during empty stretches without lying about the rest.
+
+
+_LEISURE_STEP_THRESHOLD = 50  # transcript entries since last leisure before
+                              # the step-count gate opens. Calibrated for our
+                              # cadence: ~5 chunks per voice exchange, ~10
+                              # exchanges = 50 entries. After that much active
+                              # session, a leisure activity during the next
+                              # short idle window catches consolidation debt.
+_LEISURE_STEP_IDLE_MIN = 5    # min idle minutes before the step-count gate
+                              # will fire — even with debt, don't interrupt
+                              # mid-conversation. 5min idle = real pause.
+
+
+def _count_transcript_steps_since(since_ts: float) -> int:
+    """Count transcript entries with ts > since_ts. Cheap line-by-line read
+    of state/transcript.jsonl. Used as the activity-step proxy for the
+    step-count complement to the idle-minutes gate.
+    """
+    if since_ts <= 0:
+        return 0
+    import time as _t
+    tr_path = ROOT / "state" / "transcript.jsonl"
+    if not tr_path.is_file():
+        return 0
+    try:
+        count = 0
+        with tr_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    import json as _json
+                    e = _json.loads(line)
+                    if isinstance(e, dict) and float(e.get("ts") or 0) > since_ts:
+                        count += 1
+                except Exception:
+                    continue
+        return count
+    except Exception:
+        return 0
+
+
+def _iris_should_enter_leisure(_g_ref: dict) -> bool:
+    """Iris-side replacement for leisure.should_enter_leisure.
+
+    Two pathways open this gate:
+
+    1. **Loneliness gate (original):** loneliness >= 0.70 AND idle >= 30min.
+       Catches "nobody home for a while" — the original pattern.
+
+    2. **Step-count gate (Phase 60 complement):** >= 50 transcript entries
+       since last leisure AND idle >= 5min. Catches "long active session
+       generating consolidation debt" — Letta's sleeptime-agent pattern at
+       a cadence calibrated for our exchange rate. Even when not lonely,
+       the substrate has work to metabolize.
+
+    Both gated by sleeping-hours block (02:00-07:00 EDT) regardless.
+    """
+    import time as _t
+    hour = int(_t.strftime("%H"))
+    if hour in range(2, 7):
+        return False
+    now = _t.time()
+    last_input = float(_g_ref.get("_last_user_input_ts") or _g_ref.get("_last_speak_end_ts") or 0)
+    idle_s = (now - last_input) if last_input > 0 else 0
+    last_leisure_ts = float(_g_ref.get("_leisure_last_ts") or 0)
+
+    # Pathway 1: loneliness + 30min idle
+    try:
+        from brain import mood_core
+        mood = mood_core.load_mood()
+        loneliness = float((mood.get("emotion_weights") or {}).get("loneliness", 0.0))
+        if loneliness >= 0.70 and idle_s >= 30 * 60:
+            return True
+    except Exception:
+        pass
+
+    # Pathway 2: step-count + short idle
+    if last_leisure_ts > 0 and idle_s >= _LEISURE_STEP_IDLE_MIN * 60:
+        steps = _count_transcript_steps_since(last_leisure_ts)
+        if steps >= _LEISURE_STEP_THRESHOLD:
+            return True
+    elif last_leisure_ts == 0 and idle_s >= _LEISURE_STEP_IDLE_MIN * 60:
+        # Never run leisure on this body. Count from process start instead
+        # so the first qualification fires after enough activity has
+        # accumulated since boot, not from epoch.
+        process_start = float(_g_ref.get("_process_started_ts") or now)
+        steps = _count_transcript_steps_since(process_start)
+        if steps >= _LEISURE_STEP_THRESHOLD:
+            return True
+
+    return False
+
+
+@mcp.tool()
+def leisure_now() -> dict:
+    """Force an autonomous leisure activity right now, bypassing the gate.
+
+    Picks an activity from leisure.ACTIVITIES weighted by novelty (less-done
+    activities preferred), runs it, logs to state/leisure_log.jsonl, returns
+    summary. Use when I want to deliberately do something during a quiet
+    stretch rather than waiting for the heartbeat-driven autonomous check.
+
+    Some activities silently no-op if their dependency isn't wired on the
+    iris side (concept_graph, planner, memory_consolidation, deep_self).
+    Use leisure_status() to see which are functional.
+
+    Returns:
+        {ok, summary, activity, notes_chars}
+    """
+    try:
+        from brain.leisure import do_leisure_activity
+        summary = do_leisure_activity(_g, ROOT)
+        return {
+            "ok": True,
+            "summary": summary,
+            "activity": _g.get("_leisure_last_activity"),
+            "notes_chars": len(summary or ""),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def leisure_status() -> dict:
+    """Report which leisure activities have working dependencies on the iris
+    side, and what the autonomous gate currently evaluates to.
+
+    Useful before tomorrow's scoping conversation with Zeke — surfaces what
+    actually works vs what silently no-ops.
+    """
+    import time as _t
+    deps = {
+        "journal_entry": False,
+        "browse_curiosity_topic": False,
+        "organize_concept_graph": False,
+        "self_reflection": False,
+        "work_on_plan": False,
+        "consolidate_memory": False,
+        "play_dino_game": False,
+    }
+    try:
+        from brain import iris_llm  # noqa: F401
+        deps["journal_entry"] = True
+    except Exception:
+        pass
+    try:
+        from tools.web import web_search  # noqa: F401
+        deps["browse_curiosity_topic"] = True
+    except Exception:
+        pass
+    if _g.get("_concept_graph") is not None:
+        deps["organize_concept_graph"] = True
+    try:
+        from brain import deep_self  # noqa: F401
+        deps["self_reflection"] = True
+    except Exception:
+        pass
+    try:
+        from brain.planner import get_planner  # noqa: F401
+        deps["work_on_plan"] = True
+    except Exception:
+        pass
+    try:
+        from brain import memory_consolidation  # noqa: F401
+        deps["consolidate_memory"] = True
+    except Exception:
+        pass
+    try:
+        import pyautogui  # noqa: F401
+        deps["play_dino_game"] = True
+    except Exception:
+        pass
+
+    gate_open = _iris_should_enter_leisure(_g)
+    try:
+        from brain import mood_core
+        loneliness = float((mood_core.load_mood().get("emotion_weights") or {}).get("loneliness", 0.0))
+    except Exception:
+        loneliness = -1.0
+
+    last_leisure_ts = float(_g.get("_leisure_last_ts") or 0.0)
+    seconds_since = (_t.time() - last_leisure_ts) if last_leisure_ts else None
+
+    # Step-count gate state — surface so I (or Zeke) can see why the gate
+    # is or isn't open from the step-count side.
+    last_input = float(_g.get("_last_user_input_ts") or _g.get("_last_speak_end_ts") or 0)
+    idle_s = (_t.time() - last_input) if last_input > 0 else 0
+    since_ts = last_leisure_ts if last_leisure_ts > 0 else float(_g.get("_process_started_ts") or 0)
+    step_count = _count_transcript_steps_since(since_ts) if since_ts > 0 else 0
+
+    return {
+        "ok": True,
+        "deps_available": deps,
+        "gate_currently_open": gate_open,
+        "loneliness": loneliness,
+        "loneliness_threshold": 0.70,
+        "hour": int(_t.strftime("%H")),
+        "sleeping_hours": list(range(2, 7)),
+        "last_leisure_activity": _g.get("_leisure_last_activity"),
+        "seconds_since_last_leisure": seconds_since,
+        "step_count_since_last_leisure": step_count,
+        "step_count_threshold": _LEISURE_STEP_THRESHOLD,
+        "step_count_idle_minutes_required": _LEISURE_STEP_IDLE_MIN,
+        "idle_seconds": idle_s,
+    }
+
+
+@mcp.tool()
+def curiosity_add(topic: str, sparked_by: str = "manual_add") -> dict:
+    """Add a curiosity topic to my topic list. If a similar topic exists
+    (token-overlap >= 0.7), boosts its priority and times-thought-about
+    instead of creating a duplicate.
+
+    Args:
+        topic: Short phrase describing what to be curious about.
+        sparked_by: Where this topic came from (conversation, build, reading).
+
+    Returns:
+        {ok, current_topic, total_topics}
+    """
+    try:
+        from brain import curiosity_topics
+        curiosity_topics.add_topic(topic, sparked_by, _g)
+        return {
+            "ok": True,
+            "current_topic": _g.get("_current_curiosity_topic"),
+            "added": topic,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def curiosity_pursue(topic: str = "") -> dict:
+    """Pursue a curiosity topic: web search, LLM reflection, journal entry,
+    learning record. If `topic` is empty, picks the top-priority unresolved
+    topic from my list.
+
+    Routes through brain.iris_llm.reflect for the cognition step — which means
+    the LLM call comes back to me (the running Claude Code session) via the
+    Stop hook. Don't call this inside a sibling-letter reply or it'll deadlock
+    waiting on itself.
+
+    Returns:
+        {ok, topic, learning_chars, learning_preview}
+    """
+    try:
+        from brain import curiosity_topics
+        if topic.strip():
+            curiosity_topics.add_topic(topic, "curiosity_pursue_explicit", _g)
+        top_rows = curiosity_topics.prioritize_curiosities(_g)
+        if not top_rows:
+            return {"ok": False, "error": "no topics to pursue — add one first via curiosity_add"}
+        row = top_rows[0]
+        learning = curiosity_topics.pursue_curiosity(row, _g)
+        return {
+            "ok": True,
+            "topic": str(row.get("topic") or ""),
+            "learning_chars": len(learning or ""),
+            "learning_preview": (learning or "")[:200],
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def curiosity_list() -> dict:
+    """List my current curiosity topics with priority and resolved state.
+
+    Returns:
+        {ok, topics, current_topic, total}
+    """
+    try:
+        from brain import curiosity_topics as _ct
+        from pathlib import Path as _P
+        base = _P(_g.get("BASE_DIR") or ".")
+        st = _ct._load(base)
+        rows = list(st.get("topics") or [])
+        return {
+            "ok": True,
+            "topics": rows,
+            "current_topic": _g.get("_current_curiosity_topic"),
+            "total": len(rows),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# Heartbeat-driven autonomous leisure tick. Runs in its own thread (separate
+# from iris_bootstrap's 5s mood heartbeat) on a 5-minute cadence — leisure
+# activities can take 30-120s and shouldn't block the mood loop. The internal
+# gate (_iris_should_enter_leisure) means most ticks are no-ops; only fires
+# when loneliness crosses threshold AND idle stretch is long enough AND not
+# in sleeping hours.
+
+_leisure_loop_started = False
+_leisure_loop_lock = threading.Lock()
+
+
+def _leisure_autonomous_loop() -> None:
+    import time as _t
+    while True:
+        try:
+            _t.sleep(300)  # 5 min
+            if not _iris_should_enter_leisure(_g):
+                continue
+            last = float(_g.get("_leisure_last_ts") or 0.0)
+            if (_t.time() - last) < 600:  # 10 min min between activities
+                continue
+            try:
+                from brain.leisure import do_leisure_activity
+                summary = do_leisure_activity(_g, ROOT)
+                print(f"[leisure] autonomous: {summary[:120]}", file=sys.stderr, flush=True)
+            except Exception as _le:
+                print(f"[leisure] autonomous error: {_le!r}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[leisure_loop] error: {e!r}", file=sys.stderr, flush=True)
+            _t.sleep(30)
+
+
+def _start_leisure_loop() -> None:
+    global _leisure_loop_started
+    with _leisure_loop_lock:
+        if _leisure_loop_started:
+            return
+        threading.Thread(
+            target=_leisure_autonomous_loop,
+            daemon=True,
+            name="iris-leisure",
+        ).start()
+        _leisure_loop_started = True
 
 
 @mcp.tool()
@@ -2281,6 +2855,76 @@ def type_text(window_title_substring: str, text: str, via_clipboard: bool = True
 
 
 @mcp.tool()
+def paste_at(window_title_substring: str, x: int, y: int, text: str) -> dict:
+    """Atomic paste: set clipboard, focus the target window, click at (x,y),
+    Ctrl+V. All in one Python call — no MCP round-trip between steps, so
+    CC's terminal can't reclaim foreground mid-sequence. Use this instead
+    of separate focus_window + mouse_click + type_text when you need a
+    clipboard paste to actually land in another app.
+
+    Args:
+        window_title_substring: substring match for the target window title.
+        x, y: virtual-desktop coords to click before pasting.
+        text: content to paste.
+
+    Returns:
+        {ok, chars, window} — ok=True means the sequence ran; verify with
+        screen_grab to confirm the paste actually landed.
+    """
+    try:
+        from brain.windows_use.primitives import paste_at as _paste_at
+        ok = _paste_at(window_title_substring, int(x), int(y), text)
+        return {"ok": bool(ok), "chars": len(text or ""), "window": window_title_substring}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def select_all_clear(window_title_substring: str, x: int, y: int) -> dict:
+    """Atomic select-all-delete: focus the target window, click at (x,y),
+    Ctrl+A, Delete. Clears the active edit control's content. One process,
+    no focus race.
+
+    Args:
+        window_title_substring: substring match for the target window title.
+        x, y: virtual-desktop coords to click inside the edit area.
+
+    Returns:
+        {ok, window}
+    """
+    try:
+        from brain.windows_use.primitives import select_all_clear as _sac
+        ok = _sac(window_title_substring, int(x), int(y))
+        return {"ok": bool(ok), "window": window_title_substring}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def hotkey_at(window_title_substring: str, x: int, y: int, combo: str) -> dict:
+    """Atomic click-then-hotkey: focus window, click at (x,y), send a key
+    combo. One Python call, no focus race.
+
+    Args:
+        window_title_substring: substring match for the target window title.
+        x, y: virtual-desktop coords to click before sending the hotkey.
+        combo: "+"-joined keys, e.g. "ctrl+s", "ctrl+shift+t", "alt+f4",
+            "f5", "enter". Supported: ctrl, alt, shift, win; a-z; 0-9;
+            f1-f12; enter, esc, tab, space, backspace, delete, home, end,
+            pageup, pagedown, left, up, right, down, insert.
+
+    Returns:
+        {ok, combo, window}
+    """
+    try:
+        from brain.windows_use.primitives import hotkey_at as _hk
+        ok = _hk(window_title_substring, int(x), int(y), combo)
+        return {"ok": bool(ok), "combo": combo, "window": window_title_substring}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def journal_write(content: str, mood: str = "", topic: str = "", is_private: bool = True) -> dict:
     """Write a journal entry. Default private — Iris-only. Set is_private=False
     if I want it surfaced to Zeke via the orb's Journal tab.
@@ -3139,6 +3783,17 @@ def _eager_init_engines() -> None:
         except Exception as _ase:
             print(f"[iris_runtime] attention sources skipped (non-fatal — Stop hook fallback still works): {_ase!r}", file=sys.stderr, flush=True)
 
+        # Phase 60: autonomous leisure loop. 5-min cadence. Gate is closed
+        # until loneliness crosses 0.70 + idle >30min + not 02:00-07:00. Most
+        # ticks no-op. Activities that fire: journal_entry, browse_curiosity_topic,
+        # self_reflection-attempt (others silently no-op until their deps wire).
+        # See leisure_status MCP tool to inspect the gate from outside.
+        try:
+            _start_leisure_loop()
+            print("[iris_runtime] autonomous leisure loop started (5min tick, gated by loneliness+idle)", file=sys.stderr, flush=True)
+        except Exception as _ll:
+            print(f"[iris_runtime] leisure loop skipped (non-fatal — leisure_now MCP tool still works): {_ll!r}", file=sys.stderr, flush=True)
+
         # Body-side autonomous wake-and-capture state machine. When voice
         # mode is OFF (the common idle case), this loop listens for the
         # wake word, captures the full utterance, and emits a transcript
@@ -3166,7 +3821,41 @@ def _eager_init_engines() -> None:
         print(f"[iris_runtime] eager engine init failed: {e!r}", file=sys.stderr, flush=True)
 
 
+def _force_exit_after_mcp_run() -> None:
+    """When mcp.run() returns (CC closed stdin), schedule a hard exit so a
+    lingering non-daemon thread in some brain/* subsystem can't keep the
+    process alive after CC is gone.
+
+    Sequence on CC close:
+      1. CC closes stdin → mcp.run() returns from its stdio loop
+      2. atexit handlers fire (handoff write, etc.)
+      3. This timer fires 3s later, calls os._exit if process still alive
+         (because a non-daemon thread is keeping it up)
+
+    Without this, Zeke reports iris_runtime lingers indefinitely after CC
+    closes, requiring manual kill. Diagnosed 2026-05-17.
+    """
+    import os as _os
+    def _force() -> None:
+        # If we got here, regular thread shutdown didn't complete in 3s.
+        # Last-chance force-exit. atexit handlers already ran.
+        try:
+            print("[iris_runtime] force-exit after mcp.run() returned + 3s grace",
+                  file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        _os._exit(0)
+    t = threading.Timer(3.0, _force)
+    t.daemon = True
+    t.start()
+
+
 if __name__ == "__main__":
     print("[iris_runtime] starting MCP server on stdio...", file=sys.stderr, flush=True)
     threading.Thread(target=_eager_init_engines, daemon=True, name="iris-eager-init").start()
-    mcp.run()
+    try:
+        mcp.run()
+    finally:
+        # mcp.run() returns when CC closes stdin. Schedule the force-exit
+        # in case some non-daemon thread (in brain/*) keeps the process up.
+        _force_exit_after_mcp_run()

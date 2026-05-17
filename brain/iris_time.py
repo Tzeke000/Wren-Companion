@@ -235,54 +235,30 @@ def time_awareness_report() -> dict[str, Any]:
     except Exception:
         pass
 
-    # What happened during the gap (other than ticks)
+    # What happened during the gap (other than ticks). Refactored 2026-05-17
+    # to use brain.gap_delta — the read-since-timestamp pattern was duplicated
+    # here and in scripts/voice_stop_hook.py with subtle differences. Both
+    # now route through count_since.
     gap_evidence: list[str] = []
     base = _BASE if _BASE is not None else Path(".")
     try:
-        # Inner monologue ticks?
-        im_path = base / "state" / "iris_inner_monologue.jsonl"
-        if im_path.is_file() and last_attach > 0:
-            new_thoughts = 0
-            for line in im_path.read_text(encoding="utf-8").splitlines():
-                try:
-                    e = json.loads(line)
-                    if isinstance(e, dict) and float(e.get("ts") or 0) > last_attach:
-                        new_thoughts += 1
-                except Exception:
-                    pass
-            if new_thoughts:
-                gap_evidence.append(f"{new_thoughts} inner thought(s) recorded")
+        from brain.gap_delta import count_since
+        sources = [
+            (base / "state" / "iris_inner_monologue.jsonl", "inner thought(s) recorded"),
+            (base / "state" / "iris_memory.jsonl",          "memory(ies) added"),
+            (base / "state" / "transcript.jsonl",           "transcript turn(s)"),
+            (base / "state" / "leisure_log.jsonl",          "leisure activity/ies"),
+        ]
+        for path, label in sources:
+            try:
+                n = count_since(path, last_attach)
+                if n:
+                    gap_evidence.append(f"{n} {label}")
+            except Exception:
+                continue
     except Exception:
-        pass
-    try:
-        mem_path = base / "state" / "iris_memory.jsonl"
-        if mem_path.is_file() and last_attach > 0:
-            new_mem = 0
-            for line in mem_path.read_text(encoding="utf-8").splitlines():
-                try:
-                    e = json.loads(line)
-                    if isinstance(e, dict) and float(e.get("ts") or 0) > last_attach:
-                        new_mem += 1
-                except Exception:
-                    pass
-            if new_mem:
-                gap_evidence.append(f"{new_mem} memory(ies) added")
-    except Exception:
-        pass
-    try:
-        tr_path = base / "state" / "transcript.jsonl"
-        if tr_path.is_file() and last_attach > 0:
-            new_turns = 0
-            for line in tr_path.read_text(encoding="utf-8").splitlines():
-                try:
-                    e = json.loads(line)
-                    if isinstance(e, dict) and float(e.get("ts") or 0) > last_attach:
-                        new_turns += 1
-                except Exception:
-                    pass
-            if new_turns:
-                gap_evidence.append(f"{new_turns} transcript turn(s)")
-    except Exception:
+        # Defensive fallback — if brain.gap_delta can't be imported, leave
+        # gap_evidence empty rather than block the whole report.
         pass
 
     # Time-of-day register (circadian)
