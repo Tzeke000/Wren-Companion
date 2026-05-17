@@ -68,7 +68,22 @@ def _journal_entry(g: dict[str, Any], base: Path) -> str:
 
 
 def _browse_curiosity(g: dict[str, Any]) -> str:
-    # Phase 89: use enhanced pursue_curiosity if topics available
+    # Recursive-why pursuit (preferred). Falls back to single-shot pursue_curiosity
+    # if recursion fails, then to web-search-only browse. No-worse-than-before
+    # at every level (defensive-fallback discipline).
+    try:
+        from brain.curiosity_topics import prioritize_curiosities, pursue_curiosity_recursive
+        top = prioritize_curiosities(g)
+        if top:
+            chain = pursue_curiosity_recursive(top[0], g)
+            depth = int(chain.get("depth_reached", 0))
+            term = str(chain.get("terminated_by") or "")
+            topic = str(top[0].get("topic", ""))[:50]
+            if depth >= 1:
+                return f"Recursive-why on '{topic}' — depth {depth}, stopped: {term[:60]}"
+            # If recursion produced nothing usable, fall through to single-shot
+    except Exception:
+        pass
     try:
         from brain.curiosity_topics import prioritize_curiosities, pursue_curiosity
         top = prioritize_curiosities(g)
