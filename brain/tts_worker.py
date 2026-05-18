@@ -352,10 +352,18 @@ class TTSWorker:
                 finally:
                     _set_live_amplitude(0.0)
                     self._set_speaking_state(False, 0.0)
-                    # Stamp the global last-speak-end so voice_loop drops into
-                    # attentive after question_engine / proactive / greeting
-                    # speech, not just after run_ava replies.
-                    if self._g is not None:
+                    # Stamp the global last-speak-end ONLY if the queue is
+                    # empty — i.e., this was the LAST chunk in the sequence.
+                    # Stamping per-chunk creates a race where voice_next_input's
+                    # followup-grace opens the mic during subsequent chunks,
+                    # capturing my own TTS audio instead of Zeke's reply.
+                    # Per Zeke's 2026-05-18 voice-call diagnosis: the
+                    # followup-grace must reflect end-of-sequence, not
+                    # end-of-each-chunk. Worked before XTTS chunk-pipeline
+                    # shipped (commit 2d64d9d 2026-05-16) because Kokoro's
+                    # single-call path didn't have multi-chunk sequencing;
+                    # XTTS reply-as-chunks made the per-chunk stamp wrong.
+                    if self._g is not None and self._queue.empty():
                         try:
                             self._g["_last_speak_end_ts"] = time.time()
                         except Exception:

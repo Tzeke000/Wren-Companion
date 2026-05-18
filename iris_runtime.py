@@ -556,7 +556,7 @@ def _voice_next_input_inner(stt: Any, timeout: float) -> dict:
     #     tolerate before deciding the turn is done.
     #   max_speech_seconds — safety upper bound on a single turn (5 min default).
     follow_up_pre_timeout_s = float(os.environ.get("IRIS_FOLLOWUP_PRE_TIMEOUT_S", "8.0"))
-    follow_up_speech_grace_s = float(os.environ.get("IRIS_FOLLOWUP_GRACE_S", "5.0"))
+    follow_up_speech_grace_s = float(os.environ.get("IRIS_FOLLOWUP_GRACE_S", "8.0"))
     try:
         voice_flag_set = (ROOT / ".tmp" / "voice_session.flag").exists()
     except Exception:

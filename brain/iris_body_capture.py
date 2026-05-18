@@ -57,8 +57,11 @@ _MAX_SPEECH_SECONDS = 300.0    # hung-stream safety cap
 
 # Follow-up window: after Iris finishes speaking, listen without wake word
 # for this many seconds. Mirrors voice_next_input's
-# IRIS_FOLLOWUP_GRACE_S=5.0 default.
-_FOLLOWUP_GRACE_S = 5.0
+# IRIS_FOLLOWUP_GRACE_S=8.0 default. Bumped from 5.0 → 8.0 on 2026-05-18 ~03:18 EDT
+# during voice call with Zeke pre-deployment; 5s was too short for conversational
+# pace (he'd start speaking ~3-6s after my TTS finished, missing the window
+# every time). Activates on next iris_runtime restart.
+_FOLLOWUP_GRACE_S = 8.0
 
 # Sleep when gates fail (voice mode active, paused, no channel). Re-check
 # at this cadence.
