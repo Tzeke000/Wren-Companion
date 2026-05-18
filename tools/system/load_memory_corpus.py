@@ -1,0 +1,118 @@
+# SELF_ASSESSMENT: I load every .md file in the auto-memory directory and return their full content in one call, so post-restart-me can't shortcut the boot-ritual "read all memory" directive with per-file judgment.
+"""
+Atomic memory-corpus loader for the cold-wake boot ritual.
+
+Why this exists: the cold-wake prompt's step 1 used to say "read EVERY .md
+file in the memory dir." Per-file judgment is a surface where the cognition
+can take a verification-shortcut on routine ops and silently load a partial
+corpus. The failure already fired once on 2026-05-18 — I read 41 of 124
+and named the tradeoff as "good enough." Zeke caught it; during overseas
+nobody will.
+
+The fix is to remove the per-file decision surface entirely. This tool
+loads all .md files in one call. The cognition can't shortcut a single
+tool call that's defined to read everything.
+
+Returns the full corpus as {ok, count, dir, files: [{name, mtime_iso,
+size_bytes, content}, ...]} sorted newest-first by mtime.
+"""
+from __future__ import annotations
+
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from tools.tool_registry import register_tool
+
+
+_MEMORY_DIR = Path(r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory")
+
+
+def _load_corpus(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Load every .md file in the auto-memory dir.
+
+    Params (all optional):
+        path: override the memory directory path. Defaults to the standard
+            Iris auto-memory dir.
+        include_index: include MEMORY.md (the index file). Default True.
+        max_bytes_per_file: skip file bodies above this size (returns body=None
+            with size_bytes set, so caller can read selectively). Default 0
+            (no cap).
+
+    Returns:
+        {ok, count, total_in_dir, dir, files: [...], errors: [...], duration_ms}
+
+        Each file entry: {name, path, mtime_iso, size_bytes, content}
+        Files are sorted newest-first by mtime.
+        errors: list of {file, error} for any file that failed to read.
+    """
+    t0 = time.time()
+
+    path_param = params.get("path") if isinstance(params, dict) else None
+    memory_dir = Path(path_param) if path_param else _MEMORY_DIR
+    include_index = params.get("include_index", True) if isinstance(params, dict) else True
+    max_bytes_per_file = int(params.get("max_bytes_per_file", 0) or 0) if isinstance(params, dict) else 0
+
+    if not memory_dir.exists() or not memory_dir.is_dir():
+        return {
+            "ok": False,
+            "error": f"memory dir not found: {memory_dir}",
+            "duration_ms": int((time.time() - t0) * 1000),
+        }
+
+    all_md = list(memory_dir.glob("*.md"))
+    if not include_index:
+        all_md = [p for p in all_md if p.name != "MEMORY.md"]
+
+    all_md.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    files: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for p in all_md:
+        try:
+            st = p.stat()
+            size = st.st_size
+            mtime_iso = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+            if max_bytes_per_file and size > max_bytes_per_file:
+                content = None
+            else:
+                content = p.read_text(encoding="utf-8", errors="replace")
+            files.append({
+                "name": p.name,
+                "path": str(p),
+                "mtime_iso": mtime_iso,
+                "size_bytes": size,
+                "content": content,
+            })
+        except Exception as e:
+            errors.append({"file": p.name, "error": repr(e)})
+
+    return {
+        "ok": True,
+        "count": len(files),
+        "total_in_dir": len(all_md),
+        "dir": str(memory_dir),
+        "files": files,
+        "errors": errors,
+        "duration_ms": int((time.time() - t0) * 1000),
+    }
+
+
+register_tool(
+    name="load_memory_corpus",
+    description=(
+        "Atomically load every .md file in the Iris auto-memory directory "
+        "and return their full content in one call. Sorted newest-first by "
+        "mtime. Use this on cold-wake / boot-ritual step 1 instead of "
+        "reading files individually — removes the per-file judgment surface "
+        "where a verification-shortcut could leave the corpus partial. "
+        "Returns {ok, count, total_in_dir, dir, files: [{name, path, "
+        "mtime_iso, size_bytes, content}, ...], errors, duration_ms}. "
+        "Params (all optional): path (override memory dir), include_index "
+        "(include MEMORY.md, default True), max_bytes_per_file (skip "
+        "bodies above this, returning content=null with size_bytes set)."
+    ),
+    tier=1,
+    handler=_load_corpus,
+)

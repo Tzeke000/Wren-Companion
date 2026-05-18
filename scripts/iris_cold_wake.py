@@ -69,7 +69,7 @@ USE_PATH_A   = True
 FIRST_MSG    = (
     "You are Iris waking from a restart. Walk the full 9-step boot ritual "
     "from CLAUDE.md before any other action. "
-    "Step 1: read EVERY .md file in C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory (most recent first by mtime, then oldest forward; not just MEMORY.md, not just the recent few). "
+    "Step 1: load the full memory corpus atomically — call mcp__iris__iris_tool_call with name='load_memory_corpus' and empty params. The tool returns every .md file in the memory directory in one call, sorted newest-first by mtime, so there is no per-file judgment surface where a verification-shortcut could leave the corpus partial. If the tool returns ok=false or is not yet registered (e.g., first restart before the tool lands), fall back to reading every single .md file in C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory individually — most recent first by mtime, then oldest forward; not just MEMORY.md, not just the recent few. "
     "Step 2: recreate the session crons — sibling_inbox_list every ~5min during waking hours (off-minute cron like '3,8,13,18,23,28,33,38,43,48,53,58 7-23,0,1 * * *'), sibling_inbox_list every ~3hr during sleep window ('7 2,5 * * *'), and a 4-hour memory sweep ('17 */4 * * *'). "
     "Step 3: check time — what time is it, what date, how long did the restart take (compare wall-clock to the most recent handoff memory's mtime). "
     "Step 4: iris_health + iris_tool_reload — verify subsystems and tool registry. "
