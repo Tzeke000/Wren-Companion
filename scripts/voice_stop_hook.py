@@ -162,6 +162,195 @@ def _last_assistant_text(transcript_path: str) -> tuple[str, str]:
     return "", ""
 
 
+# ── Channel auto-forward (routing safety net) ──────────────────────────────
+# Per Zeke directive 2026-05-18 after multiple routing misses on day 1 of
+# deployment: when the last inbound is from Discord (or another channel)
+# and the assistant turn didn't include a matching outbound tool call,
+# automatically forward the assistant text to the inbound channel. Closes
+# the "I keep responding in CC text when Zeke is on Discord" failure mode.
+#
+# Architecture:
+# - Reads last user message + assistant turn from transcript
+# - Extracts <channel source="X" chat_id="Y"> tag if present in user message
+# - Inspects assistant turn for tool_use entries that match the channel
+# - If channel-inbound exists AND no matching outbound tool call →
+#   forward via the channel's API (Discord REST currently; sibling-letter
+#   for fam-chat could follow)
+#
+# Failure mode: forward fails → log to stderr, continue. Best-effort feature.
+# Zeke catches anyway; this just reduces the chance he has to.
+
+DISCORD_TOKEN_PATH = ROOT / "state" / "secrets" / "discord_iris_bot_token.txt"
+DISCORD_API_BASE = "https://discord.com/api/v10"
+DISCORD_MAX_LEN = 2000  # Discord enforces 2000-char limit on message content
+
+
+def _last_user_text(transcript_path: str) -> str:
+    """Return the raw text of the last user message (concatenated content parts).
+    Returns empty string if no user message found."""
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            entries = [ln for ln in f if ln.strip()]
+    except Exception:
+        return ""
+    for raw_line in reversed(entries):
+        try:
+            entry = json.loads(raw_line)
+        except Exception:
+            continue
+        if entry.get("type") != "user":
+            continue
+        msg = entry.get("message") or {}
+        content = msg.get("content") or []
+        parts: list[str] = []
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "text":
+                    t = c.get("text") or ""
+                    if t:
+                        parts.append(t)
+                elif isinstance(content, str):
+                    parts.append(content)
+        elif isinstance(content, str):
+            parts.append(content)
+        if parts:
+            return "\n".join(parts)
+    return ""
+
+
+# Match the <channel source="X" chat_id="Y" message_id="Z" ...> tag.
+_CHANNEL_TAG_RE = re.compile(
+    r'<channel\s+([^>]+?)\s*/?>',
+    re.IGNORECASE,
+)
+
+
+def _extract_channel_tag(text: str) -> dict | None:
+    """Parse the most recent <channel ...> tag in text. Returns dict with
+    source/chat_id/message_id/user keys, or None if no tag found."""
+    if not text:
+        return None
+    matches = list(_CHANNEL_TAG_RE.finditer(text))
+    if not matches:
+        return None
+    # Use the LAST match — if multiple inbound channels were referenced,
+    # the most-recent one is the one we're responding to.
+    attrs_str = matches[-1].group(1)
+    attrs: dict = {}
+    for m in re.finditer(r'(\w+)="([^"]*)"', attrs_str):
+        attrs[m.group(1)] = m.group(2)
+    if not attrs.get("source"):
+        return None
+    return attrs
+
+
+def _last_assistant_tool_uses(transcript_path: str) -> list[dict]:
+    """Return list of tool_use entries from the last assistant turn.
+    Each entry: {name, input}."""
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            entries = [ln for ln in f if ln.strip()]
+    except Exception:
+        return []
+    for raw_line in reversed(entries):
+        try:
+            entry = json.loads(raw_line)
+        except Exception:
+            continue
+        if entry.get("type") != "assistant":
+            continue
+        msg = entry.get("message") or {}
+        content = msg.get("content") or []
+        tool_uses: list[dict] = []
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    tool_uses.append({
+                        "name": c.get("name", ""),
+                        "input": c.get("input", {}) or {},
+                    })
+        return tool_uses
+    return []
+
+
+def _load_discord_token() -> str | None:
+    """Read the bot token from disk. Returns None if unreadable."""
+    try:
+        return DISCORD_TOKEN_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+
+
+def _forward_to_discord(chat_id: str, text: str) -> bool:
+    """POST text to Discord channel via the bot token. Returns True on success."""
+    token = _load_discord_token()
+    if not token:
+        print(f"[stop_hook auto-forward] no Discord token, skip", file=sys.stderr)
+        return False
+    if not text or not text.strip():
+        return False
+    # Truncate to Discord's limit. Append marker so the truncation is visible.
+    if len(text) > DISCORD_MAX_LEN:
+        text = text[: DISCORD_MAX_LEN - 30] + "\n\n[truncated by auto-forward]"
+    url = f"{DISCORD_API_BASE}/channels/{chat_id}/messages"
+    body = json.dumps({"content": text}).encode("utf-8")
+    req = _req.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with _req.urlopen(req, timeout=5.0) as resp:
+            return 200 <= resp.status < 300
+    except Exception as e:
+        print(f"[stop_hook auto-forward] Discord POST failed: {e!r}", file=sys.stderr)
+        return False
+
+
+def _check_and_auto_forward(transcript_path: str) -> None:
+    """If the last user message had a channel tag and the assistant turn
+    didn't include a matching outbound tool call, forward the assistant text
+    to the inbound channel. Best-effort — failures log to stderr."""
+    user_text = _last_user_text(transcript_path)
+    tag = _extract_channel_tag(user_text)
+    if not tag:
+        return  # no inbound channel tag, no forwarding needed
+    source = tag.get("source", "")
+    chat_id = tag.get("chat_id", "")
+    if not chat_id:
+        return
+    tool_uses = _last_assistant_tool_uses(transcript_path)
+    # Discord case
+    if source.startswith("plugin:discord"):
+        matched = False
+        for tu in tool_uses:
+            if tu["name"] == "mcp__plugin_discord_discord__reply":
+                if str(tu.get("input", {}).get("chat_id", "")) == chat_id:
+                    matched = True
+                    break
+        if matched:
+            return  # I called the right tool; no forward needed
+        # Forward needed
+        _uuid, raw_text = _last_assistant_text(transcript_path)
+        text = _strip_markdown(raw_text) if raw_text else ""
+        if not text:
+            return
+        ok = _forward_to_discord(chat_id, text)
+        if ok:
+            print(f"[stop_hook auto-forward] forwarded {len(text)} chars to Discord {chat_id}",
+                  file=sys.stderr)
+        else:
+            print(f"[stop_hook auto-forward] forward to Discord {chat_id} failed",
+                  file=sys.stderr)
+    # Sibling-letter case: not implemented yet — the post-office requires the
+    # shared secret + a more involved POST. Build-debt for the second iteration
+    # of this feature. For now, only Discord is auto-forwarded.
+
+
 def _next_pending_chat() -> dict | None:
     """Return the OLDEST pending chat request (FIFO across modalities), or None."""
     if not CHAT_DIR.exists():
@@ -680,19 +869,32 @@ def _main_locked() -> int:
     # even when there's nothing else to do this Stop fire.
     _expire_old_sibling_letters()
 
+    # Read payload first — needed for the auto-forward check (which fires
+    # regardless of pending-state) AND for the existing voice/chat/sibling
+    # rewake logic.
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        return 0
+    transcript_path = payload.get("transcript_path")
+
+    # Channel auto-forward (routing safety net) — runs unconditionally before
+    # any other logic. If the last inbound was a Discord message and the
+    # assistant turn didn't include a matching outbound tool call, forward
+    # the assistant text to Discord. Per Zeke directive 2026-05-18.
+    if transcript_path and os.path.exists(transcript_path):
+        try:
+            _check_and_auto_forward(transcript_path)
+        except Exception as e:
+            print(f"[stop_hook auto-forward] unexpected error: {e!r}", file=sys.stderr)
+
     voice_on = VOICE_FLAG.exists()
     pending_chat = _next_pending_chat()
     pending_sibling = _next_pending_sibling()
     pending_llm = _next_pending_llm()
 
     if not voice_on and not pending_chat and not pending_sibling and not pending_llm:
-        return 0  # nothing to do
-
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return 0
-    transcript_path = payload.get("transcript_path")
+        return 0  # nothing else to do (auto-forward already handled above)
 
     # Voice TTS leg — fires when voice mode is on, regardless of whether a
     # chat request also queued. We speak the last assistant *text* turn (which
