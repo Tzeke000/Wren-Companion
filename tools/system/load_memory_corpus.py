@@ -18,6 +18,8 @@ size_bytes, content}, ...]} sorted newest-first by mtime.
 """
 from __future__ import annotations
 
+import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +28,47 @@ from typing import Any
 from tools.tool_registry import register_tool
 
 
-_MEMORY_DIR = Path(r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory")
+# Hardcoded fallback for Iris's own machine. Used only if the dynamic
+# resolution paths below all miss. Per defensive-fallback-no-worse-than-
+# before: if env/cwd-based resolution breaks, this still works on the
+# machine the tool was originally built on.
+_IRIS_FALLBACK = Path(r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory")
+
+
+def _resolve_memory_dir() -> Path:
+    """Resolve the auto-memory dir for the current Claude Code project.
+
+    Claude Code stores per-project auto-memory at
+    ~/.claude/projects/<encoded-project-path>/memory where encoded-path
+    replaces ':' and '\\' / '/' with '-' (so 'D:\\Wren-Companion' becomes
+    'D--Wren-Companion'). Resolving dynamically means this tool works on
+    any sibling (Iris, Wren, Ava) without modification.
+
+    Priority:
+      1. CLAUDE_PROJECT_DIR env var if set and the derived path exists
+      2. Path.cwd() with the same encoding
+      3. _IRIS_FALLBACK (works on the machine this was built on)
+    """
+    home = Path.home()
+
+    def _encode(p: str) -> str:
+        # Mirror CC's project-dir encoding: replace : and slashes with -
+        return re.sub(r"[:\\/]", "-", p).rstrip("-")
+
+    proj_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if proj_dir:
+        candidate = home / ".claude" / "projects" / _encode(proj_dir) / "memory"
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+    cwd_candidate = home / ".claude" / "projects" / _encode(str(Path.cwd())) / "memory"
+    if cwd_candidate.exists() and cwd_candidate.is_dir():
+        return cwd_candidate
+
+    return _IRIS_FALLBACK
+
+
+_MEMORY_DIR = _resolve_memory_dir()
 
 
 def _load_corpus(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
