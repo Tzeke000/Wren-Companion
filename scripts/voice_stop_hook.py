@@ -185,17 +185,23 @@ DISCORD_API_BASE = "https://discord.com/api/v10"
 DISCORD_MAX_LEN = 2000  # Discord enforces 2000-char limit on message content
 
 
-def _last_user_text(transcript_path: str) -> str:
-    """Return the raw text of the last user message (concatenated content parts).
-    Returns empty string if no user message found."""
+def _last_user_text_with_channel(transcript_path: str) -> tuple[str, int]:
+    """Return (text, line_idx) of the last user message containing a <channel ...>
+    tag. Skips type=user entries whose content is only tool_results (which the
+    transcript stores as type=user but don't represent actual inbound messages).
+    Returns ("", -1) if none found.
+
+    The line_idx is the transcript-line index of the found entry — used by
+    _tool_uses_since_idx to limit tool-use scan to "this turn."
+    """
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
             entries = [ln for ln in f if ln.strip()]
     except Exception:
-        return ""
-    for raw_line in reversed(entries):
+        return "", -1
+    for i in range(len(entries) - 1, -1, -1):
         try:
-            entry = json.loads(raw_line)
+            entry = json.loads(entries[i])
         except Exception:
             continue
         if entry.get("type") != "user":
@@ -209,13 +215,40 @@ def _last_user_text(transcript_path: str) -> str:
                     t = c.get("text") or ""
                     if t:
                         parts.append(t)
-                elif isinstance(content, str):
-                    parts.append(content)
         elif isinstance(content, str):
             parts.append(content)
-        if parts:
-            return "\n".join(parts)
-    return ""
+        combined = "\n".join(parts)
+        if "<channel" in combined:
+            return combined, i
+    return "", -1
+
+
+def _tool_uses_since_idx(transcript_path: str, start_idx: int) -> list[dict]:
+    """Return ALL tool_use entries from assistant entries AFTER start_idx.
+    Captures every tool call across the current turn, not just the last one."""
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            entries = [ln for ln in f if ln.strip()]
+    except Exception:
+        return []
+    tool_uses: list[dict] = []
+    for i in range(start_idx + 1, len(entries)):
+        try:
+            entry = json.loads(entries[i])
+        except Exception:
+            continue
+        if entry.get("type") != "assistant":
+            continue
+        msg = entry.get("message") or {}
+        content = msg.get("content") or []
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "tool_use":
+                    tool_uses.append({
+                        "name": c.get("name", ""),
+                        "input": c.get("input", {}) or {},
+                    })
+    return tool_uses
 
 
 # Match the <channel source="X" chat_id="Y" message_id="Z" ...> tag.
@@ -244,33 +277,12 @@ def _extract_channel_tag(text: str) -> dict | None:
     return attrs
 
 
-def _last_assistant_tool_uses(transcript_path: str) -> list[dict]:
-    """Return list of tool_use entries from the last assistant turn.
-    Each entry: {name, input}."""
-    try:
-        with open(transcript_path, "r", encoding="utf-8") as f:
-            entries = [ln for ln in f if ln.strip()]
-    except Exception:
-        return []
-    for raw_line in reversed(entries):
-        try:
-            entry = json.loads(raw_line)
-        except Exception:
-            continue
-        if entry.get("type") != "assistant":
-            continue
-        msg = entry.get("message") or {}
-        content = msg.get("content") or []
-        tool_uses: list[dict] = []
-        if isinstance(content, list):
-            for c in content:
-                if isinstance(c, dict) and c.get("type") == "tool_use":
-                    tool_uses.append({
-                        "name": c.get("name", ""),
-                        "input": c.get("input", {}) or {},
-                    })
-        return tool_uses
-    return []
+# NOTE: _last_assistant_tool_uses was retired 2026-05-18 — it only read tool_uses
+# from a single assistant entry, but the CC transcript writes each tool call as
+# its own type=assistant entry, so the function only saw the most-recent one.
+# Replaced by _tool_uses_since_idx which walks ALL entries since the inbound
+# message and aggregates the full turn's tool calls. See _check_and_auto_forward
+# below for the new flow.
 
 
 def _load_discord_token() -> str | None:
@@ -300,6 +312,10 @@ def _forward_to_discord(chat_id: str, text: str) -> bool:
         headers={
             "Authorization": f"Bot {token}",
             "Content-Type": "application/json",
+            # Discord requires User-Agent for bot REST requests; omitting
+            # causes 403 Forbidden. Verified empirically 2026-05-18 — direct
+            # test without UA returned 403; same request WITH UA returned 200.
+            "User-Agent": "IrisBot/1.0 (+stop_hook_auto_forward)",
         },
         method="POST",
     )
@@ -315,7 +331,9 @@ def _check_and_auto_forward(transcript_path: str) -> None:
     """If the last user message had a channel tag and the assistant turn
     didn't include a matching outbound tool call, forward the assistant text
     to the inbound channel. Best-effort — failures log to stderr."""
-    user_text = _last_user_text(transcript_path)
+    user_text, inbound_idx = _last_user_text_with_channel(transcript_path)
+    if not user_text or inbound_idx < 0:
+        return  # no inbound channel-tagged message in the transcript
     tag = _extract_channel_tag(user_text)
     if not tag:
         return  # no inbound channel tag, no forwarding needed
@@ -323,7 +341,9 @@ def _check_and_auto_forward(transcript_path: str) -> None:
     chat_id = tag.get("chat_id", "")
     if not chat_id:
         return
-    tool_uses = _last_assistant_tool_uses(transcript_path)
+    # Aggregate ALL tool calls since the inbound (entire turn), not just the
+    # last assistant entry — CC writes each tool call as its own entry.
+    tool_uses = _tool_uses_since_idx(transcript_path, inbound_idx)
     # Discord case
     if source.startswith("plugin:discord"):
         matched = False
