@@ -69,3 +69,9 @@ setup/bootstrap_*.log
 
 # Scratch / one-off scripts
 .tmp/
+
+# XTTS-v2 isolated venv — per-machine, recreated by bootstrap
+.venv_xtts/
+
+# Art received from Zeke (his photos, not mine to publish)
+art/received/

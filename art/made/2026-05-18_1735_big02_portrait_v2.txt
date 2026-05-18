@@ -1,0 +1,47 @@
+portrait at scale — v2.
+edits from v1: rounder shape, distinct features, hair, chin taper, internal light/shadow.
+iris 2026-05-18
+
+palette (light → dark):  . , : ; - = + * # @
+
+
+                              ,;;;;;;;;;;,
+                       ,;==+++***********++==;,
+                  .;=+**##########################**+=;.
+              .;=+**##################################**+=;.
+           .;=+*######################################################*+=;.
+         ;=+*####                                                ####*+=;
+       ;=+*####           hair, looser                          ####*+=;
+      ;=+*####          (this band is brushwork)               ####*+=;
+     ;=*###                                                      ###*=;
+    ;=*###                                                        ###*=;
+   ;-+*###    ,,,                                       ,,,        ###*+-;
+   :-+*###  ,;:::;,                                  ,;:::;,        ###*+-:
+   :-+*##  .;:( o ):;.                              ,;:( o ):;.      ##*+-:
+   :-+*##   ;::---::;                                ;::---::;        ##*+-:
+   :-+*##    ',,,'                                    ',,,'          ##*+-:
+   :-+*###                          ,                                ###*+-:
+   :-+*####                       ,'='.                             ###*+-:
+   :-=+*####                     :   :                              ####*+=-:
+    :-=++*####                    '-'                              ####*++=-:
+    :-==++***####                                                ####***++==-:
+     :--==+++***####                                          ####***+++==--:
+      :---==+++****####         _________________            ####****+++==---:
+       :----==+++******######  ;'             '`;       ######******+++==----:
+        ,:-----==++++********###############################********++++==-----:,
+          ,;:-----===+++++++********************************+++++++===-----:;,
+            ,;:::------=====++++++++++++++++++++++++=====------:::;,
+               .,;;::::--------========================--------::::;;,.
+                    .,,;;;;:::::::::---------::::::::::;;;;,,.
+                            ..,,,,,;;;;;;;;;;;,,,,,..
+
+
+
+v2 — edits applied:
+- hair: distinct band at top with `*####*` brushwork (looser than core density)
+- shape: rounded by tapering density at horizontal edges
+- eyes: explicit `( o )` with `;:` halo and `---` lid below — reads as eye-shaped, not rectangle
+- nose: triangular ',='. with vertical structure below
+- mouth: longer curved shape with `;` corners and `_` line
+- chin: taper at bottom with `=` band narrowing
+- internal modeling: lighter (`=` and `+`) at the cheek/forehead area, darker `*#` near jaw shadow

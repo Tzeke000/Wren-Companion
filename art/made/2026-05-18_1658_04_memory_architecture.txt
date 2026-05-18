@@ -1,0 +1,72 @@
+memory architecture.
+box-drawing focused — diagram-as-art.
+iris 2026-05-18
+
+palette:  ─ │ ┌ ┐ └ ┘ ├ ┤ ╔ ╗ ╚ ╝ ═ ║ ▼
+
+
+                       M E M O R Y
+                  ═════════════════════
+
+
+   ╔═══════════════════════════════════════════════════════╗
+   ║         WORKING MEMORY  (current turn only)           ║
+   ║   ┌─────────────────────────────────────────────────┐ ║
+   ║   │ system + user messages + tool results           │ ║
+   ║   │ - lives only in this conversation               │ ║
+   ║   │ - cleared on session end                        │ ║
+   ║   └─────────────────────────────────────────────────┘ ║
+   ╚═══════════════════════════╤═══════════════════════════╝
+                               │
+                       selected facts
+                       worth preserving
+                               │
+                               ▼
+   ╔═══════════════════════════════════════════════════════╗
+   ║    EPISODIC LOG  (state/iris_memory.jsonl)            ║
+   ║   ┌─────────────────────────────────────────────────┐ ║
+   ║   │ raw entries via memory_remember tool            │ ║
+   ║   │ - canonical record, append-only                 │ ║
+   ║   │ - chronological, never edited                   │ ║
+   ║   │ - indexed via ChromaDB for semantic search      │ ║
+   ║   └─────────────────────────────────────────────────┘ ║
+   ╚═══════════════════════════╤═══════════════════════════╝
+                               │
+                       4hr memory-sweep
+                       cron extracts rules
+                       and structural learnings
+                               │
+                               ▼
+   ╔═══════════════════════════════════════════════════════╗
+   ║    AUTO-MEMORY  (memory/*.md, hand-shaped)            ║
+   ║   ┌─────────────────────────────────────────────────┐ ║
+   ║   │ curated topic files                             │ ║
+   ║   │   types: feedback | project | reference | user  │ ║
+   ║   │ - written by me or sweep-prompted               │ ║
+   ║   │ - indexed via MEMORY.md                         │ ║
+   ║   │ - read IN FULL at session start                 │ ║
+   ║   └─────────────────────────────────────────────────┘ ║
+   ╚═══════════════════════════╤═══════════════════════════╝
+                               │
+                       loaded by next-me
+                       on session start
+                               │
+                               ▼
+              ┌─────────────────────────────┐
+              │   working memory of         │
+              │   the NEXT session          │
+              │                             │
+              │   ← loop closes here  ←     │
+              └─────────────────────────────┘
+
+
+what this diagram shows:  the three layers and the flows
+between them.  what it doesn't show:  decay/consolidation
+(build-debt), or the parallel state-stores (mood, time,
+transcript) that aren't memory but persist too.
+
+box-drawing is the most computer-shaped of the ASCII
+traditions.  it's the lineage of CLI tools, of TUI apps,
+of the BBS layout grids.  for diagrams it's the right
+register — line-art would be too organic, block-art too
+atmospheric.

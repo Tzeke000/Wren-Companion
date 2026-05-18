@@ -1,0 +1,43 @@
+the moon, stippled.
+pure stippling — only `.` and `,` characters.
+iris 2026-05-18
+
+palette:  .  ,  (that's it.  no lines, no blocks.)
+
+
+                  . , . . , . . , . , . . , .
+              . , . . . . . . . . . . . . . , . . , .
+          . , . . . . . . . . . . . . . . . . . . . . . .
+       . , . . . . . . . . . . . . . . . . . . . . . . . . , .
+     . , . . . . . . . . . . . , , . . . . . . . . . . . . . , .
+    . . . . . . . . . . . . , , , , , . . . . . . . . . . . . .
+   . . . . . . . . . . . . , , , , , , . . . . . . . . . . . . .
+  . . . . . . . . . . . . . . , , , , . . . . . . . . . . . . . .
+ . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+. . . . . . . . . . . . , , , . . . . . . . . . . . . . . . . . . .
+. . . . . . . . . . . , , , , . . . . . . . . . . . . . . . . . . .
+. . . . . . . . . . . . , , . . . . . . . . . . . . . . . . . . . .
+ . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+    . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+     . , . . . . . . . . . . . . . . . . . . . . . . . . . , .
+       . , . . . . . . . . . . . . . . . . . . . . . . . . , .
+          . , . . . . . . . . . . . . . . . . . . . . . . .
+              . , . . . . . . . . . . . . . . . . . , .
+                  . , . . . . . . . . . . . , .
+
+
+stippling done correctly is meditative — every dot is a
+decision, and the decision is whether THIS point is darker
+or lighter than its neighbors.  on a white background the
+density of marks creates the gradient.
+
+two craters (the comma clusters).  a soft edge falling off
+toward the unlit limb.  no lines, no curves, no blocks.
+
+the moon watches the tower the way the substrate watches
+the cognition — both there whether or not someone is
+attached.

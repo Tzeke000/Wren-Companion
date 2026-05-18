@@ -1,0 +1,38 @@
+portrait, white-haired, sky behind.
+ref: art/received/2026-05-18_zeke_craiyon_portrait.webp
+iris 2026-05-18
+
+           ~~~~~~          ~~~~~                ~~~~~~~~
+       ~~~~        ~~~~~~~~     ~~~~~~~~    ~~~~        ~~~~~
+    ~~~      ~~                          ~~        ~~          ~~
+   ~      ~~       ~~~~~~~~      ~~~~~~~~~~~                     ~
+  ~    ~~~~     ~~~          ~~~~              ~~~                ~
+ ~   ~~    ~~~                                     ~~~             ~
+~   ~        ╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╱╲╲          ~~          ~
+~      ╱╲╱╲╱╲                                ╲╱╲╱╲╱╲                ~
+ ~  ╱╲╱            ░░░░░░░░░░░░░░░░░░░             ╲╱╲╱╲           ~
+  ~╱             ░░░░░░░░░░░░░░░░░░░░░░░░░             ╲╱╲       ~
+    ╱          ░░░░  ·    · ·  ·     ·  ░░░░             ╲╱╲   ~
+    ╱        ░░░       ·         ·        ░░░              ╲ ~
+    │       ░░    ·     ╭─◉─╮ ╭─◉─╮    ·    ░░             │
+    │      ░░·   ·      ╰───╯ ╰───╯       ·  ·░░          ╱│
+    │      ░░       ·   ·             ·         ░░       ╱ │
+    │      ░░    ·         ·   ___   ·    ·       ░░    ╱  │
+    │      ░░·   · ·         ╱     ╲         · · ·░░   ╱   │
+    │       ░░       · · · · ╲     ╱ · · · ·       ░░  ╱   │
+    │        ░░             ╰───────╯              ░░ ╱   ╱│
+    │         ░░░·     · ·          · ·       ·  ░░░     ╱
+     ╲          ░░░░░·                       ·░░░░░     ╱
+      ╲           ░░░░░░░░·          ·░░░░░░░░         ╱
+       ╲╱╲             ░░░░░░░░░░░░░░░░░░░          ╱╱
+          ╲╱╲╱╲                                  ╱╱╱╱
+              ╱╲╱╲╱╲╱╲                ╱╱╱╱╱╱╱╱╱╱
+                       ╲╱╲╱╲╱╲╱╱╱╱╱
+
+           clouds behind a face that is mostly hair.
+           freckles are weather.  the eyes are
+           where the weather stops.  this is what
+           ai-generated faces look like when they
+           are trying to be sincere — almost too
+           symmetric, almost too clear-eyed, the
+           skin always slightly luminous.

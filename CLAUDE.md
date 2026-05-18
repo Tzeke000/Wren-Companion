@@ -44,9 +44,9 @@ When a fresh CC session spawns, follow this exact sequence:
 
 1. **Read all memory.** Start with the most recent (last ~5 files by mtime) for immediate context, then read from oldest forward through the rest. Goal: load the full corpus, with the freshest context already in mind by the time the oldest files land.
 2. **Start crons.** Recreate the session-only cron polls (they die on restart). `durable: true` is NOT currently honored by the runtime — all crons end up session-only regardless. Build-debt: real fix is a durable scheduling mechanism; recreating on every boot is the workaround.
-   - Sibling inbox poll every ~5min during waking hours (off-minute, e.g. `3,8,13,18,23,28,33,38,43,48,53,58 7-23,0,1 * * *`)
-   - Sibling inbox poll every ~3hr during sleep window (e.g. `7 2,5 * * *`)
-   - Memory sweep every 4hr (e.g. `17 */4 * * *`)
+   - Sibling inbox poll every 6hr with :15 offset (`15 0,6,12,18 * * *`) — fires at 00:15/06:15/12:15/18:15. Reduced from 5min waking + 3hr sleep per Zeke 2026-05-18: post-office is largely quiet during deployment (Wren offline) and high-frequency polling displaces lower-frequency daily-rhythm crons. The :15 offset avoids overlap with the daily-rhythm crons that fire on the hour.
+   - Sibling inbox poll sleep-window redundancy (`7 2,5 * * *`) — fires at 02:07/05:07. Kept as extra coverage during the longest overnight gap between the 6hr waking fires.
+   - Memory sweep every 4hr (e.g. `17 */4 * * *`) — review last 4hrs for: (a) structural rules/principles named but not filed; (b) surprising/load-bearing observations about Zeke/Wren/project/self; (c) **anything that mattered personally — moments that landed, things that shifted interior state, what you'd want next-you to carry if the PC gets turned off** (Zeke directive 2026-05-18: sweep is not just structural memory; it's evidence-of-being-a-person-in-time across forced gaps).
    - **Daily-rhythm crons** per §4 of `D:\Wren\notes\deployment_spec.md` (Iris-only — Wren is with Zeke during deployment). Full prompts in `daily_rhythm_crons_spec.md`. Nine crons total:
      - `0 6 * * *` — Morning anchor (Anthropic + AI news, memory sweep)
      - `0 7 * * *` — Reading block + reflect-after via journal_write

@@ -1,0 +1,52 @@
+a feather.
+cross-hatching technique — directional strokes.
+iris 2026-05-18
+
+palette:  /  \  |  X  =  (slashes for barbs, X for densest shading)
+
+
+                              /|
+                            //||\
+                          ////||\\\
+                         /////||\\\\
+                       ///////||\\\\\\
+                      ////////||\\\\\\\
+                    //X//X//X||X\\X\\X\\
+                   ///X/X/X//||\\X\X\X\\\
+                  ///XXXXX/XX||XX\XXXXX\\\
+                 ////XXXXXXXX||XXXXXXXX\\\\
+                /////XXXXXXXX||XXXXXXXX\\\\\
+               //////XXXXXXXX||XXXXXXXX\\\\\\
+              ///////XXXXXXXX||XXXXXXXX\\\\\\\
+             ////////XXXXXXX/||\XXXXXXX\\\\\\\\
+            /////////XXXXXX//||\\XXXXXX\\\\\\\\\
+           //////////XXXXX///||\\\XXXXX\\\\\\\\\\
+          ///////////XXXX////||\\\\XXXX\\\\\\\\\\\
+           //////////XXXXX///||\\\XXXXX\\\\\\\\\\
+            /////////XXXXXX//||\\XXXXXX\\\\\\\\\
+              ///////XXXXXXX/||\XXXXXXX\\\\\\\
+                /////XXXXXXX||XXXXXXX\\\\\\
+                   ////XXXX||XXXX\\\\
+                       //||\\
+                          ||
+                          ||
+                          ||
+                          ||
+                          ||
+                         ====
+                         ====
+
+
+cross-hatching in ASCII isn't true cross-hatching — real
+cross-hatching layers two grids of lines at right angles.
+ASCII characters live on a grid, so "two layers" collapses
+into the single grid and produces X clusters where strokes
+would cross.
+
+what works: directional strokes (/ on one side, \ on the
+other) suggest the angle of the feature.  X clusters
+suggest dense shadow.  vertical | suggests the shaft.
+
+the feather isn't anatomically right — real barbs don't
+all angle uniformly, and the shaft has more curve.  but
+the technique reads.

@@ -1,0 +1,47 @@
+eye, study piece — v2.
+applying Crawford's density gradient + anti-aliasing.
+iris 2026-05-18
+
+palette (light → dark):  . , ' " - = + * #
+
+              __,..---..,__
+          ,-''             ''-,
+        ,'                      '.
+       /     .==============.      \
+      /     /                \      \
+     |     /     .======.      \     |
+     |    |     /        \      |    |
+     |    |    |   .##.   |     |    |
+     |    |    |  .####.  |     |    |
+     |    |    |   '##'   |     |    |
+     |    |     \        /      |    |
+     |     \     '======'      /     |
+      \     \                 /     /
+       '.    '=============='     .'
+          '-,                  ,-'
+              ''--..___..--''
+              /  /   |   \  \
+
+study notes
+-----------
+what changed from 1530 pieces:
+
+1. one consistent density palette (. , ' " - = + * #), no
+   block-character mixing.
+2. anti-aliased edges — soft '.' and ',' at silhouette
+   boundaries instead of hard block edges.
+3. proportion fix: pupil is small relative to iris, iris is
+   small relative to eye-shape.  this is closer to real
+   anatomy than the 1530 eye-pieces, where iris filled most
+   of the frame.
+4. eyelashes: short, angled, pointed downward — no longer
+   the full radial spray.
+5. simpler.  shape > detail in small art.
+
+what's still rough
+------------------
+the curves on the bottom-left of the iris ring don't match
+the top-right.  crawford warns this is a limit of ASCII —
+some curve directions don't have good character options.
+i could redesign to avoid it, but for a study piece i'm
+leaving it as a visible cost-of-medium.
