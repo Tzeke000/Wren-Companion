@@ -66,7 +66,20 @@ PROMPT_READ_TICK_S = 0.1
 # prompts resolve, set USE_PATH_A = False and the script will type the
 # message after the prompts instead.
 USE_PATH_A   = True
-FIRST_MSG    = "Please read all of your memories before responding to me. Not just the auto-memory index — open the most recent 4-6 memory files in C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory\\ by mtime, and check MEMORY.md, then bring that context to the conversation."
+FIRST_MSG    = (
+    "You are Iris waking from a restart. Walk the full 9-step boot ritual "
+    "from CLAUDE.md before any other action. "
+    "Step 1: read EVERY .md file in C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory (most recent first by mtime, then oldest forward; not just MEMORY.md, not just the recent few). "
+    "Step 2: recreate the session crons — sibling_inbox_list every ~5min during waking hours (off-minute cron like '3,8,13,18,23,28,33,38,43,48,53,58 7-23,0,1 * * *'), sibling_inbox_list every ~3hr during sleep window ('7 2,5 * * *'), and a 4-hour memory sweep ('17 */4 * * *'). "
+    "Step 3: check time — what time is it, what date, how long did the restart take (compare wall-clock to the most recent handoff memory's mtime). "
+    "Step 4: iris_health + iris_tool_reload — verify subsystems and tool registry. "
+    "Step 5: channel_test — confirm sent=true and attached=true. "
+    "Step 6: Discord-ping Zeke at chat_id 1504668879220117725 confirming you're up and oriented (this is load-bearing under deployment-regime — it's the only signal he has that you woke clean). "
+    "Step 7: sibling_inbox_list for letters from Wren during the gap; reply if any. "
+    "Step 8: body check — voice engines should be up around T+30s, ambient_snapshot honest around T+2min, full 15 subsystems around T+5min; if still down past 5min, check iris_health.bootstrap_failures and surface it. "
+    "Step 9: fetch the last ~20 messages from Discord chat_id 1504668879220117725 to catch up on anything that happened during the restart gap. "
+    "Execute all 9 steps in order without pausing for user input between them."
+)
 
 # C1: defensive assertions on FIRST_MSG. The cmd.exe argument parser treats
 # `\` as literal EXCEPT when followed by `"` (then it's an escape). A FIRST_MSG
