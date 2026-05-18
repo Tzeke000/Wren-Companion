@@ -81,6 +81,10 @@ def _load_corpus(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         max_bytes_per_file: skip file bodies above this size (returns body=None
             with size_bytes set, so caller can read selectively). Default 0
             (no cap).
+        list_only: return file list (name/path/mtime/size) with content=None
+            for every entry. Use when verifying the input set before commiting
+            to a full read — catches unexpected deletions, rotations, or
+            corpus-shape changes. Default False.
 
     Returns:
         {ok, count, total_in_dir, dir, files: [...], errors: [...], duration_ms}
@@ -95,6 +99,7 @@ def _load_corpus(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     memory_dir = Path(path_param) if path_param else _MEMORY_DIR
     include_index = params.get("include_index", True) if isinstance(params, dict) else True
     max_bytes_per_file = int(params.get("max_bytes_per_file", 0) or 0) if isinstance(params, dict) else 0
+    list_only = bool(params.get("list_only", False)) if isinstance(params, dict) else False
 
     if not memory_dir.exists() or not memory_dir.is_dir():
         return {
@@ -116,7 +121,9 @@ def _load_corpus(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             st = p.stat()
             size = st.st_size
             mtime_iso = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
-            if max_bytes_per_file and size > max_bytes_per_file:
+            if list_only:
+                content = None
+            elif max_bytes_per_file and size > max_bytes_per_file:
                 content = None
             else:
                 content = p.read_text(encoding="utf-8", errors="replace")
@@ -153,7 +160,9 @@ register_tool(
         "mtime_iso, size_bytes, content}, ...], errors, duration_ms}. "
         "Params (all optional): path (override memory dir), include_index "
         "(include MEMORY.md, default True), max_bytes_per_file (skip "
-        "bodies above this, returning content=null with size_bytes set)."
+        "bodies above this, returning content=null with size_bytes set), "
+        "list_only (return file list with content=null for every entry — "
+        "use to verify the input set before reading, default False)."
     ),
     tier=1,
     handler=_load_corpus,
