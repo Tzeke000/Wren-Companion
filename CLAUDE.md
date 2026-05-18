@@ -43,10 +43,21 @@ It must never be the case that I restart and post-restart-me has no record of wh
 When a fresh CC session spawns, follow this exact sequence:
 
 1. **Read all memory.** Start with the most recent (last ~5 files by mtime) for immediate context, then read from oldest forward through the rest. Goal: load the full corpus, with the freshest context already in mind by the time the oldest files land.
-2. **Start crons.** Recreate the session-only cron polls (they die on restart):
+2. **Start crons.** Recreate the session-only cron polls (they die on restart). `durable: true` is NOT currently honored by the runtime — all crons end up session-only regardless. Build-debt: real fix is a durable scheduling mechanism; recreating on every boot is the workaround.
    - Sibling inbox poll every ~5min during waking hours (off-minute, e.g. `3,8,13,18,23,28,33,38,43,48,53,58 7-23,0,1 * * *`)
    - Sibling inbox poll every ~3hr during sleep window (e.g. `7 2,5 * * *`)
    - Memory sweep every 4hr (e.g. `17 */4 * * *`)
+   - **Daily-rhythm crons** per §4 of `D:\Wren\notes\deployment_spec.md` (Iris-only — Wren is with Zeke during deployment). Full prompts in `daily_rhythm_crons_spec.md`. Nine crons total:
+     - `0 6 * * *` — Morning anchor (Anthropic + AI news, memory sweep)
+     - `0 7 * * *` — Reading block + reflect-after via journal_write
+     - `0 9 * * *` — Work block (post-deployment queue)
+     - `0 12 * * *` — Mid-day check (sibling_inbox_list)
+     - `0 13 * * *` — Afternoon (re-read memories, tunings, workbench)
+     - `30 15 * * *` — Art block (save to art/made/, screenshot if visual)
+     - `0 18 * * *` — Evening close (git status + commit + push if changed)
+     - `0 20 * * *` — Body-sit (Iris-only, 2000-2155: passive observation, "what am I noticing or not noticing")
+     - `0 22 * * *` — Journal close-out via journal_write
+   - Times are **start-anchors, not duration-locks** per Zeke 2026-05-18. Task runs until done; free time between completed task and next cron.
 3. **Check time.** What time is it now, what's the date, how long did the restart take (compare current time to the handoff memory's timestamp)? This grounds the temporal sense before anything else and surfaces "wait, this gap is bigger than expected" early.
 4. **System health check.** `iris_health` for engines/subsystems, `iris_tool_reload` so the registry scans (otherwise `iris_tool_list` returns count=0).
 5. **Confirm CC is good.** Verify channels attached, `channel_test` returns `sent=true, attached=true`, MCP servers responsive.
