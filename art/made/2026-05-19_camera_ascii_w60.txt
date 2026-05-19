@@ -1,0 +1,27 @@
+# source: camera (orb_http)
+# width: 60
+# ramp: full(70)
+# inverted: False
+
+]??]]]]][[[[}{1)|truuuuuuuuuunnnnnxjrftt/\\|()))111{)){1111)
+xf(}?-????]}}}{)|/jxzYccvvuuunnnxxrjjfttt//\\\\|||||\||||\/t
+1\jxj\}---?][}{1|/frvzXYXzzccvuuunnxrrjfftt//\\\\|||||\\\\/t
+[]][1/jj/1]-?[}1(/frxnULUUYXzcvvunnxrjft//\\|((())))))((((||
+}}[[?-?}|fjf({}}1\tjrnvXYXXzcvunnxrjftt/\\|(())111111)))))))
+}}[[[[]?--[)/rrt|(\tjxuczzccvunnxrjftt/\\(())11{{{{{11111{{{
+}}}[[[[][[]??[)txnxjjjxuccvuunxrjjf//\|())1{{}}}}}}}}}[}}}}}
+{{}}}[[[[[[[}}}}1|jncccvcccvuuunxxrjjfft//\\\|||||(((||\\(|(
+{{{{}}}[[[[[[}{){1((\rczYUUYXzccvunxxrjft/\|(())1{{{{{}[]?--
+{{{{{}}}[[[}}}[}jxrxnuzYUznxrjjftt//\\|())1{{}}[[[[[]?-_____
+{{{{11{}[[[}}(unUh#**##*abzxxjjjffttt/\\|()1{{{}}}]?--------
+11))1{}}}[[}?|8BhB@@@@B#bunxrjjffttt//\\|())1{1{}]?---??---?
+1)((/ff1}}}[/z*&8@BBB@%*qxnxrjjjffftt//\\/()|){}]]?-?]?]??]]
+)((vQOQ\}}]jhhb#%@@B@@%#prxrrjjjjjjffft/fu{[]trfXzzuux?[}}}}
+(|rLZZZJ)1}LMbhMB@B@@@%WkczccuxrrrrrffjtcabQYOqqCJJQJct(][[}
+\cOZmmOOcufOCbqo@@B@@@BBB%B%%BmxuxrjzXnLo8**#888M&WW&8Bozuf\
+n0wkoaahkmqbZoh#@BBBBB%88888&W#OtjLJahwhMMh&8BBB@@@@@@B@$$BM
+Qdk8B8%%8%%8B888&&&&&&&&&WM8%#BhJZpwo8aaWMB@@BBBBBBBBBBBBB@@
+ba*%8&&&&&&&&&&&&&&WWWWMMM#8@*88%$&#&8#M&BBBBBBBBBBBBBB@BBBB
+h#M@B8%%888888888&&&&&WWWWM8@*8@BB8W%%&&8@BBBBBBBBB@BBB@BBBB
+ahoW&WMMW8&&888888888888&&&%@#8B%BM&BB88B@@@@B@@@@B@@@@@BB@@
+hdpdkbqdb8888%8BBBB%%%%%%%8%@#%B8%M8@@B@@@@@@@@@@@@@@@@@@@@@

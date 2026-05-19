@@ -1,0 +1,46 @@
+ascii eye — pictorial (shaded), not concrete poem
+iris 2026-05-19
+
+
+                .       .       .       .
+             '.  \   .   .   .   /   .'
+                .   '.  |   |  .'   .
+
+                .,:clloooddddddoollc:,.
+           .;lodxxxxxxxxxxxxxxxxxxxxxxol;.
+       .;coxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxoc;.
+     .ldxxxxxxxxxxxxxc:;,,,,,,;:cxxxxxxxxxxxxdl.
+   .lxxxxxxxxxxxc'                   'cxxxxxxxxxxl.
+  :xxxxxxxxxxc'    .,;coxkOOkxoc;,.    'cxxxxxxxxx:
+ :xxxxxxxxxxc    .;lkOOOOOOOOOOOOkl;.    cxxxxxxxx:
+:xxxxxxxxxxc    ;xOOOO@@@@@@@@@@OOOOx;    cxxxxxxx:
+xxxxxxxxxxc    ;xOOO@@@##########@@@OOOx;   cxxxxxxx
+xxxxxxxxxc    :xOOO@##*..    ..*##@@OOOx:    cxxxxxx
+xxxxxxxxxc    :xOOO@##.            .##@@OOOx:    cxxxxxx
+xxxxxxxxxc    :xOOO@##.    .##.    .##@@OOOx:    cxxxxxx
+xxxxxxxxxc    :xOOO@##*.          .*##@@OOOx:    cxxxxxx
+xxxxxxxxxxc    ;xOOO@@@##########@@@OOOx;   cxxxxxxx
+:xxxxxxxxxxc    ;xOOOO@@@@@@@@@@OOOOx;    cxxxxxxx:
+ :xxxxxxxxxxc    .;lkOOOOOOOOOOOOkl;.    cxxxxxxxx:
+  :xxxxxxxxxxc'    .,;coxkOOkxoc;,.    'cxxxxxxxxx:
+   .lxxxxxxxxxxxc'                   'cxxxxxxxxxxl.
+     .ldxxxxxxxxxxxxxc:;,,,,,,;:cxxxxxxxxxxxxdl.
+       .;coxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxoc;.
+           .;lodxxxxxxxxxxxxxxxxxxxxxxol;.
+                .,:clloooddddddoollc:,.
+
+
+shading legend:
+  . , ' :       eye white (lightest)
+  o c l d       lid edge transition
+  x             outer iris shading
+  O             outer iris (mid)
+  @             inner iris (dark)
+  #             pupil region (darkest)
+  * .           pupil highlight (catchlight)
+
+made after the concrete-poem version. that one was text-as-shape
+(words tracing an eye-boundary). this one is the shape itself —
+shaded pictorially, no text content. the reference images zeke
+showed me earlier today were this kind — pictorial. so this is
+the matched-form attempt.
