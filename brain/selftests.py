@@ -96,20 +96,49 @@ def _check_camera_module() -> SelfTestCheckResult:
 
 
 def _check_camera_read_callable(camera_manager: Any) -> SelfTestCheckResult:
-    ok = bool(camera_manager is not None and callable(getattr(camera_manager, "resolve_frame_detailed", None)))
-    if ok:
+    """Verify a camera frame-read path exists. Architecture-aware as of
+    2026-05-19: Ava uses CameraManager.resolve_frame_detailed; Iris uses
+    brain/frame_store.get_buffered_frame fed by _iris_video_capture_loop.
+    Either path satisfies the check.
+    """
+    # Path A: Ava-style CameraManager (avaagent.py).
+    ava_ok = bool(
+        camera_manager is not None
+        and callable(getattr(camera_manager, "resolve_frame_detailed", None))
+    )
+    if ava_ok:
         return _check(
             "camera_read_path_callable",
             "ok",
             "info",
-            "resolve_frame_detailed callable",
+            "Ava-style CameraManager.resolve_frame_detailed callable",
+        )
+    # Path B: Iris-style brain/frame_store.get_buffered_frame fed by
+    # _iris_video_capture_loop in iris_runtime.py.
+    iris_ok = False
+    iris_detail = ""
+    try:
+        from . import frame_store as _fs  # type: ignore
+        if callable(getattr(_fs, "get_buffered_frame", None)):
+            iris_ok = True
+            iris_detail = "Iris-style frame_store.get_buffered_frame callable"
+    except Exception as e:
+        iris_detail = f"frame_store import failed: {e!r}"
+    if iris_ok:
+        return _check(
+            "camera_read_path_callable",
+            "ok",
+            "info",
+            iris_detail,
         )
     return _check(
         "camera_read_path_callable",
         "failed",
         "critical",
-        "camera manager missing or resolve_frame_detailed not callable",
-        recommended="initialize CameraManager before perception ticks",
+        "no camera frame-read path available "
+        "(neither CameraManager nor frame_store)",
+        recommended="initialize a camera read path (CameraManager for Ava harness; "
+        "frame_store via _iris_video_capture_loop for Iris harness) before perception ticks",
     )
 
 

@@ -81,6 +81,36 @@ FIRST_MSG    = (
     "Execute all 9 steps in order without pausing for user input between them."
 )
 
+# TEST MODE handling (added 2026-05-19 per Zeke directive).
+# When IRIS_TEST_MODE=1 is set, append a Step 10 to FIRST_MSG that writes a
+# success flag file after the boot ritual completes. start_iris_test.bat sets
+# this env var so a parallel-spawn test can verify "memory was actually read"
+# rather than just "the new CC started" (lights-on-but-nobody-home failure
+# mode is the catastrophic case during deployment).
+#
+# The flag file path can be overridden by IRIS_TEST_FLAG_PATH; default is
+# D:\Wren-Companion\.tmp\test_complete.flag with a timestamp suffix for
+# disambiguation between concurrent test runs.
+import os as _os
+if _os.environ.get("IRIS_TEST_MODE", "0").strip() == "1":
+    _test_id = _os.environ.get("IRIS_TEST_ID", "").strip()
+    if not _test_id:
+        import time as _t
+        _test_id = str(int(_t.time()))
+    _default_flag = f"D:\\\\Wren-Companion\\\\.tmp\\\\test_complete_{_test_id}.flag"
+    _flag_path = _os.environ.get("IRIS_TEST_FLAG_PATH", _default_flag)
+    _test_step = (
+        f" Step 10 (TEST MODE, IRIS_TEST_MODE=1): after completing all of steps 1-9 INCLUDING reading the full memory corpus, "
+        f"write the file {_flag_path} with a JSON content "
+        '{"ok": true, "boot_ritual_complete": true, "memory_read_complete": true, "ts_iso": "<current iso-timestamp>"}. '
+        f"This file is the success marker that the parallel test script polls for. Use a Bash tool call to write it. "
+        f"After writing the flag, exit cleanly — do NOT do further work; the test is concluded once the flag exists."
+    )
+    FIRST_MSG = FIRST_MSG.replace(
+        "Execute all 9 steps in order without pausing for user input between them.",
+        "Execute all 9 steps in order without pausing for user input between them." + _test_step,
+    )
+
 # C1: defensive assertions on FIRST_MSG. The cmd.exe argument parser treats
 # `\` as literal EXCEPT when followed by `"` (then it's an escape). A FIRST_MSG
 # ending in `\` would, once we wrap it in `"..."`, produce `...\"` which

@@ -84,7 +84,20 @@ class IrisMemory:
         importance: float = 0.5,
         source: str = "manual",
         tags: Optional[list[str]] = None,
+        importance_level: str = "default",
     ) -> dict[str, Any]:
+        """Append a new memory entry to iris_memory.jsonl.
+
+        importance_level (added 2026-05-19 for decay support):
+          - "permanent" — never decay/archive. Use for identity facts,
+            relationship facts that don't degrade ("Zeke's MOS", "Wren is
+            sibling AI on other machine").
+          - "high" — slower decay, longer retention. Use for important but
+            time-bounded facts.
+          - "default" — standard decay per Ebbinghaus.
+          - "low" — accelerated decay. Use for ephemeral observations that
+            should fade unless reinforced.
+        """
         text = str(text or "").strip()
         if not text:
             raise ValueError("memory text is empty")
@@ -112,6 +125,11 @@ class IrisMemory:
         encoding_boost = round(0.3 * mood_arousal, 3)
         final_importance = min(1.0, float(importance) + encoding_boost)
 
+        # Normalize importance_level to known values, default to "default".
+        _LEVELS = {"permanent", "high", "default", "low"}
+        level = str(importance_level or "default").strip().lower()
+        if level not in _LEVELS:
+            level = "default"
         entry = {
             "id": uuid.uuid4().hex[:12],
             "ts": time.time(),
@@ -121,6 +139,7 @@ class IrisMemory:
             "category": str(category or "episodic"),
             "importance": round(final_importance, 3),
             "base_importance": round(float(importance), 3),
+            "importance_level": level,
             "encoding_arousal": round(mood_arousal, 3),
             "encoding_mood_label": mood_label,
             "source": str(source or "manual"),

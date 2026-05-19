@@ -288,8 +288,51 @@ function Spawn-NewCC {
     return Spawn-BareClaude
 }
 
+# ---- Letter-arrival watch (added 2026-05-19) ----
+# Watches state/iris_sibling/inbox/ for new letters (mtime > startup mark).
+# When a new letter arrives AND CC is not running, spawn CC. This is the
+# cold-wake path for ritual_scheduler letters and Wren-during-NC letters.
+# Same debounce machinery as the trigger-file path.
+$INBOX_DIR = Join-Path $ROOT "state\iris_sibling\inbox"
+$lastInboxLatestMtime = 0.0
+if (Test-Path $INBOX_DIR) {
+    try {
+        $files = Get-ChildItem -Path $INBOX_DIR -File -ErrorAction SilentlyContinue
+        if ($files) {
+            $lastInboxLatestMtime = ($files | ForEach-Object { $_.LastWriteTime.Ticks } | Measure-Object -Maximum).Maximum
+            if ($null -eq $lastInboxLatestMtime) { $lastInboxLatestMtime = 0 }
+        }
+    } catch { }
+}
+
+function Check-InboxForNewLetter {
+    # Returns the latest mtime in inbox (as ticks), or 0 if no files. Only
+    # detects NEW letters (latest mtime > $lastInboxLatestMtime). Caller
+    # updates $script:lastInboxLatestMtime when it acts on the result.
+    if (-not (Test-Path $INBOX_DIR)) { return 0 }
+    try {
+        $files = Get-ChildItem -Path $INBOX_DIR -File -ErrorAction SilentlyContinue
+        if (-not $files) { return 0 }
+        $latest = ($files | ForEach-Object { $_.LastWriteTime.Ticks } | Measure-Object -Maximum).Maximum
+        if ($null -eq $latest) { return 0 }
+        return $latest
+    } catch {
+        return 0
+    }
+}
+
+function Is-CCRunning {
+    # Returns $true if any claude process is alive. Best-effort.
+    try {
+        $procs = Get-Process -Name "claude" -ErrorAction SilentlyContinue
+        return ($null -ne $procs -and $procs.Count -gt 0)
+    } catch {
+        return $false
+    }
+}
+
 # ---- Main loop ----
-Write-WatchLog "watchdog starting (trigger=$TRIGGER_FILE poll=${POLL_INTERVAL_S}s debounce=${DEBOUNCE_S}s)"
+Write-WatchLog "watchdog starting (trigger=$TRIGGER_FILE inbox=$INBOX_DIR poll=${POLL_INTERVAL_S}s debounce=${DEBOUNCE_S}s)"
 
 $tmpDir = Split-Path $TRIGGER_FILE -Parent
 if (-not (Test-Path $tmpDir)) {
@@ -300,6 +343,31 @@ $lastRespawn = [DateTime]::MinValue
 
 while ($true) {
     try {
+        # Check for sibling-letter arrival (ritual_scheduler + Wren letters).
+        # Only spawn if CC is NOT already running — if CC is open, the Stop
+        # hook + sibling_inbox_list will pick up the letter naturally.
+        $currentLatestMtime = Check-InboxForNewLetter
+        if ($currentLatestMtime -gt $lastInboxLatestMtime) {
+            $sinceLast = (Get-Date) - $lastRespawn
+            if ($sinceLast.TotalSeconds -lt $DEBOUNCE_S) {
+                Write-WatchLog ("[INBOX DEBOUNCED] new letter within debounce window (" + [int]$sinceLast.TotalSeconds + "s of " + $DEBOUNCE_S + "s); ignoring")
+                $lastInboxLatestMtime = $currentLatestMtime
+            } elseif (Is-CCRunning) {
+                Write-WatchLog ("new letter detected but CC already running -- Stop hook will handle")
+                $lastInboxLatestMtime = $currentLatestMtime
+            } else {
+                Write-WatchLog "new letter detected AND CC not running -- spawning"
+                $lastInboxLatestMtime = $currentLatestMtime
+                $ok = Spawn-NewCC
+                if ($ok) {
+                    $lastRespawn = Get-Date
+                    Write-WatchLog "spawn-on-letter complete"
+                } else {
+                    Write-WatchLog "spawn-on-letter failed -- letter sits until next attempt"
+                }
+            }
+        }
+
         if (Test-Path $TRIGGER_FILE) {
             $sinceLast = (Get-Date) - $lastRespawn
             if ($sinceLast.TotalSeconds -lt $DEBOUNCE_S) {

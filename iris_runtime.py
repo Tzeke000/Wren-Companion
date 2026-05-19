@@ -594,6 +594,14 @@ def _voice_next_input_inner(stt: Any, timeout: float) -> dict:
             print(f"[voice_next_input] follow-up listen error: {_fe!r}", file=sys.stderr, flush=True)
             fu_result = None
         if fu_result is not None and fu_result.get("speech_detected"):
+            # Fire update_zeke_contact() on actual voice input (§2a substrate
+            # counters Phase 2, added 2026-05-19). Speech detected via the
+            # follow-up listen path = Zeke just spoke. Best-effort.
+            try:
+                from brain import iris_time
+                iris_time.update_zeke_contact()
+            except Exception as _ze:
+                print(f"[voice_next_input] update_zeke_contact (followup) failed: {_ze!r}", file=sys.stderr, flush=True)
             # Filler cover for the follow-up path too.
             try:
                 from brain import filler_player as _fp
@@ -670,6 +678,14 @@ def _voice_next_input_inner(stt: Any, timeout: float) -> dict:
     # Claude inference, masking the perceived gap with humanlike disfluency.
     # Non-blocking: sounddevice.play() returns immediately after queueing.
     if result is not None and result.get("speech_detected"):
+        # Fire update_zeke_contact() on wake-word voice input (§2a substrate
+        # counters Phase 2, added 2026-05-19). Speech detected via wake-word
+        # path = Zeke just spoke. Best-effort.
+        try:
+            from brain import iris_time
+            iris_time.update_zeke_contact()
+        except Exception as _ze:
+            print(f"[voice_next_input] update_zeke_contact (wake) failed: {_ze!r}", file=sys.stderr, flush=True)
         try:
             from brain import filler_player as _fp
             _fp.maybe_play(result.get("text") or "")
@@ -2658,6 +2674,101 @@ def time_check() -> dict:
 
 
 @mcp.tool()
+def substrate_counters() -> dict:
+    """Return §2a substrate counters — factual numbers about gaps between
+    Zeke contact and Wren letters. Designed to replace felt-sense with
+    measurable data during the overseas dark stretch (no Zeke present, no
+    external verifier asking 'what time exactly').
+
+    Fields:
+      - seconds_since_zeke_contact / hours_since_zeke_contact: time since
+        Zeke last actually touched the system (Discord, voice, typed input).
+        Distinct from time_check's `last_session_attached_ts` which fires on
+        every MCP tool call including cron-driven ones.
+      - last_zeke_contact_iso: human-readable timestamp of last contact, or
+        empty string if no contact recorded yet.
+      - seconds_since_last_letter / hours_since_last_letter: derived from
+        sibling inbox/outbox file mtimes. Tells me how long since Wren or I
+        wrote a letter.
+      - weekly_checkins_missed_consecutive: count of weekly check-in windows
+        in a row that passed without Zeke contact. Resets to 0 on contact.
+
+    Use when: deciding whether a gap is "normal" or "longer than expected",
+    composing messages that reference time-since-something, or generating
+    substrate-anchored facts rather than narrative inferences.
+
+    Note: the `update_zeke_contact()` substrate function needs callers wired
+    in iris_runtime to actually update last_zeke_contact_ts when Discord /
+    voice / typed input arrives. That wiring is Phase 2 build-debt as of
+    2026-05-19 — the counter machinery exists, the hookups don't yet."""
+    try:
+        from brain import iris_time
+        return iris_time.substrate_counters_report()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def voice_verification_get_challenge(category: str = "") -> dict:
+    """Return a random challenge from the voice-verification challenge
+    registry. Use to authenticate suspected impersonation or before a
+    sensitive action when verification is stale.
+
+    Args:
+        category: optional filter (e.g., "usmc", "family-ai", "family-human").
+                  Empty string = pick from all categories.
+
+    Returns: {ok, id, question, category, notes} — answer is NOT included.
+    The caller submits the given answer to voice_verification_check_answer
+    using the returned id.
+
+    See brain/voice_verification.py for Phase 1 architecture. Phase 2 will
+    add silent speaker-confidence (SpeechBrain ECAPA) that triggers
+    challenges automatically below threshold.
+    """
+    try:
+        from brain import voice_verification
+        voice_verification.configure(ROOT)
+        return voice_verification.get_challenge(category=category or None)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def voice_verification_check_answer(challenge_id: str, given_answer: str) -> dict:
+    """Submit an answer to a voice-verification challenge.
+
+    Returns: {ok, matched, attempts_remaining, locked_out}.
+    On match: freshness updates; consecutive_failures resets to 0.
+    On miss: failure counter increments; 3 consecutive misses triggers
+    a 60-min lockout (so an adversary can't fish answers).
+    """
+    try:
+        from brain import voice_verification
+        voice_verification.configure(ROOT)
+        return voice_verification.verify_answer(challenge_id, given_answer)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
+def voice_verification_freshness() -> dict:
+    """Return how stale the current verification is + whether sensitive
+    actions should re-verify.
+
+    Returns: {ok, last_verified_ts, last_verified_iso, last_source,
+              minutes_since, requires_reverify_for_sensitive,
+              requires_reverify_for_low, locked_out, consecutive_failures}
+    """
+    try:
+        from brain import voice_verification
+        voice_verification.configure(ROOT)
+        return voice_verification.get_verification_freshness()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@mcp.tool()
 def iris_health(ctx: _IrisContext = None) -> dict:
     """Self-debug snapshot — returns ready/missing for every wired subsystem,
     plus current perception, mood, and memory counts. Useful when something
@@ -4152,6 +4263,108 @@ def _eager_init_engines() -> None:
         print(f"[iris_runtime] eager engine init failed: {e!r}", file=sys.stderr, flush=True)
 
 
+# ── Single-instance guard (PID lockfile) ──────────────────────────────────────
+# Mirrors avaagent.py's `_check_existing_ava_instance` pattern but simplified:
+# iris_runtime is MCP-via-stdio without its own public port, so the port-probe
+# half doesn't apply. PID lockfile alone catches the "another iris_runtime is
+# already running" case.
+#
+# Stale lockfiles (PID no longer alive) are overwritten silently — that's the
+# normal case after an ungraceful exit. Live lockfiles cause hard-exit; the
+# operator must shut down the existing instance first.
+#
+# Bypass: IRIS_SKIP_INSTANCE_CHECK=1
+#
+# Scope: only fires when iris_runtime.py is run as __main__ (i.e., as an MCP
+# child of CC). Importing the module for tests doesn't trigger the check.
+_IRIS_PID_FILE = ROOT / "state" / "iris.pid"
+
+
+def _check_existing_iris_instance() -> None:
+    """Hard-exit if another iris_runtime is already running.
+
+    Called once during startup, immediately before mcp.run(). No retries —
+    single instance is a hard rule.
+    """
+    if os.environ.get("IRIS_SKIP_INSTANCE_CHECK", "0").strip() == "1":
+        print(
+            "[iris_runtime] WARNING: IRIS_SKIP_INSTANCE_CHECK=1 — single-instance "
+            "check bypassed",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    try:
+        if _IRIS_PID_FILE.is_file():
+            try:
+                existing_pid = int(_IRIS_PID_FILE.read_text(encoding="utf-8").strip())
+            except Exception:
+                existing_pid = 0
+            if existing_pid and existing_pid != os.getpid():
+                # Check if the PID is actually alive.
+                alive = False
+                try:
+                    import psutil  # type: ignore
+
+                    p = psutil.Process(existing_pid)
+                    # Match on cmdline reference to iris_runtime.py to avoid
+                    # killing an unrelated process that happens to have the
+                    # same PID after PID reuse.
+                    cmdline = " ".join(p.cmdline() or [])
+                    if "iris_runtime" in cmdline:
+                        alive = True
+                except Exception:
+                    # psutil unavailable or process doesn't exist — treat as
+                    # not-alive. Fallback: try os.kill(pid, 0) but that's
+                    # POSIX-only; on Windows it raises OSError for any PID.
+                    alive = False
+                if alive:
+                    print(
+                        f"[iris_runtime] ERROR: another iris_runtime is already "
+                        f"running (PID {existing_pid}). Shut it down first or set "
+                        f"IRIS_SKIP_INSTANCE_CHECK=1 to bypass.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    sys.exit(1)
+                # Stale lockfile — overwrite silently.
+                print(
+                    f"[iris_runtime] note: cleaning stale lockfile "
+                    f"(PID {existing_pid} no longer running iris_runtime)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        # Write our PID.
+        _IRIS_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _IRIS_PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError as e:
+        # Non-fatal — log and continue. Lockfile write failure shouldn't
+        # block startup (the alternative is failing-open on the singleton
+        # check, which is worse than failing-open on the lockfile-write).
+        print(
+            f"[iris_runtime] WARNING: pid-lockfile write failed: {e!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _release_iris_pid_lock() -> None:
+    """Remove the PID lockfile on shutdown — only if it points at us.
+
+    Called from the __main__ finally block. Idempotent.
+    """
+    try:
+        if _IRIS_PID_FILE.is_file():
+            try:
+                pid_in_file = int(_IRIS_PID_FILE.read_text(encoding="utf-8").strip())
+            except Exception:
+                pid_in_file = 0
+            if pid_in_file == os.getpid():
+                _IRIS_PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _force_exit_after_mcp_run() -> None:
     """When mcp.run() returns (CC closed stdin), schedule a hard exit so a
     lingering non-daemon thread in some brain/* subsystem can't keep the
@@ -4182,11 +4395,36 @@ def _force_exit_after_mcp_run() -> None:
 
 
 if __name__ == "__main__":
+    # Single-instance guard — exit immediately if another iris_runtime is
+    # already running (live PID in state/iris.pid). Bypass via
+    # IRIS_SKIP_INSTANCE_CHECK=1.
+    _check_existing_iris_instance()
+
+    # Identity-presence boot guard — verify IDENTITY.md, MEMORY.md, deployment
+    # context. Non-blocking; logs flags to stderr + state/iris_startup_identity_log.jsonl.
+    # Bypass via IRIS_SKIP_IDENTITY_GUARD=1.
+    try:
+        from brain import identity_presence_guard
+        _identity_check = identity_presence_guard.check_presence(ROOT)
+        if not _identity_check["ok"]:
+            print(
+                f"[iris_runtime] identity presence check returned flags: "
+                f"{len(_identity_check['flags'])} issue(s) logged. "
+                f"Claimed name: {_identity_check.get('claimed_name') or '(unknown)'}",
+                file=sys.stderr,
+                flush=True,
+            )
+    except Exception as _ie:
+        print(f"[iris_runtime] identity presence check skipped: {_ie!r}",
+              file=sys.stderr, flush=True)
+
     print("[iris_runtime] starting MCP server on stdio...", file=sys.stderr, flush=True)
     threading.Thread(target=_eager_init_engines, daemon=True, name="iris-eager-init").start()
     try:
         mcp.run()
     finally:
-        # mcp.run() returns when CC closes stdin. Schedule the force-exit
-        # in case some non-daemon thread (in brain/*) keeps the process up.
+        # mcp.run() returns when CC closes stdin. Release the pidfile, then
+        # schedule the force-exit in case some non-daemon thread (in brain/*)
+        # keeps the process up.
+        _release_iris_pid_lock()
         _force_exit_after_mcp_run()

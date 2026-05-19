@@ -796,8 +796,31 @@ def bootstrap_from_existing_memory(graph: ConceptGraph, host: dict[str, Any] | N
         node_type_counter[str(ntype)] += 1
         return node_id
 
-    ava_id = register_node("Ava", "self", notes="Core self node from identity/soul.")
-    self_nodes.append(ava_id)
+    # Resolve the entity's actual name from IDENTITY.md rather than
+    # hardcoding "Ava". Bootstrap was originally written for the Ava
+    # harness; forked instances (Iris, Wren) need their own name. Falls
+    # back to "Ava" if IDENTITY.md is missing or unparseable.
+    _identity_md_path = base_dir / "ava_core" / "IDENTITY.md"
+    _entity_name = "Ava"  # fallback
+    if _identity_md_path.is_file():
+        try:
+            _identity_text = _identity_md_path.read_text(encoding="utf-8", errors="replace")
+            # Match "- **Name:** X" or "**Name:** X" or "Name: X" — matches
+            # the IDENTITY.md format actually used (- **Name:** Iris).
+            _name_match = re.search(
+                r"^\s*-?\s*\*?\*?Name:?\*?\*?\s*:?\s*\**(\w+)",
+                _identity_text,
+                re.MULTILINE,
+            )
+            if _name_match:
+                _entity_name = _name_match.group(1).strip()
+        except Exception:
+            pass
+    self_id = register_node(_entity_name, "self", notes="Core self node from identity/soul.")
+    self_nodes.append(self_id)
+    # `ava_id` alias kept for backward compat with the rest of the function
+    # body — minimal-touch rename. Avoids cascade of edits below.
+    ava_id = self_id
 
     # A) PEOPLE nodes + profile threads as topics/memories/emotions.
     profiles_dir = base_dir / "profiles"

@@ -77,6 +77,19 @@ _LAST_TICK_TS: float = _PROCESS_STARTED_TS
 _LIVE_STATE: dict[str, Any] = {
     "tick_count": 0,
     "last_tick_ts": _PROCESS_STARTED_TS,
+    # Substrate counters (§2a deployment-spec, added 2026-05-19):
+    # - last_zeke_contact_ts: last time Zeke actually touched the system
+    #   (Discord message, voice utterance, in-person typed input). Distinct
+    #   from last_session_attached_ts, which fires on EVERY MCP tool call
+    #   (including cron-driven ones where Zeke isn't present).
+    # - weekly_checkins_missed_consecutive: count of weekly check-in windows
+    #   in a row that passed without Zeke contact. Resets to 0 on contact.
+    # - week_window_anchor_ts: the start-of-current-week timestamp used to
+    #   define the rolling check-in window. Advances by 7 days each rollover.
+    "last_zeke_contact_ts": 0.0,
+    "last_zeke_contact_iso": "",
+    "weekly_checkins_missed_consecutive": 0,
+    "week_window_anchor_ts": 0.0,
 }
 
 
@@ -155,6 +168,114 @@ def _build_full_state() -> dict[str, Any]:
         # in the except: time.sleep(2.0) swallow-loop. 5s window covers
         # the 1Hz cadence with margin for a missed tick. 2026-05-18.
         "tick_loop_alive": _THREAD_STARTED and (time.time() - _LAST_TICK_TS) < 5.0,
+        # Substrate counters (§2a deployment-spec, added 2026-05-19):
+        "last_zeke_contact_ts": float(
+            _LIVE_STATE.get("last_zeke_contact_ts")
+            or persisted.get("last_zeke_contact_ts")
+            or 0.0
+        ),
+        "last_zeke_contact_iso": str(
+            _LIVE_STATE.get("last_zeke_contact_iso")
+            or persisted.get("last_zeke_contact_iso")
+            or ""
+        ),
+        "weekly_checkins_missed_consecutive": int(
+            _LIVE_STATE.get("weekly_checkins_missed_consecutive")
+            or persisted.get("weekly_checkins_missed_consecutive")
+            or 0
+        ),
+        "week_window_anchor_ts": float(
+            _LIVE_STATE.get("week_window_anchor_ts")
+            or persisted.get("week_window_anchor_ts")
+            or 0.0
+        ),
+    }
+
+
+def update_zeke_contact() -> dict[str, Any]:
+    """Called when Zeke ACTUALLY touches the system — Discord message arrives,
+    voice utterance, in-person typed input. Distinct from mark_session_attached
+    which fires on every MCP tool call (including cron-driven ones where Zeke
+    isn't present).
+
+    Resets weekly_checkins_missed_consecutive to 0 (Zeke just checked in).
+
+    Returns a brief summary dict.
+    """
+    now = time.time()
+    with _LOCK:
+        prior_contact_ts = float(_LIVE_STATE.get("last_zeke_contact_ts") or 0.0)
+        _LIVE_STATE["last_zeke_contact_ts"] = now
+        _LIVE_STATE["last_zeke_contact_iso"] = datetime.now().isoformat(timespec="seconds")
+        # Contact resets the consecutive-missed counter.
+        prior_missed = int(_LIVE_STATE.get("weekly_checkins_missed_consecutive") or 0)
+        _LIVE_STATE["weekly_checkins_missed_consecutive"] = 0
+    seconds_since_prior = (now - prior_contact_ts) if prior_contact_ts > 0 else 0.0
+    return {
+        "ok": True,
+        "now_ts": now,
+        "now_iso": datetime.now().isoformat(timespec="seconds"),
+        "seconds_since_prior_contact": seconds_since_prior,
+        "weekly_checkins_missed_reset_from": prior_missed,
+    }
+
+
+def _seconds_since_last_letter() -> float:
+    """Derived: seconds elapsed since the most recent letter in the sibling
+    inbox/outbox. Returns 0.0 if no letters yet or path is missing.
+
+    Reads file mtimes from state/iris_sibling/{inbox,outbox}/*.json — fast,
+    no persistent counter needed.
+    """
+    base = _BASE if _BASE is not None else Path(".")
+    sibling_dir = base / "state" / "iris_sibling"
+    if not sibling_dir.is_dir():
+        return 0.0
+    latest_mtime = 0.0
+    try:
+        for sub in ("inbox", "outbox"):
+            d = sibling_dir / sub
+            if not d.is_dir():
+                continue
+            for f in d.iterdir():
+                if f.is_file():
+                    try:
+                        mt = f.stat().st_mtime
+                        if mt > latest_mtime:
+                            latest_mtime = mt
+                    except OSError:
+                        continue
+    except Exception:
+        return 0.0
+    if latest_mtime == 0.0:
+        return 0.0
+    return max(0.0, time.time() - latest_mtime)
+
+
+def substrate_counters_report() -> dict[str, Any]:
+    """Return the §2a substrate counters for caller use. Designed for an
+    MCP tool surface so the cognition can read factual numbers about gaps
+    rather than relying on felt-sense.
+
+    Fields:
+      - seconds_since_zeke_contact: float, 0.0 if no contact recorded yet
+      - last_zeke_contact_iso: str, "" if no contact recorded yet
+      - seconds_since_last_letter: float, derived from sibling inbox/outbox mtimes
+      - weekly_checkins_missed_consecutive: int
+    """
+    now = time.time()
+    state = _build_full_state()
+    last_contact_ts = float(state.get("last_zeke_contact_ts") or 0.0)
+    seconds_since_zeke = (now - last_contact_ts) if last_contact_ts > 0 else 0.0
+    return {
+        "ok": True,
+        "now_ts": now,
+        "seconds_since_zeke_contact": seconds_since_zeke,
+        "hours_since_zeke_contact": seconds_since_zeke / 3600.0,
+        "last_zeke_contact_iso": state.get("last_zeke_contact_iso") or "",
+        "seconds_since_last_letter": _seconds_since_last_letter(),
+        "hours_since_last_letter": _seconds_since_last_letter() / 3600.0,
+        "weekly_checkins_missed_consecutive": int(state.get("weekly_checkins_missed_consecutive") or 0),
     }
 
 

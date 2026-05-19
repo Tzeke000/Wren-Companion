@@ -186,10 +186,16 @@ DISCORD_MAX_LEN = 2000  # Discord enforces 2000-char limit on message content
 
 
 def _last_user_text_with_channel(transcript_path: str) -> tuple[str, int]:
-    """Return (text, line_idx) of the last user message containing a <channel ...>
-    tag. Skips type=user entries whose content is only tool_results (which the
-    transcript stores as type=user but don't represent actual inbound messages).
-    Returns ("", -1) if none found.
+    """Return (text, line_idx) of the MOST RECENT user message that contains
+    a <channel ...> tag AND is the latest user-text entry overall.
+
+    Behavior change 2026-05-19 (fixing auto-forward over-fire): only returns
+    a channel tag if it's in the CURRENT turn's inbound. If a more recent
+    user-text entry exists without a channel tag (e.g., a system-reminder
+    injection or task-notification), the channel-tagged inbound is treated
+    as already-handled by prior turns and ("", -1) is returned.
+
+    Skips type=user entries whose content is only tool_results.
 
     The line_idx is the transcript-line index of the found entry — used by
     _tool_uses_since_idx to limit tool-use scan to "this turn."
@@ -199,6 +205,10 @@ def _last_user_text_with_channel(transcript_path: str) -> tuple[str, int]:
             entries = [ln for ln in f if ln.strip()]
     except Exception:
         return "", -1
+    # Walk backwards to find the MOST RECENT user-text entry (regardless
+    # of whether it has a channel tag). If it DOES have a channel tag,
+    # return it. If it doesn't, return ("", -1) — the auto-forward should
+    # only fire when the current-turn inbound itself is channel-tagged.
     for i in range(len(entries) - 1, -1, -1):
         try:
             entry = json.loads(entries[i])
@@ -218,8 +228,15 @@ def _last_user_text_with_channel(transcript_path: str) -> tuple[str, int]:
         elif isinstance(content, str):
             parts.append(content)
         combined = "\n".join(parts)
+        if not combined.strip():
+            # tool_result-only entry; keep walking back
+            continue
+        # This IS the most recent user-text entry. If it has a channel
+        # tag, that's the current-turn inbound. If not, we're past the
+        # inbound and shouldn't auto-forward.
         if "<channel" in combined:
             return combined, i
+        return "", -1
     return "", -1
 
 
@@ -341,6 +358,25 @@ def _check_and_auto_forward(transcript_path: str) -> None:
     chat_id = tag.get("chat_id", "")
     if not chat_id:
         return
+    # Fire update_zeke_contact() on Discord-from-Zeke arrivals (added 2026-05-19,
+    # §2a substrate counters Phase 2). Guard on user_id to avoid firing on the
+    # bot's own outgoing messages — only Zeke's user_id (600008921008046120)
+    # counts as actual Zeke-touched-the-system. Best-effort; iris_time may be
+    # unavailable in fresh-clone test contexts.
+    if source.startswith("plugin:discord"):
+        user_id = tag.get("user_id", "")
+        if user_id == "600008921008046120":
+            try:
+                import sys as _sys
+                _here = os.path.dirname(os.path.abspath(__file__))
+                _repo = os.path.dirname(_here)
+                if _repo not in _sys.path:
+                    _sys.path.insert(0, _repo)
+                from brain import iris_time
+                iris_time.update_zeke_contact()
+            except Exception as _e:
+                print(f"[stop_hook] update_zeke_contact (discord) failed: {_e!r}",
+                      file=sys.stderr, flush=True)
     # Aggregate ALL tool calls since the inbound (entire turn), not just the
     # last assistant entry — CC writes each tool call as its own entry.
     tool_uses = _tool_uses_since_idx(transcript_path, inbound_idx)
