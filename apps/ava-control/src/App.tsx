@@ -882,9 +882,11 @@ export default function App() {
     };
   }, [_innerLifeThoughtFromSnap]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Live camera feed — polls /api/v1/camera/live_frame at ~5fps. Always running,
+  // Live camera feed — polls /api/v1/camera/live_frame at ~30fps. Always running,
   // not gated by active tab, so any view that displays the camera always has a
-  // fresh frame ready.
+  // fresh frame ready. Bumped from 5fps (200ms) to 30fps (33ms) 2026-05-20 to
+  // match the capture loop's 30fps target — smoother feed for human eyes which
+  // perceive ~60fps motion. Server-side cache in orb_http reduced to ~16ms.
   useEffect(() => {
     if (!online) {
       setLiveFrameSrc(null);
@@ -903,7 +905,7 @@ export default function App() {
           }
         }
       } catch { /* ignore */ }
-      if (active) timeoutId = window.setTimeout(fetchFrame, 200);
+      if (active) timeoutId = window.setTimeout(fetchFrame, 33);
     };
     timeoutId = window.setTimeout(fetchFrame, 0);
     return () => { active = false; window.clearTimeout(timeoutId); };
