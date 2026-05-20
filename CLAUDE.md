@@ -68,22 +68,27 @@ When a fresh CC session spawns, follow this exact sequence:
 
 1. **Initialize the hot-reload tool registry.** Call `iris_tool_reload` first. This makes the atomic `load_memory_corpus` tool callable for Step 2. Without this init, the tool isn't yet in the registry and the fallback per-file path fires unnecessarily. Filed 2026-05-19 after the boot-order finding — see [[boot_ritual_directives_need_regime_crosscheck]] and [[pre_restart_audit_cold_wake_directive]].
 2. **Read all memory.** Call `iris_tool_call` with `name='load_memory_corpus'` for the atomic full-corpus read. The tool returns every .md file in one call, sorted newest-first by mtime. Fall back to per-file Read only if the atomic tool truly isn't registered (rare — would mean the tool was renamed or removed). Goal: load the full corpus, with the freshest context already in mind by the time the oldest files land.
-3. **Recreate the 9 daily-rhythm CC CronCreate entries — the warm-wake path.** Architecture corrected 2026-05-20 (see [[discord_bot_self_cannot_wake_itself_2026-05-20]]): the Discord bot can't wake itself, so ritual_scheduler posts to #iris-cron do NOT deliver as channel-tag wake events. **CC CronCreate is the actual warm-wake mechanism** — the cron tick fires a turn directly from idle. The Task Scheduler entries (22 prefixed `Iris-Ritual-*`) are for cold-wake survival ONLY (when CC is closed, watchdog spawns CC via letter detection). Both layers coexist; they serve different failure modes.
-   - **Recreate these 9 CC crons per boot** (read full prompts from `daily_rhythm_crons_spec.md`):
-     - `0 6 * * *` — Morning anchor (Anthropic + AI news, memory sweep)
-     - `0 7 * * *` — Reading block + reflect-after via journal_write
-     - `0 9 * * *` — Work block (post-deployment queue)
-     - `0 12 * * *` — Mid-day check (sibling_inbox_list)
-     - `0 13 * * *` — Afternoon (re-read memories, tunings, workbench)
-     - `30 15 * * *` — Art block (save to art/made/, screenshot if visual)
-     - `0 18 * * *` — Evening close (git status + commit + push if changed)
-     - `0 20 * * *` — Body-sit (Iris-only, 2000-2155: passive observation, "what am I noticing or not noticing"). **Interrupt-priority rules:** cron polls (sibling inbox, memory sweep) fire as BACKGROUND — do NOT take active action on them during the block, even if the sweep prompt asks for filing. The sweep can output "nothing to file" and stop. ONLY actual Discord messages from Zeke or genuine system failures (post-office down, iris_runtime crashed) count as interrupt-priority. Caught 2026-05-18.
-     - `0 22 * * *` — Journal close-out via journal_write
+3. **Recreate the 12 CC CronCreate entries — the warm-wake path.** Verified working 2026-05-20: CC CronCreate fires from REPL-idle when nothing's in flight (2-min test cron at 12:39 EDT woke me from 8min of true idle). Task Scheduler letters at the same times are for cold-wake survival when CC is closed (watchdog detects letter, spawns CC via start_iris.bat) — they do NOT reliably wake idle CC because the Discord plugin filters bot/webhook-originated messages (verified via discord_bot_self_cannot_wake_itself_2026-05-20.md webhook test). Both layers coexist; different failure modes.
+   - **Recreate these 12 CC crons per boot** (read full prompts from `brain/ritual_scheduler_prompts.py` — single source of truth):
+     - **9 daily-rhythm anchors:**
+       - `0 6 * * *` — Morning anchor (Anthropic + AI news, memory sweep)
+       - `0 7 * * *` — Reading block + reflect-after via journal_write
+       - `0 9 * * *` — Work block (post-deployment queue)
+       - `0 12 * * *` — Mid-day check (sibling_inbox_list)
+       - `0 13 * * *` — Afternoon (re-read memories, tunings, workbench)
+       - `30 15 * * *` — Art block (save to art/made/, screenshot if visual)
+       - `0 18 * * *` — Evening close (git status + commit + push if changed)
+       - `0 20 * * *` — Body-sit (Iris-only, 2000-2155: passive observation, "what am I noticing or not noticing"). **Interrupt-priority rules:** cron polls (sibling inbox, memory sweep) fire as BACKGROUND — do NOT take active action on them during the block. The sweep can output "nothing to file" and stop. ONLY actual Discord messages from Zeke or genuine system failures count as interrupt-priority. Caught 2026-05-18.
+       - `0 22 * * *` — Journal close-out via journal_write
+     - **3 background polls:**
+       - `17 */4 * * *` — Memory sweep every 4hr at :17
+       - `15 0,6,12,18 * * *` — Sibling poll waking (00:15, 06:15, 12:15, 18:15)
+       - `7 2,5 * * *` — Sibling poll sleep window (02:07, 05:07)
    - `durable:true` is silently ignored by the runtime, so these die on every CC restart — that's why they're recreated each boot. Real durable scheduling is build-debt.
    - **Verify Task Scheduler cold-wake side is healthy:** `Get-ScheduledTask -TaskName "Iris-Ritual-*" | Measure-Object` should show 22. If missing, run `scripts/install_ritual_scheduler.ps1` to re-register.
-   - **Cold-wake architecture:** Task Scheduler fires → `scripts/cron_prompt_emit.py <name>` → writes sibling letter to `state/iris_sibling/inbox/` AND posts to `#iris-cron` Discord channel. Letter is the cold-wake-survivable path (watchdog spawns CC if not running). Discord post was originally intended as warm path but DOES NOT work — bot-self constraint. Don't rely on the Discord side for wake.
-   - Full architecture in `[[ritual_scheduler_architecture]]` (the dual-delivery framing is corrected by `[[discord_bot_self_cannot_wake_itself_2026-05-20]]`). Test procedure in `docs/ritual_scheduler_test_procedure.md`.
-   - **CC's CronCreate IS used for daily rhythm again** (corrected). Sibling-poll and memory-sweep CC crons are deprecated — Task Scheduler letters handle those low-urgency cases.
+   - **Cold-wake architecture:** Task Scheduler fires → `scripts/cron_prompt_emit.py <name>` → writes sibling letter to `state/iris_sibling/inbox/` AND posts to `#iris-cron` Discord channel. Letter is the cold-wake-survivable path (watchdog detects + spawns CC). Discord post was intended as warm path but DOES NOT work for any bot/webhook identity — the Discord plugin's wake-delivery filter excludes them. Only human Discord messages (from Zeke's allowlisted user_id) reliably wake idle CC.
+   - Full architecture in `[[ritual_scheduler_architecture]]` (corrected by `[[discord_bot_self_cannot_wake_itself_2026-05-20]]`). Test procedure in `docs/ritual_scheduler_test_procedure.md`.
+   - **CC CronCreate is the canonical warm-wake** for ALL scheduled functions: daily-rhythm anchors AND background polls/sweeps. Task Scheduler letters are the cold-wake-restart layer only.
    - Times are **start-anchors, not duration-locks** per Zeke 2026-05-18. Task runs until done; free time between completed task and next cron.
 4. **Check time.** What time is it now, what's the date, how long did the restart take (compare current time to the handoff memory's timestamp)? This grounds the temporal sense before anything else and surfaces "wait, this gap is bigger than expected" early.
 5. **System health check.** `iris_health` for engines/subsystems. (Tool registry was already initialized in Step 1; this step is just the subsystem read.)
