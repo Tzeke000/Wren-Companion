@@ -3836,10 +3836,15 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
         return
     print("[iris_video] camera opened (DSHOW), streaming at 15fps", file=sys.stderr, flush=True)
 
-    interval = 1.0 / 15.0
-    insight_every_n = 3
-    expr_every_n = 5      # ~3fps expression detection
-    attn_every_n = 30     # ~0.5fps attention/gaze (still much faster than Ava's 30s heartbeat)
+    # 2026-05-20: bumped capture to 30fps for smoother orb camera feed.
+    # Detect cadences scaled (insight 3->6, expr 5->10, attn 30->60) so the
+    # per-second detect rate stays the same — no CUDA cost change, just more
+    # frames pushed to frame_store for the orb to sample at higher rate.
+    # Trade-off: ~2x CPU on capture path (cheap), no GPU change.
+    interval = 1.0 / 30.0
+    insight_every_n = 6   # ~5fps face detection (unchanged)
+    expr_every_n = 10     # ~3fps expression detection (unchanged)
+    attn_every_n = 60     # ~0.5fps attention/gaze (unchanged)
     frame_idx = 0
 
     from brain.camera_annotator import annotate_frame as _annotate
