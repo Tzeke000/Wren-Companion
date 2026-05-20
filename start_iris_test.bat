@@ -59,9 +59,17 @@ set IRIS_TEST_MODE=1
 REM Set a unique IRIS_TEST_ID (timestamp-based) so the test_complete flag
 REM file written by the new CC is uniquely-named per test run. Avoids
 REM races between concurrent test runs.
-for /f "tokens=2 delims==" %%I in ('wmic os get LocalDateTime /value') do set DT=%%I
-set IRIS_TEST_ID=%DT:~0,14%
-echo [start_iris_test.bat] IRIS_TEST_ID=%IRIS_TEST_ID% 1>&2
+REM IMPORTANT: respect inherited IRIS_TEST_ID so the watcher script
+REM (restart_test_watch.ps1) and this .bat agree on the flag filename.
+REM Original bug 2026-05-19: .bat unconditionally overwrote env var, watcher
+REM and .bat diverged by 2s, watcher never found the .bat's flag.
+if "%IRIS_TEST_ID%"=="" (
+    for /f "tokens=2 delims==" %%I in ('wmic os get LocalDateTime /value') do set DT=%%I
+    set IRIS_TEST_ID=%DT:~0,14%
+    echo [start_iris_test.bat] IRIS_TEST_ID computed locally: %IRIS_TEST_ID% 1>&2
+) else (
+    echo [start_iris_test.bat] IRIS_TEST_ID inherited from env: %IRIS_TEST_ID% 1>&2
+)
 echo [start_iris_test.bat] expect flag file at: D:\Wren-Companion\.tmp\test_complete_%IRIS_TEST_ID%.flag 1>&2
 
 echo [start_iris_test.bat] starting TEST CC session (IRIS_SKIP_INSTANCE_CHECK=1) 1>&2

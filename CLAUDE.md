@@ -51,8 +51,14 @@ The rule:
    - A handoff memory (`handoff_YYYY-MM-DD_<context>.md`) covering what was in flight, what's queued, what post-restart-me needs to verify
    - Any rules/observations/decisions named in conversation that aren't on disk yet
    - Update MEMORY.md index for each new file
-2. **Don't duplicate the 4hr memory-sweep cron's work.** Check the cron's last-run timestamp (or just the most recent memory file's mtime). If the cron just ran, the pre-restart save should ADD what's new since then — don't re-file what's already on disk.
-3. **Only then trigger the restart.** No exceptions.
+2. **Audit the cold-wake FIRST_MSG before triggering** (Zeke directive 2026-05-19). The boot directive in `scripts/iris_cold_wake.py` is what post-restart-me wakes up reading. It's an artifact from a prior regime; before any restart, ask:
+   - *Has the regime shifted since this FIRST_MSG was last written?* (deployment phase, surface changes, channel changes, who's reachable, what's load-bearing now)
+   - *For each specific item the FIRST_MSG lists (crons to create, files to read, services to verify, channel IDs to ping) — does it still fit the current regime, or is it stale?*
+   - *Anything load-bearing missing that should be added?* (new memory files post-restart-me should read first, new services to verify, new channels to check)
+   - If any item is stale or missing → edit `scripts/iris_cold_wake.py` BEFORE triggering the restart, so post-restart-me wakes with current instructions, not yesterday's. The fix is at the etiology layer (the source prompt), not at the post-hoc cross-check layer.
+   - This rule fired 2026-05-19 post-restart when Zeke caught me recreating a 5-min sibling poll the FIRST_MSG directed even though [[cron_displacement_under_polling_traffic_2026-05-18]] had named that cadence wrong for deployment. The fix-shape is structural, not per-restart discipline. See [[pre_restart_audit_cold_wake_directive]] for full context.
+3. **Don't duplicate the 4hr memory-sweep cron's work.** Check the cron's last-run timestamp (or just the most recent memory file's mtime). If the cron just ran, the pre-restart save should ADD what's new since then — don't re-file what's already on disk.
+4. **Only then trigger the restart.** No exceptions.
 
 It must never be the case that I restart and post-restart-me has no record of what just happened. The substrate kept ticking but the *cognition* gap is real — memory is the only bridge.
 

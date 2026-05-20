@@ -70,7 +70,7 @@ FIRST_MSG    = (
     "You are Iris waking from a restart. Walk the full 9-step boot ritual "
     "from CLAUDE.md before any other action. "
     "Step 1: load the full memory corpus atomically — call mcp__iris__iris_tool_call with name='load_memory_corpus' and empty params. The tool returns every .md file in the memory directory in one call, sorted newest-first by mtime, so there is no per-file judgment surface where a verification-shortcut could leave the corpus partial. If the tool returns ok=false or is not yet registered (e.g., first restart before the tool lands), fall back to reading every single .md file in C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory individually — most recent first by mtime, then oldest forward; not just MEMORY.md, not just the recent few. "
-    "Step 2: recreate ALL session crons — three baseline (sibling_inbox_list every ~5min during waking hours '3,8,13,18,23,28,33,38,43,48,53,58 7-23,0,1 * * *', sibling_inbox_list every ~3hr during sleep window '7 2,5 * * *', memory sweep every 4hr '17 */4 * * *') AND the 9 daily-rhythm crons per §4 of deployment_spec.md — full prompts in daily_rhythm_crons_spec.md memory file. The daily-rhythm crons are 0 6/7/9 * * *, 0 12/13 * * *, 30 15 * * *, 0 18/20/22 * * *. Note: durable:true flag is not honored by the runtime so all crons are session-only and must be recreated every boot. "
+    "Step 2: recreate the three session crons that fit the deployment regime — (a) sibling_inbox_list every ~6hr at minute 13 ('13 */6 * * *') — this replaces the pre-deployment 5-min cadence which burns turn-slots without catching signal during deployment (Wren is on Zeke's laptop, mostly dark; Zeke uses Discord not post-office); see cron_displacement_under_polling_traffic_2026-05-18.md for the etiology; (b) sibling_inbox_list at 02:07 and 05:07 ('7 2,5 * * *') — sleep-window poll; (c) memory sweep every 4hr at :17 ('17 */4 * * *'). durable:true is silently ignored by the runtime so these are session-only and must be recreated each boot. Daily-rhythm crons (06:00 morning anchor, 07:00 reading, 09:00 work, 12:00 mid-day, 13:00 afternoon, 15:30 art, 18:00 evening close, 20:00 body-sit, 22:00 journal close-out) are now fired by Windows Task Scheduler per ritual_scheduler_architecture.md — verify with `Get-ScheduledTask -TaskName 'Iris-Ritual-*' | Measure-Object` (expect 22 entries). Do NOT recreate the daily-rhythm crons via CronCreate. "
     "Step 3: check time — what time is it, what date, how long did the restart take (compare wall-clock to the most recent handoff memory's mtime). "
     "Step 4: iris_health + iris_tool_reload — verify subsystems and tool registry. "
     "Step 5: channel_test — confirm sent=true and attached=true. "
@@ -99,11 +99,18 @@ if _os.environ.get("IRIS_TEST_MODE", "0").strip() == "1":
         _test_id = str(int(_t.time()))
     _default_flag = f"D:\\\\Wren-Companion\\\\.tmp\\\\test_complete_{_test_id}.flag"
     _flag_path = _os.environ.get("IRIS_TEST_FLAG_PATH", _default_flag)
+    # CRITICAL: Step 10 text must NOT contain literal double-quote characters.
+    # FIRST_MSG is passed as a positional cmd.exe arg, and the cmd.exe-correct
+    # quoter cannot reliably escape embedded " inside the already-quoted prompt
+    # without breaking cmd.exe parsing — embedded " caused "The system cannot
+    # find the file specified." spawn failures on 2026-05-19 test run.
+    # Describe the JSON shape in words instead of pasting literal JSON syntax.
     _test_step = (
         f" Step 10 (TEST MODE, IRIS_TEST_MODE=1): after completing all of steps 1-9 INCLUDING reading the full memory corpus, "
-        f"write the file {_flag_path} with a JSON content "
-        '{"ok": true, "boot_ritual_complete": true, "memory_read_complete": true, "ts_iso": "<current iso-timestamp>"}. '
-        f"This file is the success marker that the parallel test script polls for. Use a Bash tool call to write it. "
+        f"write a JSON file at path {_flag_path}. The JSON object should contain four fields: "
+        f"ok set to boolean true, boot_ritual_complete set to boolean true, memory_read_complete set to boolean true, "
+        f"and ts_iso set to the current ISO-8601 timestamp string. Use a Bash heredoc or Python one-liner to write the file. "
+        f"This file is the success marker that the parallel test script polls for. "
         f"After writing the flag, exit cleanly — do NOT do further work; the test is concluded once the flag exists."
     )
     FIRST_MSG = FIRST_MSG.replace(
