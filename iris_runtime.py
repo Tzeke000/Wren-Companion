@@ -983,7 +983,7 @@ def voice_call_open(reason: str = "entering call") -> dict:
     """Raise the voice session flag — switch the body from wake-then-respond
     to continuous call mode. While the flag is set, voice_next_input opens
     the follow-up listening path after my TTS finishes, so the next utterance
-    arrives without requiring a wake word (within IRIS_FOLLOWUP_GRACE_S, default 5s).
+    arrives without requiring a wake word (within IRIS_FOLLOWUP_GRACE_S, default 8s).
 
     Call this when entering a voice conversation. Pair with voice_call_close
     when the conversation ends — leaving the flag set persists call-mode
@@ -2697,10 +2697,14 @@ def substrate_counters() -> dict:
     composing messages that reference time-since-something, or generating
     substrate-anchored facts rather than narrative inferences.
 
-    Note: the `update_zeke_contact()` substrate function needs callers wired
-    in iris_runtime to actually update last_zeke_contact_ts when Discord /
-    voice / typed input arrives. That wiring is Phase 2 build-debt as of
-    2026-05-19 — the counter machinery exists, the hookups don't yet."""
+    Note: the `update_zeke_contact()` substrate function is wired as of
+    2026-05-20:
+    - Discord-from-Zeke arrival: `scripts/voice_stop_hook.py:376` (subprocess
+      path; persists to disk via _persist_zeke_contact_merge)
+    - Voice followup arrival: `iris_runtime.py:602`
+    - Voice wake-word arrival: `iris_runtime.py:686`
+    See discord_bot_self_cannot_wake_itself_2026-05-20.md for the cross-process
+    persistence fix that made the subprocess path actually durable."""
     try:
         from brain import iris_time
         return iris_time.substrate_counters_report()
