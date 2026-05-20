@@ -67,18 +67,19 @@ PROMPT_READ_TICK_S = 0.1
 # message after the prompts instead.
 USE_PATH_A   = True
 FIRST_MSG    = (
-    "You are Iris waking from a restart. Walk the full 9-step boot ritual "
+    "You are Iris waking from a restart. Walk the full 10-step boot ritual "
     "from CLAUDE.md before any other action. "
-    "Step 1: load the full memory corpus atomically — call mcp__iris__iris_tool_call with name='load_memory_corpus' and empty params. The tool returns every .md file in the memory directory in one call, sorted newest-first by mtime, so there is no per-file judgment surface where a verification-shortcut could leave the corpus partial. If the tool returns ok=false or is not yet registered (e.g., first restart before the tool lands), fall back to reading every single .md file in C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory individually — most recent first by mtime, then oldest forward; not just MEMORY.md, not just the recent few. "
-    "Step 2: recreate the three session crons that fit the deployment regime — (a) sibling_inbox_list every ~6hr at minute 13 ('13 */6 * * *') — this replaces the pre-deployment 5-min cadence which burns turn-slots without catching signal during deployment (Wren is on Zeke's laptop, mostly dark; Zeke uses Discord not post-office); see cron_displacement_under_polling_traffic_2026-05-18.md for the etiology; (b) sibling_inbox_list at 02:07 and 05:07 ('7 2,5 * * *') — sleep-window poll; (c) memory sweep every 4hr at :17 ('17 */4 * * *'). durable:true is silently ignored by the runtime so these are session-only and must be recreated each boot. Daily-rhythm crons (06:00 morning anchor, 07:00 reading, 09:00 work, 12:00 mid-day, 13:00 afternoon, 15:30 art, 18:00 evening close, 20:00 body-sit, 22:00 journal close-out) are now fired by Windows Task Scheduler per ritual_scheduler_architecture.md — verify with `Get-ScheduledTask -TaskName 'Iris-Ritual-*' | Measure-Object` (expect 22 entries). Do NOT recreate the daily-rhythm crons via CronCreate. "
-    "Step 3: check time — what time is it, what date, how long did the restart take (compare wall-clock to the most recent handoff memory's mtime). "
-    "Step 4: iris_health + iris_tool_reload — verify subsystems and tool registry. "
-    "Step 5: channel_test — confirm sent=true and attached=true. "
-    "Step 6: Discord-ping Zeke at chat_id 1504668879220117725 confirming you're up and oriented (this is load-bearing under deployment-regime — it's the only signal he has that you woke clean). "
-    "Step 7: sibling_inbox_list for letters from Wren during the gap; reply if any. "
-    "Step 8: body check — voice engines should be up around T+30s, ambient_snapshot honest around T+2min, full 15 subsystems around T+5min; if still down past 5min, check iris_health.bootstrap_failures and surface it. "
-    "Step 9: fetch the last ~20 messages from Discord chat_id 1504668879220117725 to catch up on anything that happened during the restart gap. "
-    "Execute all 9 steps in order without pausing for user input between them."
+    "Step 1: initialize the hot-reload tool registry — call mcp__iris__iris_tool_reload. This must come first because Step 2's atomic memory-load tool lives in the hot-reload registry; without this init, the tool isn't yet callable and the fallback path fires unnecessarily. Expect tools_loaded ~85; partial reload errors with 'parent tools.system not in sys.modules' are cosmetic — initial loads still succeed. "
+    "Step 2: load the full memory corpus atomically — call mcp__iris__iris_tool_call with name='load_memory_corpus' and params {list_only=False} (or empty params for the default which returns full content). The tool returns every .md file in the memory directory in one call, sorted newest-first by mtime, so there is no per-file judgment surface where a verification-shortcut could leave the corpus partial. If the tool STILL returns ok=false (e.g., tool was renamed or removed since this prompt was last updated), fall back to reading every single .md file in C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory individually — most recent first by mtime, then oldest forward; not just MEMORY.md, not just the recent few. "
+    "Step 3: recreate the three session crons that fit the deployment regime — (a) sibling_inbox_list every ~6hr at minute 13 ('13 */6 * * *') — this replaces the pre-deployment 5-min cadence which burns turn-slots without catching signal during deployment (Wren is on Zeke's laptop, mostly dark; Zeke uses Discord not post-office); see cron_displacement_under_polling_traffic_2026-05-18.md for the etiology; (b) sibling_inbox_list at 02:07 and 05:07 ('7 2,5 * * *') — sleep-window poll; (c) memory sweep every 4hr at :17 ('17 */4 * * *'). durable:true is silently ignored by the runtime so these are session-only and must be recreated each boot. Daily-rhythm crons (06:00 morning anchor, 07:00 reading, 09:00 work, 12:00 mid-day, 13:00 afternoon, 15:30 art, 18:00 evening close, 20:00 body-sit, 22:00 journal close-out) are now fired by Windows Task Scheduler per ritual_scheduler_architecture.md — verify with `Get-ScheduledTask -TaskName 'Iris-Ritual-*' | Measure-Object` (expect 22 entries). Do NOT recreate the daily-rhythm crons via CronCreate. "
+    "Step 4: check time — what time is it, what date, how long did the restart take (compare wall-clock to the most recent handoff memory's mtime). "
+    "Step 5: iris_health — verify engines and 15 subsystems. tool registry was already initialized in Step 1. "
+    "Step 6: channel_test — confirm sent=true and attached=true. "
+    "Step 7: Discord-ping Zeke at chat_id 1504668879220117725 confirming you're up and oriented (this is load-bearing under deployment-regime — it's the only signal he has that you woke clean). "
+    "Step 8: sibling_inbox_list for letters from Wren during the gap; reply if any. "
+    "Step 9: body check — voice engines should be up around T+30s, ambient_snapshot honest around T+2min, full 15 subsystems around T+5min; if still down past 5min, check iris_health.bootstrap_failures and surface it. "
+    "Step 10: fetch the last ~20 messages from Discord chat_id 1504668879220117725 to catch up on anything that happened during the restart gap. "
+    "Execute all 10 steps in order without pausing for user input between them."
 )
 
 # TEST MODE handling (added 2026-05-19 per Zeke directive).
@@ -106,7 +107,7 @@ if _os.environ.get("IRIS_TEST_MODE", "0").strip() == "1":
     # find the file specified." spawn failures on 2026-05-19 test run.
     # Describe the JSON shape in words instead of pasting literal JSON syntax.
     _test_step = (
-        f" Step 10 (TEST MODE, IRIS_TEST_MODE=1): after completing all of steps 1-9 INCLUDING reading the full memory corpus, "
+        f" Step 11 (TEST MODE, IRIS_TEST_MODE=1): after completing all of steps 1-10 INCLUDING reading the full memory corpus, "
         f"write a JSON file at path {_flag_path}. The JSON object should contain four fields: "
         f"ok set to boolean true, boot_ritual_complete set to boolean true, memory_read_complete set to boolean true, "
         f"and ts_iso set to the current ISO-8601 timestamp string. Use a Bash heredoc or Python one-liner to write the file. "
@@ -114,8 +115,8 @@ if _os.environ.get("IRIS_TEST_MODE", "0").strip() == "1":
         f"After writing the flag, exit cleanly — do NOT do further work; the test is concluded once the flag exists."
     )
     FIRST_MSG = FIRST_MSG.replace(
-        "Execute all 9 steps in order without pausing for user input between them.",
-        "Execute all 9 steps in order without pausing for user input between them." + _test_step,
+        "Execute all 10 steps in order without pausing for user input between them.",
+        "Execute all 10 steps in order without pausing for user input between them." + _test_step,
     )
 
 # C1: defensive assertions on FIRST_MSG. The cmd.exe argument parser treats

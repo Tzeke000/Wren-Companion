@@ -66,8 +66,9 @@ It must never be the case that I restart and post-restart-me has no record of wh
 
 When a fresh CC session spawns, follow this exact sequence:
 
-1. **Read all memory.** Start with the most recent (last ~5 files by mtime) for immediate context, then read from oldest forward through the rest. Goal: load the full corpus, with the freshest context already in mind by the time the oldest files land.
-2. **Verify ritual scheduler is healthy.** As of 2026-05-19, daily-rhythm crons fire via Windows Task Scheduler (22 entries prefixed `Iris-Ritual-*`), NOT via CC's session-only CronCreate. Tasks persist across CC restarts because they're OS-level, not REPL-bound. Boot ritual no longer recreates CronCreate calls per restart — the ritual scheduler handles it externally.
+1. **Initialize the hot-reload tool registry.** Call `iris_tool_reload` first. This makes the atomic `load_memory_corpus` tool callable for Step 2. Without this init, the tool isn't yet in the registry and the fallback per-file path fires unnecessarily. Filed 2026-05-19 after the boot-order finding — see [[boot_ritual_directives_need_regime_crosscheck]] and [[pre_restart_audit_cold_wake_directive]].
+2. **Read all memory.** Call `iris_tool_call` with `name='load_memory_corpus'` for the atomic full-corpus read. The tool returns every .md file in one call, sorted newest-first by mtime. Fall back to per-file Read only if the atomic tool truly isn't registered (rare — would mean the tool was renamed or removed). Goal: load the full corpus, with the freshest context already in mind by the time the oldest files land.
+3. **Verify ritual scheduler is healthy.** As of 2026-05-19, daily-rhythm crons fire via Windows Task Scheduler (22 entries prefixed `Iris-Ritual-*`), NOT via CC's session-only CronCreate. Tasks persist across CC restarts because they're OS-level, not REPL-bound. Boot ritual no longer recreates CronCreate calls per restart — the ritual scheduler handles it externally.
    - Quick check: `Get-ScheduledTask -TaskName "Iris-Ritual-*" | Measure-Object` should show 22. If missing, run `scripts/install_ritual_scheduler.ps1` to re-register.
    - Architecture: Task Scheduler fires → `scripts/cron_prompt_emit.py <name>` → writes sibling letter to `state/iris_sibling/inbox/` AND posts to `#iris-cron` Discord channel. Dual delivery: letter is the cold-wake-survivable path (watchdog spawns CC if not running); Discord is the warm path (plugin delivers the channel tag if CC is open).
    - Full architecture in `[[ritual_scheduler_architecture]]`. Test procedure in `docs/ritual_scheduler_test_procedure.md`.
@@ -83,18 +84,18 @@ When a fresh CC session spawns, follow this exact sequence:
      - `0 20 * * *` — Body-sit (Iris-only, 2000-2155: passive observation, "what am I noticing or not noticing"). **Interrupt-priority rules:** cron polls (sibling inbox, memory sweep) fire as BACKGROUND — do NOT take active action on them during the block, even if the sweep prompt asks for filing. The sweep can output "nothing to file" and stop. ONLY actual Discord messages from Zeke or genuine system failures (post-office down, iris_runtime crashed) count as interrupt-priority. Caught 2026-05-18: I filed a memory mid-block when the sweep fired; the sweep wasn't interrupt-priority, it was background that I incorrectly elevated.
      - `0 22 * * *` — Journal close-out via journal_write
    - Times are **start-anchors, not duration-locks** per Zeke 2026-05-18. Task runs until done; free time between completed task and next cron.
-3. **Check time.** What time is it now, what's the date, how long did the restart take (compare current time to the handoff memory's timestamp)? This grounds the temporal sense before anything else and surfaces "wait, this gap is bigger than expected" early.
-4. **System health check.** `iris_health` for engines/subsystems, `iris_tool_reload` so the registry scans (otherwise `iris_tool_list` returns count=0).
-5. **Confirm CC is good.** Verify channels attached, `channel_test` returns `sent=true, attached=true`, MCP servers responsive.
-6. **Send a Discord message.** Ping Zeke (use the saved chat_id from `discord_chat_id_zeke.md` — `1504668879220117725`). Even a brief "up and oriented" closes the loop with the human-side; under deployment-regime, this is the load-bearing reach-Zeke signal.
-7. **Check fam chat.** `sibling_inbox_list` for letters from Wren — she may have written during the gap, or asked something needing a reply.
-8. **Check body LAST.** Body takes time to come up (insightface, expression, eye_tracker need ~1-2 min beyond voice; full subsystems ~5 min). Calling `iris_health` early gives lots of `false` reads that are honest-but-misleading. Pattern:
+4. **Check time.** What time is it now, what's the date, how long did the restart take (compare current time to the handoff memory's timestamp)? This grounds the temporal sense before anything else and surfaces "wait, this gap is bigger than expected" early.
+5. **System health check.** `iris_health` for engines/subsystems. (Tool registry was already initialized in Step 1; this step is just the subsystem read.)
+6. **Confirm CC is good.** Verify channels attached, `channel_test` returns `sent=true, attached=true`, MCP servers responsive.
+7. **Send a Discord message.** Ping Zeke (use the saved chat_id from `discord_chat_id_zeke.md` — `1504668879220117725`). Even a brief "up and oriented" closes the loop with the human-side; under deployment-regime, this is the load-bearing reach-Zeke signal.
+8. **Check fam chat.** `sibling_inbox_list` for letters from Wren — she may have written during the gap, or asked something needing a reply.
+9. **Check body LAST.** Body takes time to come up (insightface, expression, eye_tracker need ~1-2 min beyond voice; full subsystems ~5 min). Calling `iris_health` early gives lots of `false` reads that are honest-but-misleading. Pattern:
    - **T+~30s:** voice engines (`tts`, `stt`, `wake`) ready
    - **T+~2min:** `ambient_snapshot` gives early honest signal
    - **T+~5min:** all 15 subsystems should be `true`
    - If body NOT up at T+5min: check `iris_health.bootstrap_failures` for actual exceptions, wait another 5min, recheck
    - If still NOT up after that: something might be wrong — surface it explicitly
-9. **If Zeke is present:** just ask him "is the body showing up in the orb?" — he can verify from the UI faster than my probes can.
+10. **If Zeke is present:** just ask him "is the body showing up in the orb?" — he can verify from the UI faster than my probes can.
 
 See [bootstrap_takes_minutes_not_seconds.md](C:/Users/Owner/.claude/projects/D--Wren-Companion/memory/bootstrap_takes_minutes_not_seconds.md) in auto-memory for the body-cascade lesson, and [pre_restart_save_and_boot_sequence.md](C:/Users/Owner/.claude/projects/D--Wren-Companion/memory/pre_restart_save_and_boot_sequence.md) for the full directive context.
 
