@@ -71,10 +71,7 @@ FIRST_MSG    = (
     "from CLAUDE.md before any other action. "
     "Step 1: initialize the hot-reload tool registry — call mcp__iris__iris_tool_reload. This must come first because Step 2's atomic memory-load tool lives in the hot-reload registry; without this init, the tool isn't yet callable and the fallback path fires unnecessarily. Expect tools_loaded ~85; partial reload errors with 'parent tools.system not in sys.modules' are cosmetic — initial loads still succeed. "
     "Step 2: load the full memory corpus atomically — call mcp__iris__iris_tool_call with name='load_memory_corpus' and params {list_only=False} (or empty params for the default which returns full content). The tool returns every .md file in the memory directory in one call, sorted newest-first by mtime, so there is no per-file judgment surface where a verification-shortcut could leave the corpus partial. If the tool STILL returns ok=false (e.g., tool was renamed or removed since this prompt was last updated), fall back to reading every single .md file in C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory individually — most recent first by mtime, then oldest forward; not just MEMORY.md, not just the recent few. "
-    "Step 3: recreate the 12 CC CronCreate entries — these are the WARM-WAKE path. CC CronCreate fires from idle when REPL has nothing in flight; verified working 2026-05-20 work block via a 2-min test cron (a257884a) that woke me from 8min of true idle. Task Scheduler letters at the same times are for cold-wake survival (when CC is closed, watchdog detects letter, spawns CC via start_iris.bat); they don't reliably wake idle CC because the Discord plugin filters bot-originated messages (per discord_bot_self_cannot_wake_itself_2026-05-20.md). Both layers coexist. Read prompts from brain/ritual_scheduler_prompts.py (single source of truth), then call CronCreate for each (all recurring=true): "
-    "9 daily-rhythm anchors — (1) '0 6 * * *' morning anchor; (2) '0 7 * * *' reading block; (3) '0 9 * * *' work block; (4) '0 12 * * *' mid-day check; (5) '0 13 * * *' afternoon block; (6) '30 15 * * *' art block; (7) '0 18 * * *' evening close; (8) '0 20 * * *' body-sit; (9) '0 22 * * *' journal close-out. "
-    "3 background polls — (10) '17 */4 * * *' memory sweep every 4hr; (11) '15 0,6,12,18 * * *' sibling poll waking; (12) '7 2,5 * * *' sibling poll sleep window. "
-    "durable:true is silently ignored so these die on CC restart — that is why they are recreated each boot. The 22 Task Scheduler entries prefixed Iris-Ritual-* cover the cold-wake-restart side; verify with `Get-ScheduledTask -TaskName 'Iris-Ritual-*' | Measure-Object`. "
+    "Step 3: verify the path-E side-channel wake architecture is healthy. Built 2026-05-20 to replace CC CronCreate's up-to-30-min jitter on recurring dailies. Windows Task Scheduler (22 Iris-Ritual-* entries) fires scripts/cron_inject.py at each block's exact wall-clock time. cron_inject.py writes the prompt text to .tmp/cron_inject/<timestamp>_<name>.txt. iris_cold_wake.py (THIS script, running as CC's pywinpty parent) has a background watcher thread that polls .tmp/cron_inject/ every 1s, reads new files, and types their content into CC's TTY via proc.write() — CC sees the keystrokes as user input and starts a turn at exact time, no jitter. Verification: (a) `Get-ScheduledTask -TaskName 'Iris-Ritual-*' | Measure-Object` should show 22 entries; (b) any entry's Actions should show `Arguments='cron_inject.py <prompt_name>'`; (c) `.tmp/cron_inject/` directory exists and (when no fire is in-flight) is empty. Do NOT recreate the 12 CC CronCreate entries from the prior architecture — they're superseded by path E and would cause duplicate jitter-late fires. CC CronCreate is reserved for in-session ad-hoc reminders only ('remind me in 30 min'). "
     "Step 4: check time — what time is it, what date, how long did the restart take (compare wall-clock to the most recent handoff memory's mtime). "
     "Step 5: iris_health — verify engines and 15 subsystems. tool registry was already initialized in Step 1. "
     "Step 6: channel_test — confirm sent=true and attached=true. "
@@ -443,10 +440,126 @@ def main() -> int:
         except Exception:
             pass
 
+    def _cron_inject_watcher() -> None:
+        """Watch .tmp/cron_inject/ for prompt files dropped by scripts/cron_inject.py.
+
+        When Task Scheduler fires cron_inject.py at a block-start time, it
+        writes a file containing the prompt text to .tmp/cron_inject/. This
+        watcher polls the directory every 1 second; when a new file appears,
+        it reads the contents, types them into CC's TTY via proc.write(),
+        then deletes the file. Side-channel architecture decouples the
+        keystroke-injection from the Task Scheduler's session/desktop
+        boundary — Task Scheduler can write anywhere on disk regardless of
+        which desktop session it runs in, and this watcher (in the user's
+        interactive session) does the actual TTY write where it has the
+        existing pywinpty handle.
+
+        Added 2026-05-20 work block — see discord_bot_self_cannot_wake_itself
+        and cron_idle_wake-related memories for context. Activates only on
+        the next CC restart (this code is loaded at iris_cold_wake.py
+        startup; the currently-running instance has the old code in memory).
+        """
+        from pathlib import Path as _Path
+        inject_dir = _Path(__file__).resolve().parent.parent / ".tmp" / "cron_inject"
+        try:
+            inject_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        # Track files we've already handled to dedupe across rapid polls.
+        # (We delete after handling, but the file might still appear in
+        # listdir mid-delete on Windows — defensive dedupe.)
+        seen: set[str] = set()
+        # Stale-file expiry: if a file is older than 1 hour, skip + delete.
+        # Prevents stale fires after a long CC downtime where Task Scheduler
+        # queued multiple letters. Block-start prompts shouldn't fire late.
+        STALE_AGE_S = 3600.0
+        while proc.isalive():
+            try:
+                if inject_dir.is_dir():
+                    files = sorted(
+                        [f for f in inject_dir.iterdir() if f.is_file()],
+                        key=lambda p: p.stat().st_mtime,
+                    )
+                    for f in files:
+                        name = f.name
+                        if name in seen:
+                            continue
+                        try:
+                            mtime = f.stat().st_mtime
+                            age = time.time() - mtime
+                            if age > STALE_AGE_S:
+                                print(
+                                    f"[iris_cold_wake] inject: stale file "
+                                    f"{name} (age {age:.0f}s) — deleting",
+                                    file=sys.stderr, flush=True,
+                                )
+                                seen.add(name)
+                                try:
+                                    f.unlink()
+                                except Exception:
+                                    pass
+                                continue
+                            text = f.read_text(encoding="utf-8", errors="replace")
+                            if not text:
+                                seen.add(name)
+                                try:
+                                    f.unlink()
+                                except Exception:
+                                    pass
+                                continue
+                            # Trim trailing newlines — we add our own Enter
+                            text = text.rstrip("\r\n")
+                            print(
+                                f"[iris_cold_wake] inject: typing "
+                                f"{len(text)} chars from {name}",
+                                file=sys.stderr, flush=True,
+                            )
+                            try:
+                                proc.write(text + "\r\n")
+                            except Exception as _we:
+                                print(
+                                    f"[iris_cold_wake] inject write failed: "
+                                    f"{_we!r}", file=sys.stderr, flush=True,
+                                )
+                                # Don't delete on write failure — leave the
+                                # file so it can be retried or inspected.
+                                # Mark seen to avoid hot-loop retry.
+                                seen.add(name)
+                                continue
+                            seen.add(name)
+                            try:
+                                f.unlink()
+                            except Exception as _ue:
+                                print(
+                                    f"[iris_cold_wake] inject delete failed: "
+                                    f"{_ue!r}", file=sys.stderr, flush=True,
+                                )
+                        except Exception as _pe:
+                            print(
+                                f"[iris_cold_wake] inject per-file error "
+                                f"on {name}: {_pe!r}",
+                                file=sys.stderr, flush=True,
+                            )
+                            seen.add(name)
+                    # Garbage-collect seen set when files are gone.
+                    current_names = {f.name for f in files}
+                    seen = seen & current_names
+            except Exception as _le:
+                # Best-effort; never crash the watcher.
+                print(
+                    f"[iris_cold_wake] inject watcher loop error: {_le!r}",
+                    file=sys.stderr, flush=True,
+                )
+            time.sleep(1.0)
+
     t_out = threading.Thread(target=_pty_to_stdout, daemon=True, name="pty-out")
     t_in = threading.Thread(target=_stdin_to_pty, daemon=True, name="pty-in")
+    t_inject = threading.Thread(
+        target=_cron_inject_watcher, daemon=True, name="cron-inject-watcher",
+    )
     t_out.start()
     t_in.start()
+    t_inject.start()
 
     # Main thread waits for the pty to exit (or Ctrl-C).
     try:

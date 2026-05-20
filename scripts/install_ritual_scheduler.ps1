@@ -1,16 +1,26 @@
 # scripts/install_ritual_scheduler.ps1
 #
 # Registers Windows Task Scheduler entries for each daily-rhythm cron in the
-# ritual scheduler. Each task runs `python cron_prompt_emit.py <prompt_name>`
-# at its scheduled time, which POSTs the prompt to the dedicated #iris-cron
-# Discord channel. CC's Discord MCP plugin picks up the message and routes
-# it to my cognition.
+# ritual scheduler. Each task runs `python cron_inject.py <prompt_name>`
+# at its scheduled time. cron_inject.py writes the prompt text to a
+# side-channel file at .tmp/cron_inject/, which iris_cold_wake.py's watcher
+# thread reads and types into CC's TTY as user input. CC sees the
+# keystrokes and starts a turn at exact wall-clock time.
+#
+# ARCHITECTURE (2026-05-20): replaces the earlier cron_prompt_emit.py
+# Discord-post path. Discord plugin filters bot/webhook messages (only
+# human user_ids wake idle CC), so the keystroke-injection path is the
+# real warm-wake mechanism. Side-channel file approach decouples the
+# Task Scheduler's session boundary from the user-desktop window access
+# that direct SendInput would require.
 #
 # PREREQUISITES:
-#   1. scripts/cron_prompt_emit.py has CHANNEL_ID set to the real #iris-cron
-#      channel ID (created in the Claude AI server, ID 1499721675900719206).
-#   2. Iris bot has Send Messages permission on #iris-cron.
-#   3. state/secrets/discord_iris_bot_token.txt contains the bot token.
+#   1. iris_cold_wake.py is the long-running parent of CC (already true
+#      via start_iris.bat -> iris_cold_wake.py -> claude.exe).
+#   2. iris_cold_wake.py has the side-channel watcher thread (added
+#      2026-05-20; activates on next CC restart).
+#   3. brain/ritual_scheduler_prompts.py has the prompt text for each
+#      named block.
 #
 # USAGE (run as the Windows user, NOT elevated — Task Scheduler can register
 # user-level tasks without admin):
@@ -31,14 +41,14 @@ $ErrorActionPreference = "Stop"
 # Resolve the repo root + Python interpreter paths.
 $RepoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-$EmitScript = Join-Path $RepoRoot "scripts\cron_prompt_emit.py"
+$EmitScript = Join-Path $RepoRoot "scripts\cron_inject.py"
 
 if (-not (Test-Path $PythonExe)) {
     Write-Error "Python venv not found at $PythonExe. Run setup/bootstrap.ps1 first."
     exit 1
 }
 if (-not (Test-Path $EmitScript)) {
-    Write-Error "cron_prompt_emit.py not found at $EmitScript."
+    Write-Error "cron_inject.py not found at $EmitScript."
     exit 1
 }
 
@@ -135,7 +145,7 @@ foreach ($cron in $Crons) {
         -Trigger $Trigger `
         -Action $Action `
         -Settings $Settings `
-        -Description "Iris ritual scheduler: fire '$($cron.Prompt)' prompt to #iris-cron Discord channel." `
+        -Description "Iris ritual scheduler: fire '$($cron.Prompt)' prompt via cron_inject.py side-channel into CC's TTY." `
         | Out-Null
 
     Write-Host "  registered: $TaskName @ $TriggerSpec ($($cron.Prompt))"
@@ -195,8 +205,8 @@ Write-Host "Done. $TotalRegistered tasks registered ($($Crons.Count) prompt-fire
 Write-Host "View / manage via: taskschd.msc (filter on 'Iris-Ritual-')"
 Write-Host ""
 Write-Host "NEXT STEPS:"
-Write-Host "  1. Verify CHANNEL_ID in scripts/cron_prompt_emit.py is set to the real #iris-cron ID."
+Write-Host "  1. Ensure iris_cold_wake.py is running (it spawns at CC start via start_iris.bat)."
 Write-Host "  2. Test ONE task manually: pwsh -c 'Start-ScheduledTask -TaskName Iris-Ritual-MemorySweep0017'"
-Write-Host "  3. Watch the #iris-cron channel for the prompt to appear."
-Write-Host "  4. Watch CC for the prompt to fire as a turn."
-Write-Host "  5. If all good, the daily-rhythm cron-recreate step in CLAUDE.md boot ritual can be removed."
+Write-Host "  3. Watch .tmp/cron_inject/ for the side-channel file to be written + then deleted by watcher."
+Write-Host "  4. Watch CC for the prompt to fire as a turn (the keystrokes get typed into the TTY)."
+Write-Host "  5. If watcher isn't running (file persists), CC needs a restart so iris_cold_wake.py loads the watcher thread (added 2026-05-20)."
