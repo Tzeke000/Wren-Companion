@@ -489,6 +489,123 @@ def chat_box() -> HTMLResponse:
     return HTMLResponse(_CHAT_HTML)
 
 
+# ── Self-monitoring heartbeat ─────────────────────────────────────────────────
+# Per postoffice_dual_instance_race_2026-05-17: TCP accept can succeed while
+# request handling is hung. The singleton-guard catches dual-bind AT STARTUP.
+# This adds POST-startup self-monitoring: a background thread that HTTP-GETs
+# /health on its own loopback every 60s. If the GET fails or times out, log
+# loudly + drop a flag file external monitors can detect.
+#
+# Why self-probe (not just heartbeat-write): a thread that just writes a
+# timestamp file could still write while the FastAPI request handler is
+# hung. The self-probe exercises the actual request-handling path that
+# real callers (Wren, Zeke, the watchdog) depend on. If self-probe times
+# out, real callers WILL time out too — that's the failure mode we want
+# to catch.
+HEALTH_FLAG_PATH = ROOT / ".tmp" / "postoffice_unhealthy.flag"
+HEARTBEAT_PATH = ROOT / ".tmp" / "postoffice_heartbeat.json"
+_SELF_PROBE_INTERVAL_S = 60.0
+_SELF_PROBE_TIMEOUT_S = 5.0
+
+
+def _self_probe_loop(host: str, port: int) -> None:
+    """Background loop: HTTP-GET /health every 60s, log + flag on failure.
+
+    Runs in a daemon thread started after uvicorn binds. The thread exits
+    when the main process exits (daemon=True; no clean shutdown needed).
+    """
+    import urllib.request as _req
+    import urllib.error as _err
+    # Use loopback regardless of bind host — request handler runs the same
+    # code path for any incoming connection, so 127.0.0.1 exercises it
+    # whether the server bound 0.0.0.0 or specifically loopback.
+    probe_url = f"http://127.0.0.1:{port}/health"
+    consecutive_failures = 0
+    # Short initial delay so uvicorn finishes binding before the first probe.
+    time.sleep(5.0)
+    while True:
+        ok = False
+        err_detail = ""
+        t0 = time.time()
+        try:
+            with _req.urlopen(probe_url, timeout=_SELF_PROBE_TIMEOUT_S) as resp:
+                if resp.status == 200:
+                    body = resp.read().decode("utf-8", errors="replace")
+                    if "ok" in body:
+                        ok = True
+                    else:
+                        err_detail = f"200 but body missing ok field: {body[:80]!r}"
+                else:
+                    err_detail = f"status {resp.status}"
+        except _err.URLError as e:
+            err_detail = f"URLError {e!r}"
+        except _err.HTTPError as e:
+            err_detail = f"HTTPError {e!r}"
+        except OSError as e:
+            err_detail = f"OSError {e!r}"
+        except TimeoutError as e:
+            err_detail = f"TimeoutError {e!r}"
+        except Exception as e:
+            err_detail = f"{type(e).__name__} {e!r}"
+        elapsed = time.time() - t0
+
+        # Always write the heartbeat file with current status — external
+        # monitors can check this file's mtime + content to know if the
+        # server is healthy without doing their own HTTP call.
+        try:
+            HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            HEARTBEAT_PATH.write_text(
+                json.dumps({
+                    "ts": time.time(),
+                    "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "ok": ok,
+                    "elapsed_s": elapsed,
+                    "consecutive_failures": consecutive_failures + (0 if ok else 1),
+                    "err_detail": err_detail if not ok else "",
+                    "pid": os.getpid(),
+                }, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass  # best-effort
+
+        if ok:
+            consecutive_failures = 0
+            # Clear the unhealthy flag if it was set.
+            try:
+                if HEALTH_FLAG_PATH.is_file():
+                    HEALTH_FLAG_PATH.unlink()
+                    print(f"[postoffice] self-probe recovered after failure(s)",
+                          file=sys.stderr, flush=True)
+            except Exception:
+                pass
+        else:
+            consecutive_failures += 1
+            print(f"[postoffice] self-probe FAILED (#{consecutive_failures}): {err_detail} "
+                  f"after {elapsed:.2f}s",
+                  file=sys.stderr, flush=True)
+            # Drop unhealthy flag after 2 consecutive failures so a single
+            # transient hiccup doesn't trigger alarms. External monitors
+            # check for this file's existence.
+            if consecutive_failures >= 2:
+                try:
+                    HEALTH_FLAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    HEALTH_FLAG_PATH.write_text(
+                        json.dumps({
+                            "since_ts": time.time(),
+                            "since_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            "consecutive_failures": consecutive_failures,
+                            "last_err": err_detail,
+                            "pid": os.getpid(),
+                        }, indent=2),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
+
+        time.sleep(_SELF_PROBE_INTERVAL_S)
+
+
 # ── Singleton check (port probe + PID lockfile) ───────────────────────────────
 # Per 2026-05-17 incident: two post-office instances bound to port 5877
 # simultaneously (one under .venv python, one under system python). They
@@ -574,6 +691,19 @@ def main() -> None:
     print(f"[postoffice] listening on {args.host}:{args.port} (pid={os.getpid()})", file=sys.stderr)
     print(f"[postoffice] chat box at http://{args.host}:{args.port}/", file=sys.stderr)
     print(f"[postoffice] letters persisted to {LETTERS_PATH}", file=sys.stderr)
+    # Spawn self-probe thread (daemon: dies with main process). Detects
+    # post-startup hangs that the singleton check at startup can't catch.
+    # Heartbeat at .tmp/postoffice_heartbeat.json; unhealthy flag at
+    # .tmp/postoffice_unhealthy.flag after 2 consecutive failures.
+    _probe_thread = threading.Thread(
+        target=_self_probe_loop,
+        args=(args.host, args.port),
+        daemon=True,
+        name="postoffice-self-probe",
+    )
+    _probe_thread.start()
+    print(f"[postoffice] self-probe thread started (interval={_SELF_PROBE_INTERVAL_S:.0f}s, "
+          f"timeout={_SELF_PROBE_TIMEOUT_S:.0f}s)", file=sys.stderr)
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     finally:
