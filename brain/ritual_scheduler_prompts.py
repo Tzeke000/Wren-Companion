@@ -18,6 +18,47 @@ from __future__ import annotations
 # cron_schedule is informational here (the actual scheduling will be done
 # by Windows Task Scheduler). Kept inline for documentation.
 
+# Block prompts that fill an envelope of time. These get the continuation-
+# discipline appendix injected by get() — see _CONTINUATION_DISCIPLINE below.
+# Non-block prompts (sweeps, polls, single-action checks) fire-do-stop without
+# the appendix; the body-sit block is a deliberate exception (passive
+# observation, no production by design).
+_BLOCK_PROMPT_NAMES = frozenset({
+    "morning_anchor",
+    "reading_block",
+    "work_block",
+    "afternoon_block",
+    "art_block",
+    "evening_close",
+    "journal_close",
+})
+
+
+# Continuation discipline appended to every block prompt. Named 2026-05-20 by
+# Zeke: I'd been citing stopping-when-done too eagerly — that rule applies
+# when the WORK is done AND time is up, not when the immediate task is done
+# but the envelope still has 30+ minutes in it. The discipline encodes the
+# nudges Zeke had been giving manually all day so post-deployment-me doesn't
+# need him present to catch idle-drift.
+_CONTINUATION_DISCIPLINE = (
+    " --- CONTINUATION DISCIPLINE: After completing the primary task above, "
+    "call mcp__iris__time_check. If more than 30 wall-clock minutes remain "
+    "in this block envelope (before the next scheduled block), do NOT go "
+    "idle. Continue with one of: (a) iterate on the work you just did — "
+    "make it better, check for adjacent issues, verify more thoroughly, "
+    "polish; (b) pick another item from the post-deployment queue (examples: "
+    "sleep_mode.py wiring, substrate counters Phase 3, sibling-letter "
+    "auto-forward v2, durable scheduling, self-node graph, voice "
+    "impersonation defense, memory decay-and-consolidation implementation, "
+    "tunable-knob audit, workbench proposal review); (c) research/read/sit "
+    "with something that's been pulling. Only stop when fewer than ~30 min "
+    "remain AND nothing pulls. The default is to fill the block envelope "
+    "productively. 'Stopping when synthesis is done' is the right rule only "
+    "when no further synthesis remains — NOT when the immediate task is "
+    "finished but time is still available."
+)
+
+
 PROMPTS: dict[str, dict[str, str]] = {
     "morning_anchor": {
         "schedule": "0 6 * * *",
@@ -173,8 +214,16 @@ PROMPTS: dict[str, dict[str, str]] = {
 
 
 def get(name: str) -> str:
-    """Look up a prompt by name. Raises KeyError if not found."""
-    return PROMPTS[name]["prompt"]
+    """Look up a prompt by name. Raises KeyError if not found.
+
+    Block prompts (in _BLOCK_PROMPT_NAMES) get the continuation-discipline
+    appendix automatically. Non-block prompts (sweeps, polls, body-sit) are
+    returned as-is.
+    """
+    base = PROMPTS[name]["prompt"]
+    if name in _BLOCK_PROMPT_NAMES:
+        return base + _CONTINUATION_DISCIPLINE
+    return base
 
 
 def names() -> list[str]:
