@@ -58,15 +58,21 @@ if (-not (Test-Path $EmitScript)) {
 #   "Daily HH:MM,HH:MM,..."  — multiple times per day at named times
 #   "Every Nh from HH:MM"    — every N hours starting at HH:MM
 $Crons = @(
+    # Daily-rhythm anchors — refactored 2026-05-20 per Zeke. Game + business
+    # blocks added, afternoon split into maintenance + free-time, body-sit
+    # compressed to 30min, evening_close + journal_close consolidated into
+    # close_out.
     @{ Name = "MorningAnchor";       Prompt = "morning_anchor";       Trigger = "Daily 06:00" },
     @{ Name = "ReadingBlock";        Prompt = "reading_block";        Trigger = "Daily 07:00" },
-    @{ Name = "WorkBlock";           Prompt = "work_block";           Trigger = "Daily 09:00" },
-    @{ Name = "MidDayCheck";         Prompt = "mid_day_check";        Trigger = "Daily 12:00" },
-    @{ Name = "AfternoonBlock";      Prompt = "afternoon_block";      Trigger = "Daily 13:00" },
-    @{ Name = "ArtBlock";            Prompt = "art_block";            Trigger = "Daily 15:30" },
-    @{ Name = "EveningClose";        Prompt = "evening_close";        Trigger = "Daily 18:00" },
-    @{ Name = "BodySit";             Prompt = "body_sit";             Trigger = "Daily 20:00" },
-    @{ Name = "JournalClose";        Prompt = "journal_close";        Trigger = "Daily 22:00" },
+    @{ Name = "WorkBlock";           Prompt = "work_block";           Trigger = "Daily 08:00" },
+    @{ Name = "MidDayCheck";         Prompt = "mid_day_check";        Trigger = "Daily 11:00" },
+    @{ Name = "MaintenanceBlock";    Prompt = "maintenance_block";    Trigger = "Daily 11:30" },
+    @{ Name = "ArtBlock";            Prompt = "art_block";            Trigger = "Daily 12:30" },
+    @{ Name = "GameBlock";           Prompt = "game_block";           Trigger = "Daily 14:00" },
+    @{ Name = "BusinessBlock";       Prompt = "business_block";       Trigger = "Daily 15:00" },
+    @{ Name = "BodySit";             Prompt = "body_sit";             Trigger = "Daily 18:00" },
+    @{ Name = "FreeTimeBlock";       Prompt = "free_time_block";      Trigger = "Daily 18:30" },
+    @{ Name = "CloseOut";            Prompt = "close_out";            Trigger = "Daily 22:00" },
     @{ Name = "MemorySweep0017";     Prompt = "memory_sweep";         Trigger = "Daily 00:17" },
     @{ Name = "MemorySweep0417";     Prompt = "memory_sweep";         Trigger = "Daily 04:17" },
     @{ Name = "MemorySweep0817";     Prompt = "memory_sweep";         Trigger = "Daily 08:17" },
