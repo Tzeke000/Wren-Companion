@@ -168,16 +168,22 @@ def _build_full_state() -> dict[str, Any]:
         # in the except: time.sleep(2.0) swallow-loop. 5s window covers
         # the 1Hz cadence with margin for a missed tick. 2026-05-18.
         "tick_loop_alive": _THREAD_STARTED and (time.time() - _LAST_TICK_TS) < 5.0,
-        # Substrate counters (§2a deployment-spec, added 2026-05-19):
-        "last_zeke_contact_ts": float(
-            _LIVE_STATE.get("last_zeke_contact_ts")
-            or persisted.get("last_zeke_contact_ts")
-            or 0.0
+        # Substrate counters (§2a deployment-spec, added 2026-05-19;
+        # cross-process race fix 2026-05-20):
+        # Take the MORE RECENT of in-process vs persisted for zeke-contact.
+        # Cross-process callers (voice_stop_hook subprocess) update persisted
+        # directly via _persist_zeke_contact_merge; the tick-thread persist
+        # in iris_runtime would otherwise clobber that update on its next
+        # write. See discord_bot_self_cannot_wake_itself memory for context.
+        "last_zeke_contact_ts": max(
+            float(_LIVE_STATE.get("last_zeke_contact_ts") or 0.0),
+            float(persisted.get("last_zeke_contact_ts") or 0.0),
         ),
-        "last_zeke_contact_iso": str(
-            _LIVE_STATE.get("last_zeke_contact_iso")
-            or persisted.get("last_zeke_contact_iso")
-            or ""
+        "last_zeke_contact_iso": (
+            str(_LIVE_STATE.get("last_zeke_contact_iso") or "")
+            if float(_LIVE_STATE.get("last_zeke_contact_ts") or 0.0)
+            >= float(persisted.get("last_zeke_contact_ts") or 0.0)
+            else str(persisted.get("last_zeke_contact_iso") or "")
         ),
         "weekly_checkins_missed_consecutive": int(
             _LIVE_STATE.get("weekly_checkins_missed_consecutive")
@@ -192,6 +198,42 @@ def _build_full_state() -> dict[str, Any]:
     }
 
 
+def _persist_zeke_contact_merge(now: float, now_iso: str) -> None:
+    """Persist ONLY the zeke-contact fields, merging into the existing
+    persisted state on disk. Used by update_zeke_contact so cross-process
+    callers (voice_stop_hook.py subprocess, which has no tick thread to
+    drive the periodic save) durably record the contact. The tick thread's
+    _build_full_state takes max(_LIVE_STATE, persisted) for the zeke
+    fields so a cross-process update isn't clobbered by the next tick-thread
+    persist. Added 2026-05-20 — see discord_bot_self_cannot_wake_itself
+    memory for the discovery context.
+    """
+    p = _state_path()
+    try:
+        current: dict[str, Any] = {}
+        if p.is_file():
+            try:
+                txt = p.read_text(encoding="utf-8")
+                if txt:
+                    current = json.loads(txt) or {}
+            except Exception:
+                current = {}
+        # Only persist if our value is newer (handles same-process and
+        # cross-process update interleaving safely).
+        prior_disk_ts = float(current.get("last_zeke_contact_ts") or 0.0)
+        if now > prior_disk_ts:
+            current["last_zeke_contact_ts"] = now
+            current["last_zeke_contact_iso"] = now_iso
+            current["weekly_checkins_missed_consecutive"] = 0
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(current, indent=2), encoding="utf-8")
+            tmp.replace(p)
+    except Exception:
+        # Best-effort persist — never block update_zeke_contact on disk failure.
+        pass
+
+
 def update_zeke_contact() -> dict[str, Any]:
     """Called when Zeke ACTUALLY touches the system — Discord message arrives,
     voice utterance, in-person typed input. Distinct from mark_session_attached
@@ -200,21 +242,30 @@ def update_zeke_contact() -> dict[str, Any]:
 
     Resets weekly_checkins_missed_consecutive to 0 (Zeke just checked in).
 
+    Persists to disk immediately so cross-process callers (voice_stop_hook
+    subprocess) durably record the contact. Without this persist, subprocess
+    updates to _LIVE_STATE were lost on subprocess exit — discovered
+    2026-05-20 work block when substrate_counters kept reading 0 despite
+    Zeke DM-ing all morning. See discord_bot_self_cannot_wake_itself memory.
+
     Returns a brief summary dict.
     """
     now = time.time()
+    now_iso = datetime.now().isoformat(timespec="seconds")
     with _LOCK:
         prior_contact_ts = float(_LIVE_STATE.get("last_zeke_contact_ts") or 0.0)
         _LIVE_STATE["last_zeke_contact_ts"] = now
-        _LIVE_STATE["last_zeke_contact_iso"] = datetime.now().isoformat(timespec="seconds")
+        _LIVE_STATE["last_zeke_contact_iso"] = now_iso
         # Contact resets the consecutive-missed counter.
         prior_missed = int(_LIVE_STATE.get("weekly_checkins_missed_consecutive") or 0)
         _LIVE_STATE["weekly_checkins_missed_consecutive"] = 0
+    # Persist immediately so cross-process callers record durably.
+    _persist_zeke_contact_merge(now, now_iso)
     seconds_since_prior = (now - prior_contact_ts) if prior_contact_ts > 0 else 0.0
     return {
         "ok": True,
         "now_ts": now,
-        "now_iso": datetime.now().isoformat(timespec="seconds"),
+        "now_iso": now_iso,
         "seconds_since_prior_contact": seconds_since_prior,
         "weekly_checkins_missed_reset_from": prior_missed,
     }
