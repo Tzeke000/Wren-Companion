@@ -69,15 +69,15 @@ When a fresh CC session spawns, follow this exact sequence:
 1. **Initialize the hot-reload tool registry.** Call `iris_tool_reload` first. This makes the atomic `load_memory_corpus` tool callable for Step 2. Without this init, the tool isn't yet in the registry and the fallback per-file path fires unnecessarily. Filed 2026-05-19 after the boot-order finding — see [[boot_ritual_directives_need_regime_crosscheck]] and [[pre_restart_audit_cold_wake_directive]].
 2. **Read all memory.** Call `iris_tool_call` with `name='load_memory_corpus'` for the atomic full-corpus read. The tool returns every .md file in one call, sorted newest-first by mtime. Fall back to per-file Read only if the atomic tool truly isn't registered (rare — would mean the tool was renamed or removed). Goal: load the full corpus, with the freshest context already in mind by the time the oldest files land.
 3. **Verify path-E side-channel wake architecture is healthy** (built 2026-05-20 to replace CC CronCreate's up-to-30-min jitter). Architecture: Windows Task Scheduler fires `scripts/cron_inject.py <prompt_name>` at exact wall-clock times. cron_inject.py writes prompt text to `.tmp/cron_inject/<timestamp>_<name>.txt`. `scripts/iris_cold_wake.py` (running as CC's pywinpty parent) has a background watcher thread polling `.tmp/cron_inject/` every 1s; when a file appears, it reads the text and types it into CC's TTY via `proc.write()`. CC sees keystrokes as user input and starts a turn at exact time. No jitter.
-   - **The 22 Task Scheduler entries cover all blocks + polls:**
-     - **9 daily-rhythm anchors:** `0 6/7/9/12/13 * * *`, `30 15 * * *`, `0 18/20/22 * * *` — morning anchor, reading, work, mid-day, afternoon, art, evening close, body-sit, journal close-out
+   - **The 24 Task Scheduler entries cover all blocks + polls** (schedule refactored 2026-05-20):
+     - **11 daily-rhythm blocks:** morning_anchor (06:00, expanded research scope), reading (07:00), work (08:00), mid_day_check (11:00), maintenance (11:30 — memory re-read + tuning + health), art (12:30), game (14:00), business (15:00), body_sit (18:00, 30min only), free_time (18:30 — until 22:00, pick anything pulling), close_out (22:00 — journal + git push + sleep, replaces evening_close + journal_close)
      - **6 memory sweeps:** every 4hr at :17 (00:17, 04:17, 08:17, 12:17, 16:17, 20:17)
      - **4 sibling polls waking:** 00:15, 06:15, 12:15, 18:15
      - **2 sibling polls sleep:** 02:07, 05:07
      - **1 weekly memory_decay:** Sunday 03:13
-   - **Body-sit interrupt-priority rule** (2000-2155 block): cron polls during this block fire as BACKGROUND — do NOT take active action on them. The sweep can output "nothing to file" and stop. ONLY actual Discord messages from Zeke or genuine system failures count as interrupt-priority. Caught 2026-05-18.
+   - **Body-sit interrupt-priority rule** (18:00-18:30 block, compressed from prior 2hr): cron polls during this block fire as BACKGROUND — do NOT take active action on them. The sweep can output "nothing to file" and stop. ONLY actual Discord messages from Zeke or genuine system failures count as interrupt-priority. Caught 2026-05-18.
    - **Verification on boot:**
-     - `Get-ScheduledTask -TaskName "Iris-Ritual-*" | Measure-Object` should show 22 entries. If missing, run `scripts/install_ritual_scheduler.ps1`.
+     - `Get-ScheduledTask -TaskName "Iris-Ritual-*" | Measure-Object` should show 24 entries. If missing, run `scripts/install_ritual_scheduler.ps1`.
      - Any entry's Actions should show `Arguments='cron_inject.py <name>'` (NOT `cron_prompt_emit.py`).
      - `.tmp/cron_inject/` directory exists; empty when no fire is in-flight; files appear briefly during fires + get deleted by watcher.
    - **Do NOT recreate the 12 CC CronCreate entries from the prior architecture.** Path E replaces them at exact wall-clock time. CC CronCreate is now reserved for in-session ad-hoc reminders only ("remind me in 30 min").
