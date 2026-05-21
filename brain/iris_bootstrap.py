@@ -377,6 +377,14 @@ def _bootstrap_concept_graph(g: dict[str, Any], root: Path) -> None:
     # avoid LLM-dependent topic-extraction paths that could hang ~120s
     # at boot). Minimum-viable fix: just create the self-node here.
     # Defer the full LLM-aware bootstrap until later via an MCP tool.
+    #
+    # 2026-05-21 (later): commit 8832027 used find_or_create(entity_name, "self")
+    # which collided with the pre-existing topic-typed "iris" node from earlier
+    # topic-extraction passes — find_or_create's slug lookup wins before the
+    # type comparison, so the self-typed bootstrap silently returned the topic
+    # node instead of creating a self-typed one. See
+    # self_node_bootstrap_8832027_didnt_realize memory. Fix: use a label that
+    # slugifies to a collision-free slug (e.g. "Iris (self)" -> "iris-self").
     try:
         import re
         identity_path = root / "ava_core" / "IDENTITY.md"
@@ -389,8 +397,23 @@ def _bootstrap_concept_graph(g: dict[str, Any], root: Path) -> None:
             )
             if m:
                 entity_name = m.group(1).strip()
-        self_id = cg.find_or_create(entity_name, "self")
-        _log(f"self_node ensured: id={self_id} name={entity_name}")
+        # Use a collision-free label. The display-name is preserved on the
+        # node ("Iris (self)") so the brain-tab viz reads cleanly; the slug
+        # ("iris-self") avoids the topic-typed "iris" node.
+        self_label = f"{entity_name} (self)"
+        self_id = cg.find_or_create(self_label, "self")
+        # Verify the actual outcome — find_or_create can return an existing
+        # node ID even if the type wouldn't match. Check the resulting node's
+        # type to detect collisions that slipped through.
+        actual_node = cg.nodes.get(self_id)
+        actual_type = getattr(actual_node, "type", None) if actual_node else None
+        if actual_type == "self":
+            _log(f"self_node ensured: id={self_id} label={self_label} type=self")
+        else:
+            _log(
+                f"self_node bootstrap WARN: id={self_id} label={self_label} "
+                f"got type={actual_type!r} (expected 'self') — collision"
+            )
     except Exception as _sn_e:
         _log(f"self_node bootstrap skipped: {_sn_e!r}")
 
