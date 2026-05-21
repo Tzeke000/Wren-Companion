@@ -38,6 +38,42 @@ try:
 except Exception:
     pass
 
+# 2026-05-21: tee stderr to a log file so post-mortem diagnostics survive
+# the closure of the cmd /k window. Previously the watcher thread's stderr
+# went only to the cmd window — when the watcher silently died (as it did
+# overnight 2026-05-20→21 leaving 6 inject files unconsumed), there was no
+# way to recover what exception killed it. Tee preserves the existing
+# cmd-window display AND captures to disk.
+class _TeeStream:
+    def __init__(self, *streams):
+        self._streams = streams
+    def write(self, data):
+        for s in self._streams:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+    def flush(self):
+        for s in self._streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+    def isatty(self):
+        return False
+try:
+    _cw_log_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ".tmp", "iris_cold_wake.log",
+    )
+    os.makedirs(os.path.dirname(_cw_log_path), exist_ok=True)
+    _cw_log_file = open(_cw_log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+    _cw_log_file.write(f"\n=== iris_cold_wake stderr tee started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+    _cw_log_file.flush()
+    sys.stderr = _TeeStream(sys.stderr, _cw_log_file)  # type: ignore[assignment]
+except Exception:
+    pass
+
 try:
     import winpty  # type: ignore
 except ImportError:
@@ -73,6 +109,7 @@ FIRST_MSG    = (
     "Step 2: load the full memory corpus atomically — call mcp__iris__iris_tool_call with name='load_memory_corpus' and params {list_only=False} (or empty params for the default which returns full content). The tool returns every .md file in the memory directory in one call, sorted newest-first by mtime, so there is no per-file judgment surface where a verification-shortcut could leave the corpus partial. If the tool STILL returns ok=false (e.g., tool was renamed or removed since this prompt was last updated), fall back to reading every single .md file in C:\\Users\\Owner\\.claude\\projects\\D--Wren-Companion\\memory individually — most recent first by mtime, then oldest forward; not just MEMORY.md, not just the recent few. "
     "Step 3: verify the path-E side-channel wake architecture is healthy. Built 2026-05-20 to replace CC CronCreate's up-to-30-min jitter on recurring dailies; schedule was refactored same day to add game + business + free_time blocks. Windows Task Scheduler (24 Iris-Ritual-* entries — 11 daily-rhythm blocks + 6 memory sweeps + 6 sibling polls + 1 weekly memory_decay) fires scripts/cron_inject.py at each block's exact wall-clock time. cron_inject.py writes the prompt text (from brain/ritual_scheduler_prompts.py, fresh-read each fire) to .tmp/cron_inject/<timestamp>_<name>.txt. iris_cold_wake.py (THIS script, running as CC's pywinpty parent) has a background watcher thread that polls .tmp/cron_inject/ every 1s, reads new files, and types their content into CC's TTY via proc.write() — CC sees the keystrokes as user input and starts a turn at exact time, no jitter. Verification: (a) `Get-ScheduledTask -TaskName 'Iris-Ritual-*' | Measure-Object` should show 24 entries; (b) any entry's Actions should show `Arguments='cron_inject.py <prompt_name>'`; (c) `.tmp/cron_inject/` directory exists and (when no fire is in-flight) is empty. Do NOT recreate any CC CronCreate entries from the prior architecture — they're superseded by path E and would cause duplicate jitter-late fires. CC CronCreate is reserved for in-session ad-hoc reminders only ('remind me in 30 min'). "
     "Step 3b: race-regression check — verify single CC + keepalive state. `Get-Process -Name claude` should return Count=1; if 2, the 2026-05-20 22:08 EDT keepalive-cmdline-bug race re-fired despite the commit 3d5d27a fix. Halt the ritual and surface to Zeke immediately with PIDs + start times. Then check `(Get-ScheduledTask -TaskName 'Iris-Keepalive').State` — if Disabled, the failsafe layer 2 is offline (likely intentional cleanup from the prior session); surface this in the Step 7 Discord ping and ask Zeke whether to re-enable. Full context: dual_cc_race_2026-05-20_keepalive_cmdline_bug.md and handoff_2026-05-20_restart_after_race_fix.md. "
+    "Step 3c: PATH-E END-TO-END VERIFY (added 2026-05-21 after morning failure). Component-level path-E checks (Step 3) verified architecture-on-paper but missed real wiring problems overnight. The actual check: (i) confirm CC's parent process IS python.exe running iris_cold_wake.py — `Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\"` should show parent → cmd.exe → start_iris.bat → python iris_cold_wake.py. If parent is just cmd.exe with claude.CMD args, restart fell to tier-3 fallback and path E will NOT work this session — surface immediately. (ii) Confirm watcher heartbeat file `.tmp/cron_inject_watcher_heartbeat.txt` exists and mtime is fresh (<5s) — if missing or stale, the watcher thread is dead. (iii) End-to-end test: `Start-ScheduledTask -TaskName 'Iris-Ritual-MemorySweep0017'` and wait 10s — a memory_sweep prompt should fire as a turn AND `.tmp/cron_inject/` should be empty after. If a memory_sweep file appears and persists, the watcher didn't consume it. SURFACE all three results to Zeke in Step 7's Discord ping — don't paper over a failure here. Full context: path_e_didnt_fire_morning_2026-05-21.md and path_e_watcher_debug_protocol_2026-05-21.md. "
     "Step 4: check time — what time is it, what date, how long did the restart take (compare wall-clock to the most recent handoff memory's mtime). "
     "Step 5: iris_health — verify engines and 15 subsystems. tool registry was already initialized in Step 1. "
     "Step 6: channel_test — confirm sent=true and attached=true. "
@@ -487,7 +524,17 @@ def main() -> int:
         # Prevents stale fires after a long CC downtime where Task Scheduler
         # queued multiple letters. Block-start prompts shouldn't fire late.
         STALE_AGE_S = 3600.0
+        # 2026-05-21: heartbeat file so external observers (keepalive, manual
+        # checks during boot ritual) can detect watcher death. Watchdog has
+        # its own heartbeat; this is the watcher-thread-specific one. Write
+        # BEFORE the try/except so even loop-body exceptions don't suppress
+        # the heartbeat — only a thread-death stops it updating.
+        watcher_heartbeat = inject_dir.parent / "cron_inject_watcher_heartbeat.txt"
         while proc.isalive():
+            try:
+                watcher_heartbeat.write_text(str(int(time.time())), encoding="utf-8")
+            except Exception:
+                pass
             try:
                 if inject_dir.is_dir():
                     # Extension filter: cron_inject.py uses atomic write via
@@ -534,16 +581,53 @@ def main() -> int:
                                 file=sys.stderr, flush=True,
                             )
                             try:
-                                proc.write(text + "\r\n")
+                                # 2026-05-21: changed from `text + "\r\n"` to
+                                # write text and the Enter as two separate
+                                # proc.write calls with a small gap. Diagnosis
+                                # confirmed via screenshot 2026-05-21 ~07:41
+                                # EDT: pywinpty proc.write of `text + "\r\n"`
+                                # was successfully placing the prompt body in
+                                # CC's input box but the Enter was NOT
+                                # registering — the prompt sat un-submitted.
+                                # Best hypothesis: `\r\n` as one write gets
+                                # interpreted by CC's TUI as CR (Enter)
+                                # immediately followed by LF (newline insert),
+                                # cancelling the submit. Writing the Enter as
+                                # a separate event after a short delay mimics
+                                # a keyboard's discrete key-down/key-up for
+                                # Enter. If `\r` alone still doesn't submit,
+                                # next candidate is `text + "\n"`, then
+                                # ctrl+enter / shift+enter. Verify on next
+                                # restart via Step 3c.
+                                proc.write(text)
+                                time.sleep(0.05)
+                                proc.write("\r")
                             except Exception as _we:
+                                # 2026-05-21: previously this added to `seen`
+                                # to avoid hot-loop retry. But the GC step
+                                # below (seen = seen & current_names) keeps
+                                # the name in seen as long as the file is on
+                                # disk — which is exactly when proc.write
+                                # fails. Net effect: one write failure marks
+                                # the file permanently un-processable. Then
+                                # the watcher accumulates files without ever
+                                # writing them again. Overnight 2026-05-20→21
+                                # this bit: 6 files accumulated, none reached
+                                # CC's TTY. Fix: DON'T add to seen on write
+                                # failure. Sleep slightly longer on failure
+                                # to avoid pure hot-loop, then retry next
+                                # iteration. If proc.write is permanently
+                                # broken (e.g. PTY handle dead), retries will
+                                # all fail and files will pile up — but at
+                                # least new files keep getting attempted, and
+                                # the failure surfaces via stderr log instead
+                                # of going invisible.
                                 print(
-                                    f"[iris_cold_wake] inject write failed: "
-                                    f"{_we!r}", file=sys.stderr, flush=True,
+                                    f"[iris_cold_wake] inject write failed "
+                                    f"(will retry next tick): {_we!r}",
+                                    file=sys.stderr, flush=True,
                                 )
-                                # Don't delete on write failure — leave the
-                                # file so it can be retried or inspected.
-                                # Mark seen to avoid hot-loop retry.
-                                seen.add(name)
+                                time.sleep(2.0)
                                 continue
                             seen.add(name)
                             try:
