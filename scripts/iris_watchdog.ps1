@@ -80,7 +80,7 @@ function Find-ActiveCC {
         $wmiOk = $false
         foreach ($n in $names) {
             try {
-                $p = Get-CimInstance Win32_Process -Filter "Name='$n'" -ErrorAction Stop
+                $p = Get-CimInstance Win32_Process -Filter "Name='$n'" -OperationTimeoutSec 10 -ErrorAction Stop
                 $wmiOk = $true
                 if ($p) { $all += $p }
             } catch {
@@ -151,7 +151,7 @@ function Get-ClaudeProcessSet {
     try {
         $names = @("claude.exe", "Claude.exe", "Claude Code.exe", "node.exe")
         foreach ($n in $names) {
-            $procs = Get-CimInstance Win32_Process -Filter "Name='$n'" -ErrorAction SilentlyContinue
+            $procs = Get-CimInstance Win32_Process -Filter "Name='$n'" -OperationTimeoutSec 10 -ErrorAction SilentlyContinue
             if ($procs) {
                 foreach ($p in $procs) {
                     if ($p.CommandLine -and (
@@ -345,14 +345,29 @@ $lastRespawn = [DateTime]::MinValue
 # Heartbeat: write a fresh timestamp every poll iteration so external
 # health checks can verify the watchdog is actually polling (not zombie).
 # Written BEFORE the try/catch so even if the loop body throws, the heartbeat
-# still updates — proving the while($true) is alive. If THIS stops updating,
+# still updates -- proving the while($true) is alive. If THIS stops updating,
 # the watchdog process is truly dead.
+#
+# Failure tracking: if heartbeat write fails N consecutive times (disk full,
+# AV lock, .tmp deleted, etc.) the loop keeps polling but keepalive will
+# see a stale heartbeat and respawn this watchdog, only for the new one to
+# hit the same write failure -> respawn loop. After N consecutive failures
+# we log a CRITICAL line to the watchdog log (best-effort) AND Write-Warning
+# to stderr (separate channel, may survive disk-side failures).
+$script:HeartbeatFailCount = 0
+$HEARTBEAT_FAIL_WARN_AT = 3
 function Write-Heartbeat {
     try {
         $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
-        Set-Content -Path $WATCHDOG_HEARTBEAT -Value "$now" -NoNewline -ErrorAction SilentlyContinue
+        Set-Content -Path $WATCHDOG_HEARTBEAT -Value "$now" -NoNewline -ErrorAction Stop
+        $script:HeartbeatFailCount = 0
     } catch {
-        # heartbeat write failed — nothing to do, next cycle retries
+        $script:HeartbeatFailCount++
+        if ($script:HeartbeatFailCount -eq $HEARTBEAT_FAIL_WARN_AT) {
+            $msg = "[CRITICAL] heartbeat write failed $script:HeartbeatFailCount consecutive times. Cause: $_"
+            try { Write-WatchLog $msg } catch { }
+            Write-Warning $msg
+        }
     }
 }
 

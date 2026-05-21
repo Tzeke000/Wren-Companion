@@ -138,14 +138,55 @@ def _safe_restart(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     flag_path.parent.mkdir(parents=True, exist_ok=True)
     flag_path.write_text(reason, encoding="utf-8")
 
+    # Post-write verification: watchdog should consume the flag within ~2s
+    # (poll interval) + maybe up to debounce. Poll for up to 10s for the flag
+    # to disappear. If it sits, watchdog isn't acting on it (TOCTOU-stale
+    # heartbeat, watchdog hung mid-poll, etc.) -- surface immediately rather
+    # than letting the caller assume restart is in flight.
+    deadline = time.time() + 10.0
+    detection_seen = False
+    detection_ts = None
+    while time.time() < deadline:
+        if not flag_path.exists():
+            detection_seen = True
+            detection_ts = time.time()
+            break
+        time.sleep(0.25)
+
+    if detection_seen:
+        return {
+            "ok": True,
+            "memory_check": mem_check,
+            "watchdog_check": wd_check,
+            "flag_written": str(flag_path),
+            "flag_consumed_in_s": detection_ts - (deadline - 10.0),
+            "message": (
+                f"Restart flag written AND consumed by watchdog. "
+                f"Restart is in progress. Reason: {reason}"
+            ),
+        }
+
+    # Flag still sitting after 10s -- watchdog isn't processing it
     return {
-        "ok": True,
+        "ok": False,
+        "error": "flag_not_consumed",
         "memory_check": mem_check,
         "watchdog_check": wd_check,
         "flag_written": str(flag_path),
+        "flag_still_present_after_s": 10.0,
         "message": (
-            f"Restart flag written. Watchdog will detect within ~2s. "
-            f"Reason: {reason}"
+            f"Pre-flight checks passed and flag was written, but watchdog "
+            f"has not consumed it within 10s. Watchdog may have died between "
+            f"the heartbeat check and the flag write (TOCTOU), or may be "
+            f"stuck in mid-loop. Flag is still at {flag_path} -- it WILL "
+            f"trigger restart if/when watchdog recovers. To force recovery: "
+            f"run scripts/iris_keepalive.ps1 manually."
+        ),
+        "hint": (
+            "Iris-Keepalive Task Scheduler entry fires every 1 min -- "
+            "wait up to ~1 min, then check whether the flag was consumed. "
+            "Do NOT write the flag again (it's still present); a fresh "
+            "write would just re-touch the same file."
         ),
     }
 
