@@ -205,14 +205,29 @@ def _probe_log(msg: str) -> None:
 
 def _find_orphan_iris_runtime_pids() -> list[int]:
     """Return PIDs of python processes (other than self) whose command line
-    references iris_runtime.py. Best-effort; returns [] on failure or when
-    psutil isn't available."""
+    references iris_runtime.py FROM THE SAME ROOT AS US. Best-effort; returns
+    [] on failure or when psutil isn't available.
+
+    ROOT-path comparison added 2026-05-21 after sandbox-killed-production
+    incident: a sandbox iris_runtime running from D:\\iris_sandbox_*\\ saw
+    production iris_runtime PIDs sharing the camera, labeled them "orphan,"
+    and graceful-shutdown-requested them. Production complied. The fix is to
+    only count a candidate PID as OUR orphan if its iris_runtime.py path
+    resolves to the SAME parent dir as ours. Cross-root iris_runtimes are
+    DIFFERENT instances (sandbox, clone, dev fork) and must NOT be touched.
+    See handoff_2026-05-21_sandbox_killed_iris_runtime.md.
+    """
     try:
         import psutil  # type: ignore
     except Exception:
         _probe_log("psutil unavailable — cannot scan for orphan iris_runtime processes")
         return []
     my_pid = os.getpid()
+    try:
+        my_root = Path(__file__).resolve().parent
+    except Exception as _re:
+        _probe_log(f"could not resolve own root path: {_re!r} — orphan scan disabled")
+        return []
     out: list[int] = []
     for p in psutil.process_iter(attrs=["pid", "name", "cmdline"]):
         try:
@@ -222,9 +237,43 @@ def _find_orphan_iris_runtime_pids() -> list[int]:
             if "python" not in name and "py" not in name:
                 continue
             cmdline = p.info.get("cmdline") or []
-            joined = " ".join(cmdline).lower()
-            if "iris_runtime.py" in joined or "iris_runtime" in joined.replace("\\", "/"):
+            # Find the iris_runtime.py argument in this process's cmdline.
+            # cmdline is a list like ["python.exe", "D:\\path\\iris_runtime.py"]
+            # or sometimes joined into fewer entries by shell wrappers.
+            candidate_path = None
+            for arg in cmdline:
+                if not isinstance(arg, str):
+                    continue
+                norm = arg.replace("\\", "/")
+                if norm.endswith("/iris_runtime.py") or norm == "iris_runtime.py":
+                    candidate_path = arg
+                    break
+            if candidate_path is None:
+                # Cmdline references iris_runtime but we couldn't extract a path
+                # (e.g., joined string under some shell). Conservative: skip,
+                # don't risk killing a cross-root sibling. Was: count as orphan.
+                joined = " ".join(cmdline).lower()
+                if "iris_runtime.py" in joined or "iris_runtime" in joined.replace("\\", "/"):
+                    _probe_log(
+                        f"PID {p.info['pid']} cmdline references iris_runtime but "
+                        f"could not isolate path arg — SKIPPING (cross-root safety)"
+                    )
+                continue
+            try:
+                their_root = Path(candidate_path).resolve().parent
+            except Exception as _re:
+                _probe_log(
+                    f"PID {p.info['pid']} candidate_path={candidate_path!r} could not "
+                    f"resolve: {_re!r} — SKIPPING (cross-root safety)"
+                )
+                continue
+            if their_root == my_root:
                 out.append(int(p.info["pid"]))
+            else:
+                _probe_log(
+                    f"PID {p.info['pid']} iris_runtime root={their_root} != my "
+                    f"root={my_root} — DIFFERENT instance, not touching"
+                )
         except Exception:
             continue
     return out
