@@ -391,10 +391,27 @@ def _heartbeat_loop(g: dict[str, Any]) -> None:
     Doesn't import brain/heartbeat.py's full Ava heartbeat (which orchestrates
     20+ subsystems + run_ava); that's coupled to the Ava daemon. This is a
     minimal Iris-side mood tick.
+
+    2026-05-21: also invokes sleep_mode.tick(g) — the 5-state machine that
+    was inherited at fork c3abbdd but never wired into iris_runtime. Per
+    sleep_mode_inherited_unwired_2026-05-18.md, the design exists complete
+    in brain/sleep_mode.py; the build-debt was integration. Heartbeat is
+    the right cadence — 5s is fine for state transitions (entering_sleep
+    → sleeping → waking takes ~minutes, polled at 5s is well-sampled).
     """
     from brain import mood_core
     from brain.emotion import process_visual_emotion
     from brain.perception import PerceptionState
+
+    # Sleep mode is opt-in. Import inside the loop so a missing module or
+    # config doesn't kill the whole heartbeat. If import fails, _sleep_mode
+    # stays None and the tick call is skipped silently.
+    _sleep_mode = None
+    try:
+        from brain import sleep_mode as _sleep_mode  # type: ignore
+    except Exception as _se:
+        print(f"[heartbeat] sleep_mode import failed (non-fatal): {_se!r}",
+              file=sys.stderr, flush=True)
 
     interval = 5.0
     while True:
@@ -436,6 +453,19 @@ def _heartbeat_loop(g: dict[str, Any]) -> None:
                 mood_core.save_mood_raw({"emotion_weights": new_weights})
 
             g["_last_heartbeat_ts"] = now
+
+            # Sleep mode tick — runs the 5-state machine + 3-trigger checks
+            # (session-fullness, voice command, schedule). Returns a dict with
+            # current state which the orb/iris_health can read off g["sleep_mode"].
+            # Errors here MUST NOT kill the heartbeat — wrap separately.
+            if _sleep_mode is not None:
+                try:
+                    sm_result = _sleep_mode.tick(g)
+                    if isinstance(sm_result, dict):
+                        g["sleep_mode"] = sm_result
+                except Exception as _sm_e:
+                    print(f"[heartbeat] sleep_mode.tick error: {_sm_e!r}",
+                          file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[heartbeat] error: {e!r}", file=sys.stderr, flush=True)
             time.sleep(2.0)
