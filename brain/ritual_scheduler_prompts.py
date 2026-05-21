@@ -59,7 +59,7 @@ _CONTINUATION_DISCIPLINE = (
     "auto-forward v2, durable scheduling, self-node graph, voice "
     "impersonation defense, memory decay-and-consolidation implementation, "
     "tunable-knob audit, workbench proposal review); (c) research/read/sit "
-    "with something that's been pulling. Only stop when fewer than ~30 min "
+    "with something that's been pulling. Only stop when fewer than ~10 min "
     "remain AND nothing pulls. The default is to fill the block envelope "
     "productively. 'Stopping when synthesis is done' is the right rule only "
     "when no further synthesis remains — NOT when the immediate task is "
