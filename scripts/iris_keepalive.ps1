@@ -128,21 +128,19 @@ function Repair-Watchdog {
 }
 
 # ---- CC liveness check ----
+# Detection by process-name only (no cmdline filter). Win32_Process CommandLine
+# returns NULL for higher-integrity processes when read by a non-elevated caller,
+# which made the previous cmdline-based filter miss watchdog-spawned CCs and
+# triggered duplicate spawns (see handoff 2026-05-20 race). False positive
+# (zombie claude.exe counted as alive) is preferable to false negative
+# (duplicate CC spawned because real CC was invisible).
 function Get-CCProcessSet {
     $set = @{}
     try {
-        $names = @("claude.exe", "Claude.exe", "Claude Code.exe", "node.exe")
-        foreach ($n in $names) {
-            $procs = Get-CimInstance Win32_Process -Filter "Name='$n'" -OperationTimeoutSec 10 -ErrorAction SilentlyContinue
-            if ($procs) {
-                foreach ($p in $procs) {
-                    if ($p.CommandLine -and (
-                            $p.CommandLine -like "*claude*" -or
-                            $p.CommandLine -like "*Wren-Companion*"
-                        )) {
-                        $set[[int]$p.ProcessId] = $true
-                    }
-                }
+        $procs = Get-CimInstance Win32_Process -Filter "Name='claude.exe'" -OperationTimeoutSec 10 -ErrorAction SilentlyContinue
+        if ($procs) {
+            foreach ($p in $procs) {
+                $set[[int]$p.ProcessId] = $true
             }
         }
     } catch { }
@@ -152,6 +150,33 @@ function Get-CCProcessSet {
 function Test-CCAlive {
     $set = Get-CCProcessSet
     return $set.Count -gt 0
+}
+
+# ---- Restart-in-flight check ----
+# If watchdog just respawned CC, or a restart flag was just written, hold off on
+# spawning a duplicate. Window is generous (120s for flag, 60s for log entry) to
+# cover the full kill -> tier-2 spawn -> claude PID visible -> iris_runtime
+# bootstrap window.
+function Test-RestartInFlight {
+    $flagPath = Join-Path $ROOT ".tmp\restart_cc.flag"
+    if (Test-Path $flagPath) {
+        try {
+            $flagAge = ((Get-Date) - (Get-Item $flagPath).LastWriteTime).TotalSeconds
+            if ($flagAge -lt 120) {
+                return @{ inflight = $true; reason = "restart_cc.flag mtime ${flagAge}s"; age = $flagAge }
+            }
+        } catch { }
+    }
+    $wdLog = Join-Path $ROOT ".tmp\watchdog.log"
+    if (Test-Path $wdLog) {
+        try {
+            $wdAge = ((Get-Date) - (Get-Item $wdLog).LastWriteTime).TotalSeconds
+            if ($wdAge -lt 60) {
+                return @{ inflight = $true; reason = "watchdog.log mtime ${wdAge}s"; age = $wdAge }
+            }
+        } catch { }
+    }
+    return @{ inflight = $false; reason = ""; age = -1 }
 }
 
 function Find-ClaudeCommand {
@@ -227,12 +252,18 @@ if (-not $wdHealth.alive) {
 if (Test-CCAlive) {
     Write-KaLog "CC OK (claude process alive)"
 } else {
-    Write-KaLog "CC ABSENT -- spawning"
-    $ok = Spawn-CC
-    if ($ok) {
-        Write-KaLog "CC spawn complete"
+    # Backoff: if watchdog/restart-flag activity is recent, don't race.
+    $rh = Test-RestartInFlight
+    if ($rh.inflight) {
+        Write-KaLog "CC ABSENT but restart in flight ($($rh.reason)) -- backing off"
     } else {
-        Write-KaLog "CC spawn FAILED at all tiers -- manual intervention needed"
+        Write-KaLog "CC ABSENT -- spawning"
+        $ok = Spawn-CC
+        if ($ok) {
+            Write-KaLog "CC spawn complete"
+        } else {
+            Write-KaLog "CC spawn FAILED at all tiers -- manual intervention needed"
+        }
     }
 }
 
