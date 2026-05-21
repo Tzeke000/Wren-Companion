@@ -15,6 +15,7 @@ $ErrorActionPreference = "Continue"
 $ROOT = "D:\Wren-Companion"
 $TRIGGER_FILE = Join-Path $ROOT ".tmp\restart_cc.flag"
 $WATCHDOG_LOG = Join-Path $ROOT ".tmp\watchdog.log"
+$WATCHDOG_HEARTBEAT = Join-Path $ROOT ".tmp\watchdog_heartbeat.txt"
 $POLL_INTERVAL_S = 2
 $DEBOUNCE_S = 30
 
@@ -341,7 +342,22 @@ if (-not (Test-Path $tmpDir)) {
 
 $lastRespawn = [DateTime]::MinValue
 
+# Heartbeat: write a fresh timestamp every poll iteration so external
+# health checks can verify the watchdog is actually polling (not zombie).
+# Written BEFORE the try/catch so even if the loop body throws, the heartbeat
+# still updates — proving the while($true) is alive. If THIS stops updating,
+# the watchdog process is truly dead.
+function Write-Heartbeat {
+    try {
+        $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+        Set-Content -Path $WATCHDOG_HEARTBEAT -Value "$now" -NoNewline -ErrorAction SilentlyContinue
+    } catch {
+        # heartbeat write failed — nothing to do, next cycle retries
+    }
+}
+
 while ($true) {
+    Write-Heartbeat
     try {
         # Check for sibling-letter arrival (ritual_scheduler + Wren letters).
         # Only spawn if CC is NOT already running — if CC is open, the Stop
