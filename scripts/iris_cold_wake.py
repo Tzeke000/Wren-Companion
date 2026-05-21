@@ -166,41 +166,54 @@ def _cmd_quote(s: str) -> str:
     return '"' + "".join(out_chars) + '"'
 
 
-def _build_cmd() -> str:
-    """Compose the claude command string. Anchored to D:\\Wren-Companion so
-    CC reads CLAUDE.md and .claude/settings.local.json from this project.
+def _build_cmd() -> list[str]:
+    """Compose the claude command as a LIST so winpty doesn't shlex-split a
+    quoted blob twice.
+
+    Regression caught 2026-05-20 20:51 EDT (Agent 1 forensic): when this
+    function returned a STRING with `_cmd_quote(FIRST_MSG)` wrapped in `"`,
+    winpty.PtyProcess.spawn(str) called shlex.split(posix=False) which kept
+    the outer quotes INSIDE the argv element, then subprocess.list2cmdline
+    re-quoted, producing `\\""` at the tail of the positional. CreateProcess
+    then handed a malformed arg to claude.exe, which exited fast → no claude
+    PID in the watchdog's 30s window → tier-2 spawn failed → fell to tier-3
+    bare-claude (loses --channels). Path E architecture stays dormant.
+
+    Fix: return argv as a list, pass list directly to PtyProcess.spawn — one
+    quoting pass via subprocess.list2cmdline only. _cmd_quote is no longer
+    used here but kept module-level in case a future string-path is added.
+
+    D1 note: BOTH `--dangerously-load-development-channels` and `--channels`
+    are variadic-greedy. Today the ordering works because each subsequent
+    `--flag` token stops the prior variadic's consumption. Do NOT insert a
+    second `--` between them — `--` terminates flag parsing entirely and
+    would dump `--channels …` into positional args. The only safe `--`
+    is the one immediately before the positional prompt below.
     """
-    # The .bat already cd'd here, but we set cwd via PtyProcess for safety.
-    #
-    # D1 note: BOTH `--dangerously-load-development-channels` and `--channels`
-    # are variadic-greedy. Today the ordering works because each subsequent
-    # `--flag` token stops the prior variadic's consumption. Do NOT insert a
-    # second `--` between them — `--` terminates flag parsing entirely and
-    # would dump `--channels …` into positional args. The only safe `--`
-    # is the one immediately before the positional prompt below. If a future
-    # refactor wants to reorder these, either put `--channels` first or
-    # split the dev-channels flag into multiple single-value usages.
-    base = (
-        'claude '
-        '--dangerously-skip-permissions '
-        '--dangerously-load-development-channels server:iris '
-        '--channels plugin:discord@claude-plugins-official server:iris'
-    )
+    argv: list[str] = [
+        'claude',
+        '--dangerously-skip-permissions',
+        '--dangerously-load-development-channels', 'server:iris',
+        '--channels', 'plugin:discord@claude-plugins-official', 'server:iris',
+    ]
     if USE_PATH_A:
-        # Path A: positional prompt that CC consumes as first interactive
-        # message after prompts resolve. The `--` terminator before the
-        # positional prevents `--channels` from greedily consuming it as a
-        # third channel entry. C1: use the cmd.exe-correct quoter (handles
-        # backslash-runs preceding quotes; preserved trailing-backslash
-        # safety enforced via module-load assert on FIRST_MSG).
-        return f'{base} -- {_cmd_quote(FIRST_MSG)}'
-    return base
+        # `--` terminator separates flag-parsing from the positional prompt.
+        # Without it, `--channels` greedily consumes FIRST_MSG as a third
+        # channel entry.
+        argv += ['--', FIRST_MSG]
+    return argv
 
 
 def main() -> int:
     cmd = _build_cmd()
     cwd = r'D:\Wren-Companion'
-    print(f"[iris_cold_wake] spawning: {cmd[:80]}...", file=sys.stderr, flush=True)
+    # cmd is now a list (post 2026-05-20 fix). Show first few argv elements
+    # for log; truncate the positional FIRST_MSG to keep stderr readable.
+    _argv_preview = " ".join(repr(a) if " " in a else a for a in cmd[:6])
+    _positional_count = max(0, len(cmd) - 6)
+    print(f"[iris_cold_wake] spawning argv: {_argv_preview}"
+          f"{f' (+ {_positional_count} more)' if _positional_count else ''}",
+          file=sys.stderr, flush=True)
     print(f"[iris_cold_wake] cwd={cwd}", file=sys.stderr, flush=True)
 
     # Env: inherit + force AVA_TTS_ENGINE so the spawned iris_runtime
@@ -476,8 +489,13 @@ def main() -> int:
         while proc.isalive():
             try:
                 if inject_dir.is_dir():
+                    # Extension filter: cron_inject.py uses atomic write via
+                    # `*.txt.tmp` → rename to `*.txt`. Watching only `*.txt`
+                    # avoids partial reads of mid-rename `.txt.tmp` files.
+                    # Agent 4 audit 2026-05-20.
                     files = sorted(
-                        [f for f in inject_dir.iterdir() if f.is_file()],
+                        [f for f in inject_dir.iterdir()
+                         if f.is_file() and f.suffix == ".txt"],
                         key=lambda p: p.stat().st_mtime,
                     )
                     for f in files:
@@ -541,9 +559,20 @@ def main() -> int:
                                 file=sys.stderr, flush=True,
                             )
                             seen.add(name)
-                    # Garbage-collect seen set when files are gone.
-                    current_names = {f.name for f in files}
-                    seen = seen & current_names
+                    # Garbage-collect seen set when files are gone. Re-listdir
+                    # at GC time (NOT reuse `files` from start of tick) so a
+                    # file dropped between start-of-tick and now isn't wrongly
+                    # evicted from `seen`. Agent 4 audit 2026-05-20.
+                    try:
+                        current_names = {
+                            f.name for f in inject_dir.iterdir()
+                            if f.is_file() and f.suffix == ".txt"
+                        }
+                        seen = seen & current_names
+                    except Exception:
+                        # If listdir fails here, leave seen alone — better to
+                        # carry stale entries than evict valid ones.
+                        pass
             except Exception as _le:
                 # Best-effort; never crash the watcher.
                 print(

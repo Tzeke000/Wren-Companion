@@ -77,7 +77,7 @@ function Test-WatchdogAlive {
 
 function Get-WatchdogPIDs {
     try {
-        $wds = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop | Where-Object {
+        $wds = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -OperationTimeoutSec 10 -ErrorAction Stop | Where-Object {
             $_.CommandLine -and $_.CommandLine -like "*iris_watchdog.ps1*"
         }
         return @($wds | ForEach-Object { $_.ProcessId })
@@ -133,7 +133,7 @@ function Get-CCProcessSet {
     try {
         $names = @("claude.exe", "Claude.exe", "Claude Code.exe", "node.exe")
         foreach ($n in $names) {
-            $procs = Get-CimInstance Win32_Process -Filter "Name='$n'" -ErrorAction SilentlyContinue
+            $procs = Get-CimInstance Win32_Process -Filter "Name='$n'" -OperationTimeoutSec 10 -ErrorAction SilentlyContinue
             if ($procs) {
                 foreach ($p in $procs) {
                     if ($p.CommandLine -and (
