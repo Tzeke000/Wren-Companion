@@ -371,6 +371,28 @@ def _bootstrap_concept_graph(g: dict[str, Any], root: Path) -> None:
     from brain.concept_graph import ConceptGraph
     cg = ConceptGraph(root)
     g["_concept_graph"] = cg
+    # 2026-05-21: ensure the entity self-node exists. concept_graph's
+    # bootstrap_from_existing_memory is IDENTITY.md-aware since Phase 45
+    # but isn't called automatically (iris_runtime.py:4112 skips it to
+    # avoid LLM-dependent topic-extraction paths that could hang ~120s
+    # at boot). Minimum-viable fix: just create the self-node here.
+    # Defer the full LLM-aware bootstrap until later via an MCP tool.
+    try:
+        import re
+        identity_path = root / "ava_core" / "IDENTITY.md"
+        entity_name = "Iris"  # iris-side fallback (concept_graph falls back to "Ava")
+        if identity_path.is_file():
+            txt = identity_path.read_text(encoding="utf-8", errors="replace")
+            m = re.search(
+                r"^\s*-?\s*\*?\*?Name:?\*?\*?\s*:?\s*\**(\w+)",
+                txt, re.MULTILINE,
+            )
+            if m:
+                entity_name = m.group(1).strip()
+        self_id = cg.find_or_create(entity_name, "self")
+        _log(f"self_node ensured: id={self_id} name={entity_name}")
+    except Exception as _sn_e:
+        _log(f"self_node bootstrap skipped: {_sn_e!r}")
 
 
 def _bootstrap_inner_monologue(g: dict[str, Any]) -> None:
