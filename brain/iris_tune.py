@@ -31,9 +31,11 @@ Categories of knobs:
     filler_after_silence_s (default 0.05)
 
   perception:
-    expression_detect_every_n (default 5) — frames; ~3fps at 15fps capture
-    attention_detect_every_n (default 30) — frames; ~0.5fps
-    insight_face_every_n (default 3) — frames; 5fps face detect
+    expression_detect_every_n (default 10) — frames; ~3fps at 30fps capture
+    attention_detect_every_n (default 60) — frames; ~0.5fps at 30fps capture
+    insight_face_every_n (default 6) — frames; 5fps face detect at 30fps
+    (Scaled 2026-05-20 commit d8c0c9d when capture moved 15fps→30fps;
+    per-second detect rates unchanged, just every-Nth-frame doubled.)
 
   behavior:
     auto_engage_on_face (default False) — proactive greeting on face-detect
@@ -90,9 +92,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "filler_after_silence_s": 0.05,
     },
     "perception": {
-        "expression_detect_every_n": 5,
-        "attention_detect_every_n": 30,
-        "insight_face_every_n": 3,
+        # Scaled to 30fps capture (commit d8c0c9d 2026-05-20).
+        # Per-second detect rates unchanged from the 15fps-era values.
+        "expression_detect_every_n": 10,
+        "attention_detect_every_n": 60,
+        "insight_face_every_n": 6,
     },
     "behavior": {
         # Iris's IDENTITY-aligned defaults: don't auto-engage, do auto-
