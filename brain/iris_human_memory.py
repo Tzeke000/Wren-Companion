@@ -10,8 +10,10 @@ refined 2026-05-21 against Wixted/FSRS power-law and Sevenster PE-gating:
     exponential; FSRS v6 calibration: R(t,S) = (1+F·t/S)^(-0.5))
   - Bjork's New Theory of Disuse + Cepeda 2008 spacing-ridgeline
     (retrieval-strength vs storage-strength; spacing-gated boost)
-  - Sevenster, Beckers & Kindt 2013 reconsolidation requires PE
-    (inverted-U on similarity: no-PE / Goldilocks / new-trace)
+  - Sevenster, Beckers & Kindt 2013 (Science) / 2014 (Learning & Memory):
+    reconsolidation requires PE; 3-regime pattern across single-vs-multi PE
+    trials. Inverted-U via PE-count (not magnitude); multi-PE regime is
+    transitional, NOT proven to be new learning.
   - Amygdala/flashbulb pathway (emotional arousal at encoding boosts
     importance and durability)
   - Active systems consolidation: Foster & Wilson 2006 sequence-replay;
@@ -137,14 +139,18 @@ _SCHEMA_ORPHAN_WEIGHT = 2.0
 _SCHEMA_CONGRUENT_WEIGHT = 1.0
 
 # Prediction-error gating thresholds for reconsolidation (Sevenster,
-# Beckers & Kindt 2013; Sinha et al. 2020). Inverted-U on Jaccard
-# similarity between old and new text:
+# Beckers & Kindt 2014, Learning & Memory; Sinha et al. 2020).
+# Three-regime gate on Jaccard similarity between old and new text:
 #   sim > _NO_PE_THRESHOLD     -> no PE, no labilization, retrieval-only
-#   _HIGH_PE_THRESHOLD <= sim <= _NO_PE_THRESHOLD -> moderate PE, reconsolidate
-#   sim < _HIGH_PE_THRESHOLD   -> high PE, encode as new trace linked to original
-# Jaccard is chosen over embedding cosine because it's dependency-free
-# and import-time-safe; the three-regime gate doesn't need semantic
-# precision, just rough overlap.
+#   _HIGH_PE_THRESHOLD <= sim <= _NO_PE_THRESHOLD -> single PE, reconsolidate
+#   sim < _HIGH_PE_THRESHOLD   -> low similarity (paper: multi-PE / transitional);
+#                                 write linked new entry, preserve original.
+# Note on the paper's actual measure: PE is operationalized via EXPECTATION
+# VIOLATION (unreinforced reminder trial), not stimulus dissimilarity.
+# Jaccard-on-text is a coarser proxy: misses content-opposite cases with
+# high lexical overlap ("X prefers React" vs "X prefers Vue"). Embedding-
+# based PE detection is the upgrade; Jaccard is the dependency-free
+# import-safe baseline for v1.
 _NO_PE_THRESHOLD = 0.9
 _HIGH_PE_THRESHOLD = 0.5
 
@@ -514,19 +520,36 @@ def record_revisit(memory_id: str, new_text: str,
                     reason: str = "",
                     mode: str = "auto") -> dict[str, Any]:
     """Prediction-error-gated reconsolidation (Sevenster, Beckers & Kindt
-    2013; Sinha et al. 2020).
+    2014, Learning & Memory; Sinha et al. 2020).
 
     Three regimes based on token-Jaccard similarity between old and new
     text, modeling the inverted-U on PE-driven labilization:
 
       sim > _NO_PE_THRESHOLD (0.9)   -> retrieval_only: no PE detected,
           the trace is not destabilized. Just bump access stats.
+          Maps to Sevenster's 1-reminder-trial condition (expected
+          outcome occurred, no labilization).
       _HIGH_PE_THRESHOLD <= sim <= _NO_PE_THRESHOLD (0.5-0.9) ->
           moderate_pe: Goldilocks zone. Write a superseding entry tagged
-          with reconsolidation_mode for the audit trail.
-      sim < _HIGH_PE_THRESHOLD (0.5) -> new_trace: high PE / unrelated.
-          Original stays primary; write a new entry with supersedes=None
-          and related_to=<original_id>.
+          with reconsolidation_mode for the audit trail. Maps to
+          Sevenster's 2-reminder-trial / single-PE condition.
+      sim < _HIGH_PE_THRESHOLD (0.5) -> new_trace: low similarity.
+          Original stays primary (supersedes=None); new entry written
+          with related_to=<original_id>. Maps to Sevenster's
+          4-reminder-trial / multiple-PE condition — which they call
+          "transitional", explicitly NOT proven to be new learning.
+          The label "new_trace" overclaims; the defensive behavior
+          (preserve original, link rather than replace) is the right
+          shape given the paper's uncertainty about this regime.
+
+    Caveat in the implementation: the paper measures PE via EXPECTATION
+    VIOLATION (unreinforced reminder = shock didn't occur), not via
+    stimulus dissimilarity. The Jaccard proxy maps "different content"
+    to PE, which misses cases where content-opposite text has high
+    lexical overlap ("X prefers React" vs "X prefers Vue" = high
+    Jaccard but content-opposite = single PE in the paper's sense).
+    Embedding-based PE detection would catch these; tracked as future
+    work, but Jaccard is the dependency-free import-safe baseline.
 
     Parameters
     ----------
