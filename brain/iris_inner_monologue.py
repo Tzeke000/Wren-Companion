@@ -460,8 +460,14 @@ def tick_once(g: dict[str, Any], force: bool = False) -> Optional[str]:
     # the forgetting curve.
     try:
         from brain import iris_human_memory
-        replay_result = iris_human_memory.drain_replay_batch(g, n=3)
-        if replay_result.get("replayed", 0) > 0:
+        # Awake-replay: tags clusters for later sleep-consolidation
+        # (van der Meer & Bendor 2025). The 4hr memory_sweep cron should
+        # call this with mode="sleep" to drain the pending tags.
+        replay_result = iris_human_memory.drain_replay_batch(g, n=3, mode="awake")
+        # Awake mode returns {tagged: int, seeds: int}; sleep mode returns
+        # {consolidated: int}. Print on either signal.
+        if (replay_result.get("tagged", 0) > 0
+                or replay_result.get("consolidated", 0) > 0):
             print(f"[inner_monologue] replay: {replay_result}")
     except Exception as _re:
         print(f"[inner_monologue] replay error: {_re!r}")
