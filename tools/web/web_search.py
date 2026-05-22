@@ -80,7 +80,13 @@ def search(query: str, max_results: int = 5) -> list[dict[str, str]]:
         return cached[1][:limit]
     url = f"https://api.duckduckgo.com/?q={quote_plus(q)}&format=json&no_redirect=1&no_html=1"
     r = requests.get(url, timeout=20)
-    payload = r.json() if r.headers.get("content-type", "").lower().startswith("application/json") else {}
+    # DDG's instant-answer API returns Content-Type: application/x-javascript
+    # (not application/json) despite a valid JSON body. Don't gate on the
+    # header — try to parse, fall back to {} on any error.
+    try:
+        payload = r.json()
+    except Exception:
+        payload = {}
     rows = _extract_results(payload if isinstance(payload, dict) else {}, max_results=limit)
     if not rows:
         html_url = f"https://duckduckgo.com/html/?q={quote_plus(q)}"
