@@ -25,8 +25,15 @@ $WATCHDOG_HEARTBEAT = Join-Path $ROOT ".tmp\watchdog_heartbeat.txt"
 $WATCHDOG_SCRIPT = Join-Path $ROOT "scripts\iris_watchdog.ps1"
 $START_IRIS_BAT = Join-Path $ROOT "start_iris.bat"
 $KEEPALIVE_LOG = Join-Path $ROOT ".tmp\keepalive.log"
+$CC_SPAWN_INFLIGHT = Join-Path $ROOT ".tmp\cc_spawn_inflight.flag"
 $HEARTBEAT_STALE_S = 30      # heartbeat older than this means watchdog is dead
 $CC_SPAWN_TIMEOUT_S = 30     # how long to wait for claude PID after spawning
+$CC_SPAWN_INFLIGHT_S = 120   # back off this long after WE spawn, so a 1-min keepalive
+                             # tick doesn't fire a second start_iris.bat while the first
+                             # cold_wake is still bringing CC up. Covers the full
+                             # start_iris -> cold_wake -> claude PID visible -> bootstrap
+                             # window. Distinct from restart_cc.flag (watchdog acts on
+                             # that one; this marker is keepalive-private).
 
 # ---- Logging ----
 function Write-KaLog($msg) {
@@ -158,6 +165,18 @@ function Test-CCAlive {
 # cover the full kill -> tier-2 spawn -> claude PID visible -> iris_runtime
 # bootstrap window.
 function Test-RestartInFlight {
+    # Our own spawn marker: if WE launched start_iris.bat recently, a cold_wake
+    # is mid-bringup (claude.exe may not be visible yet). Don't double-spawn.
+    # This is the fix for the 2026-06-26 double-start_iris race: keepalive read
+    # in-flight breadcrumbs but never wrote one for its own spawns.
+    if (Test-Path $CC_SPAWN_INFLIGHT) {
+        try {
+            $age = ((Get-Date) - (Get-Item $CC_SPAWN_INFLIGHT).LastWriteTime).TotalSeconds
+            if ($age -lt $CC_SPAWN_INFLIGHT_S) {
+                return @{ inflight = $true; reason = "cc_spawn_inflight.flag mtime ${age}s"; age = $age }
+            }
+        } catch { }
+    }
     $flagPath = Join-Path $ROOT ".tmp\restart_cc.flag"
     if (Test-Path $flagPath) {
         try {
@@ -194,6 +213,15 @@ function Find-ClaudeCommand {
 }
 
 function Spawn-CC {
+    # Mark spawn-in-flight FIRST, before launching anything, so the next 1-min
+    # keepalive tick backs off (Test-RestartInFlight) instead of stacking a
+    # second start_iris.bat while cold_wake is still bringing CC up.
+    try {
+        Set-Content -Path $CC_SPAWN_INFLIGHT -Value ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss")) -Encoding UTF8 -ErrorAction Stop
+        Write-KaLog "wrote cc_spawn_inflight.flag (next tick will back off for ${CC_SPAWN_INFLIGHT_S}s)"
+    } catch {
+        Write-KaLog ("WARN: could not write cc_spawn_inflight.flag -- " + $_ + " (spawn proceeds; no-worse-than-before)")
+    }
     Write-KaLog "CC spawn: tier 1 (start_iris.bat via cmd /k)"
     $baseline = Get-CCProcessSet
     if (Test-Path $START_IRIS_BAT) {
