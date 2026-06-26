@@ -414,7 +414,9 @@ document.getElementById("changeSecret").onclick = () => showSetup();
 
 function fmtTime(ts) {
   const d = new Date(ts * 1000);
-  return d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  const date = d.toLocaleDateString([], {month: "short", day: "numeric", year: "numeric"});
+  const time = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  return date + ", " + time;
 }
 function renderLetter(l) {
   if (seen.has(l.id)) return;
