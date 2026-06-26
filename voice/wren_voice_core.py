@@ -152,14 +152,18 @@ def _looks_incomplete(text: str) -> bool:
 
 
 def _endpoint_incomplete(audio: "np.ndarray") -> bool:
-    """True if wren_smartturn predicts the speaker is still mid-turn (prob < 0.5).
+    """True if wren_smartturn predicts the speaker is still mid-turn (prob < 0.6).
     Returns False on ANY error — the existing _looks_incomplete word-list still guards
-    that path. Only runs if _HAVE_SMARTTURN is True."""
+    that path. Only runs if _HAVE_SMARTTURN is True.
+
+    Threshold 0.6 (was 0.5, Wren's tune 2026-06-26): errs toward LETTING ZEKE FINISH —
+    holds the mic when the waveform looks unfinished — WITHOUT adding fixed per-turn
+    latency the way raising END_SILENCE_S would. Addresses 'don't cut me off'."""
     if not _HAVE_SMARTTURN:
         return False
     try:
         result = _smartturn.predict_endpoint(audio)
-        return result["prob"] < 0.5
+        return result["prob"] < 0.6
     except Exception:
         return False
 
