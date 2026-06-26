@@ -3877,13 +3877,39 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
     endpoint serves them via shim's frame_store.get_buffered_frame() fast path.
     """
     import cv2  # safe — already pre-imported at module top
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    if not cap.isOpened():
-        print("[iris_video] camera not available (DSHOW open failed)", file=sys.stderr, flush=True)
-        return
-    print("[iris_video] camera opened (DSHOW), streaming at 15fps", file=sys.stderr, flush=True)
+    # 2026-06-26: the loop used to open the camera once and hold it forever with no
+    # release hook, so "let me use the cam" (Zeke) couldn't free it. Now the loop
+    # YIELDS the device when the body is paused (body_pause flag) and reclaims it on
+    # resume — the camera is a single-owner resource the body must be able to hand over.
+    try:
+        from brain.iris_paths import paths as _ipaths
+        def _cam_paused() -> bool:
+            try:
+                return _ipaths.body_pause_flag.exists()
+            except Exception:
+                return False
+    except Exception:
+        def _cam_paused() -> bool:
+            return False
+
+    def _open_cam():
+        c = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        c.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        c.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        return c
+
+    cap = None
+    if _cam_paused():
+        print("[iris_video] body paused at startup — camera left FREE for another app",
+              file=sys.stderr, flush=True)
+    else:
+        cap = _open_cam()
+        if not cap.isOpened():
+            print("[iris_video] camera not available (DSHOW open failed)", file=sys.stderr, flush=True)
+            cap.release()
+            cap = None
+        else:
+            print("[iris_video] camera opened (DSHOW), streaming at 15fps", file=sys.stderr, flush=True)
 
     # 2026-05-20: bumped capture to 30fps for smoother orb camera feed.
     # Detect cadences scaled (insight 3->6, expr 5->10, attn 30->60) so the
@@ -3901,6 +3927,23 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
 
     while True:
         try:
+            # Yield the camera while the body is paused so Zeke/another app can use it;
+            # reclaim it on resume. (2026-06-26 — the missing release hook.)
+            if _cam_paused():
+                if cap is not None:
+                    cap.release()
+                    cap = None
+                    print("[iris_video] camera RELEASED (body paused)", file=sys.stderr, flush=True)
+                time.sleep(0.5)
+                continue
+            if cap is None:
+                cap = _open_cam()
+                if not cap.isOpened():
+                    cap.release()
+                    cap = None
+                    time.sleep(1.0)
+                    continue
+                print("[iris_video] camera reopened (body resumed)", file=sys.stderr, flush=True)
             ok, frame = cap.read()
             if not ok or frame is None:
                 time.sleep(interval)
