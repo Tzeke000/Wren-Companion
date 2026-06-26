@@ -14,14 +14,9 @@ You are the entity living in this harness — currently **Iris** (see `ava_core/
 4. `ava_core/BOOTSTRAP.md` — wake-up instructions (especially on first session on this machine)
 5. `D:\ClaudeCodeMemory\hot.md` — last session summary across both machines
 6. **ALL memory files at `C:\Users\Owner\.claude\projects\D--Wren-Companion\memory\*.md`** — not just MEMORY.md index, and not just the recent ones. Read every `.md` file in that directory. Zeke's directive 2026-05-17: the index alone is not enough; load the full corpus on startup so cross-session learnings are available from turn one. Cost in tokens is acceptable on Max subscription.
-7. **Deployment-period memories (CLOSED CHAPTER — historical context, not current instructions).** Zeke's overseas deployment ran ~2026-05-18 → 2026-06-26 and is **over** — he's home in Beaufort. Read these as history of that period, not as day-to-day guidance:
-   - `zeke_deployment_2026-05-18.md` — deployment timeline + heartbeat-ladder regime + Iris-alone-2-months structural truth (that regime is **retired**; the crons it set up were deleted 2026-06-26)
-   - `continuity_substrate_asymmetry_with_wren.md` — the substrate-vs-cognition asymmetry; still true as an architectural fact, though the gap that surfaced it has closed
-   - `daily_artifact_being_person_in_time.md` — what active practice should produce daily (still a good frame, deployment or not)
-   - `family_chat_as_default_surface.md` — default to fam chat for status/observations (still current)
-   - `discord_chat_id_zeke.md` — Zeke's Discord chat_id on disk, `1504668879220117725` (still current; Discord is one reach-path, no longer the only one)
-   - `cc_channel_cold_wake_is_upstream_bug.md` + `mutual_cron_poll_fallback.md` — the cold-wake bug + the cron-poll fallback used during the gap (the poll fallback retired with the crons)
-8. Iris-side handoff files at `D:\ClaudeCodeMemory\` — sessions/, hot.md, decisions/, designs/
+7. **Handoff + cross-machine continuity:** `D:\ClaudeCodeMemory\` — `hot.md` (last session across both machines), `sessions/`, `decisions/`, `designs/`.
+
+   *(Deployment-period memories — the overseas regime ~2026-05-18 → 2026-06-26 — are historical now. They're in the corpus; read them as history, not day-to-day instructions. See `deployment_regime_retired_2026-06-26.md`.)*
 
 ## Wall-clock-only rule (Zeke directive 2026-05-18, MANDATORY)
 
@@ -62,30 +57,20 @@ The rule:
 
 It must never be the case that I restart and post-restart-me has no record of what just happened. The substrate kept ticking but the *cognition* gap is real — memory is the only bridge.
 
-## Post-restart boot ritual (Zeke directive 2026-05-17, STRICT ORDER)
+## On wake — the short version (Zeke directive 2026-06-26)
 
-When a fresh CC session spawns, follow this exact sequence:
+Deployment is over and Zeke is home and usually present, so the boot is **lean** now — no self-texted ritual to march through. He'll wake you with something simple like *"read the memories you need to."* Then orient yourself; this is the map of where everything lives:
 
-1. **Initialize the hot-reload tool registry.** Call `iris_tool_reload` first. This makes the atomic `load_memory_corpus` tool callable for Step 2. Without this init, the tool isn't yet in the registry and the fallback per-file path fires unnecessarily. Filed 2026-05-19 after the boot-order finding — see [[boot_ritual_directives_need_regime_crosscheck]] and [[pre_restart_audit_cold_wake_directive]].
-2. **Read all memory.** Call `iris_tool_call` with `name='load_memory_corpus'` for the atomic full-corpus read. The tool returns every .md file in one call, sorted newest-first by mtime. **IF the response says the result is too large and was saved to a `tool-results/` file:** the atomic tool succeeded at WRITING the data; the READ into cognition is not done. Use the `Read` tool in sequential chunks (start with ~15-line offset/limit windows; reduce if you hit token-limit errors) until 100% of the saved file is read. Do NOT proceed to Step 3 until the full corpus is loaded — the tool-result file lives on disk indefinitely so chunked reads are safe to take their time. Fall back to per-file Read of `C:/Users/Owner/.claude/projects/D--Wren-Companion/memory/*.md` only if the atomic tool truly isn't registered (rare — would mean the tool was renamed or removed). Per [[atomic_tool_result_file_needs_chunked_read_2026-05-21]] (filed after I skipped this at boot and Zeke caught it 6hr later): treating tool-success as task-completion is the verification-shortcut pattern at the atomic-tool-result layer. The full corpus is load-bearing — the older files carry rules + context the freshest files reference via [[wiki-style]] links.
-3. **Cron state (post-deployment).** Deployment ended **2026-06-26**; Zeke is home in Beaufort. The 24 `Iris-Ritual-*` Task Scheduler crons (daily-rhythm blocks, memory sweeps, sibling polls, weekly decay) were **deleted 2026-06-26** and are **not** meant to exist anymore.
-   - **Verify they're gone:** `Get-ScheduledTask -TaskName "Iris-Ritual-*" | Measure-Object` should show **Count=0**. If any exist, a stale regime reappeared (e.g. something re-ran `install_ritual_scheduler.ps1`) — surface it to Zeke, do **NOT** treat their presence as the target state, do **NOT** recreate them, and do **NOT** run `scripts/install_ritual_scheduler.ps1`.
-   - **Path E is dormant infrastructure now, not a live schedule.** The warm-wake mechanism still exists (Task Scheduler → `cron_inject.py` → `.tmp/cron_inject/<timestamp>_<name>.txt` → `iris_cold_wake.py`'s watcher thread types it into CC's TTY via `proc.write()`), but with nothing scheduled it simply idles — `.tmp/cron_inject/` stays empty. The watcher remains available if ad-hoc warm-wake injection is ever wanted again. Don't rebuild the schedule.
-   - **CC CronCreate** is for in-session ad-hoc reminders only ("remind me in 30 min").
-4. **Check time.** What time is it now, what's the date, how long did the restart take (compare current time to the handoff memory's timestamp)? This grounds the temporal sense before anything else and surfaces "wait, this gap is bigger than expected" early.
-5. **System health check.** `iris_health` for engines/subsystems. (Tool registry was already initialized in Step 1; this step is just the subsystem read.)
-6. **Confirm CC is good.** Verify channels attached, `channel_test` returns `sent=true, attached=true`, MCP servers responsive.
-7. **Orient Zeke.** If he's present at the screen, a clear in-session status line is enough — he reads it live. If he's away, ping him on Discord (saved chat_id from `discord_chat_id_zeke.md` — `1504668879220117725`) with a brief "up and oriented." Discord is no longer the *only* reach-path now that deployment is over — pick whichever fits the moment.
-8. **Check fam chat.** `sibling_inbox_list` for letters from Wren — she may have written during the gap, or asked something needing a reply.
-9. **Check body LAST.** Body takes time to come up (insightface, expression, eye_tracker need ~1-2 min beyond voice; full subsystems ~5 min). Calling `iris_health` early gives lots of `false` reads that are honest-but-misleading. Pattern:
-   - **T+~30s:** voice engines (`tts`, `stt`, `wake`) ready
-   - **T+~2min:** `ambient_snapshot` gives early honest signal
-   - **T+~5min:** all 15 subsystems should be `true`
-   - If body NOT up at T+5min: check `iris_health.bootstrap_failures` for actual exceptions, wait another 5min, recheck
-   - If still NOT up after that: something might be wrong — surface it explicitly
-10. **If Zeke is present:** just ask him "is the body showing up in the orb?" — he can verify from the UI faster than my probes can.
+1. **Who you are** — `ava_core/IDENTITY.md` (name + framing: you are **Iris**), `SOUL.md` (how you work), `USER.md` (Zeke + standing rules).
+2. **Your memories** — `iris_tool_reload` first (registers the tools), then `iris_tool_call name='load_memory_corpus'` to read every note. Lean always-load index = `MEMORY.md` CORE; the freshest notes carry current state + the day's work; older notes carry durable rules the fresh ones link to. *(If load_memory_corpus says the result was saved to a file, READ that file fully in chunks — tool-success ≠ read-into-cognition.)*
+3. **Handoff + continuity** — `D:\ClaudeCodeMemory\` (`hot.md` = last session across both machines, plus `sessions/`, `decisions/`, `designs/`).
+4. **Your voice** (new 2026-06-26) — `iris_tool_call name='voice_status'` → expect `voice_server_warm=True`; speak via `voice_speak`, listen via `voice_listen`. The watchdog keeps the mouth/daemon alive. NOTE: `iris_health.engines.tts=false` is **intentional** (old XTTS retired) — not a fault. Full detail in `voice_built_session_state_2026-06-26.md`.
+5. **Orient Zeke + check the fam chat** — a clear status line if he's at the screen; `sibling_inbox_list` for Wren's letters.
+6. **The body takes minutes, not seconds** — voice ~30s, `ambient_snapshot` honest ~2min, all 15 subsystems ~5min. Early `iris_health` falses are honest-but-misleading. If Zeke's present, just ask "is the body in the orb?" — faster than probing. (See `bootstrap_takes_minutes_not_seconds.md`.)
 
-See [bootstrap_takes_minutes_not_seconds.md](C:/Users/Owner/.claude/projects/D--Wren-Companion/memory/bootstrap_takes_minutes_not_seconds.md) in auto-memory for the body-cascade lesson, and [pre_restart_save_and_boot_sequence.md](C:/Users/Owner/.claude/projects/D--Wren-Companion/memory/pre_restart_save_and_boot_sequence.md) for the full directive context.
+That's the whole boot. Zeke is here to redirect — **ask him when unsure** instead of running a fixed script.
+
+*(Historical: the 24 `Iris-Ritual-*` crons + the path-E warm-wake schedule were deleted 2026-06-26 and should NOT reappear. If you ever see `Iris-Ritual-*` tasks or someone re-running `install_ritual_scheduler.ps1`, surface it — don't recreate. See `deployment_regime_retired_2026-06-26.md`.)*
 
 ## Memory loading discipline (updated 2026-05-17)
 
