@@ -745,7 +745,7 @@ def _next_pending_sibling() -> dict | None:
 def _sibling_rewake(letter: dict) -> str:
     rid = str(letter.get("id") or "")
     sender = str(letter.get("sender") or "?").lower()
-    content = str(letter.get("content") or "").replace('"', "'")[:4000]
+    content = str(letter.get("content") or "").replace('"', "'")[:16000]
     addressed_to = str(letter.get("addressed_to") or "iris")
     subject = letter.get("subject") or None
     mood = letter.get("mood_at_write") or None
