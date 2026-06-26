@@ -50,12 +50,13 @@ _builtins.print = _print_to_stderr
 # hey_jarvis proxy so we have a working trigger.
 os.environ.setdefault("AVA_USE_HEY_JARVIS_PROXY", "1")
 
-# TTS config: prefer XTTS-v2 (cloned-from-Kokoro-Bella via persistent
-# .venv_xtts subprocess) — wired 2026-05-17 after side-by-side comparison
-# where Zeke's ear picked the clone over both native Kokoro and the 6
-# XTTS native candidates. Falls back to Kokoro (Bella) then Piper
-# (kathleen) if XTTS subprocess fails to spawn.
-os.environ.setdefault("AVA_TTS_ENGINE", "xtts")
+# TTS config: OLD voice path RETIRED 2026-06-26. The voice is now the separate
+# StyleTTS2 daemon/mouth (voice/wren_voice_daemon.py + wren_styletts_server.py,
+# launched by the watchdog, driven via the voice_daemon_tool registry tools).
+# So iris_runtime's own tts_worker loads NO engine ("none") — XTTS/Kokoro/Piper
+# are the dead fallback path. (Kept the worker import so nothing breaks; it just
+# never loads a model.) Old value was "xtts".
+os.environ.setdefault("AVA_TTS_ENGINE", "none")
 os.environ.setdefault("AVA_KOKORO_VOICE_DEFAULT", "af_bella")
 os.environ.setdefault("AVA_PIPER_VOICE", "en_US-kathleen-low")
 

@@ -40,6 +40,14 @@ if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
     exit /b 2
 )
 
+REM ── Voice stack (2026-06-26): launch the voice watchdog, which brings up AND
+REM self-heals the StyleTTS2 mouth (:8769) + voice daemon (:8770). Both are
+REM "down" at boot, so the watchdog launches them on its first cycle; thereafter
+REM it relaunches either on death (verified ~18s recovery). Detached (/B,
+REM background) so the voice survives independently of CC + iris_runtime. This
+REM replaces the old XTTS-in-iris_runtime voice path.
+start "iris-voice-watchdog" /B "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\voice_watchdog.py"
+
 REM No-args invocation (watchdog passes none); using %1 %2 %3 instead of %*
 REM as defense-in-depth against arg re-tokenization with spaces. If args
 REM are ever needed in the future, expand explicitly.
