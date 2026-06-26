@@ -254,10 +254,11 @@ def main() -> int:
           file=sys.stderr, flush=True)
     print(f"[iris_cold_wake] cwd={cwd}", file=sys.stderr, flush=True)
 
-    # Env: inherit + force AVA_TTS_ENGINE so the spawned iris_runtime
-    # picks xtts (the .bat used to set this; now the python launcher does).
+    # Env: OLD voice retired 2026-06-26 — the voice is now the separate StyleTTS2
+    # daemon (launched by voice_watchdog from start_iris.bat), so iris_runtime's
+    # own tts_worker loads NO engine. Was "xtts".
     env = dict(os.environ)
-    env["AVA_TTS_ENGINE"] = "xtts"
+    env["AVA_TTS_ENGINE"] = "none"
 
     try:
         proc = winpty.PtyProcess.spawn(
