@@ -1,0 +1,1054 @@
+"""wren_voice_core.py — voice orchestration, hot-reloadable.
+
+GOSE-pattern refactor (2026-06-14): voice logic moved OUT of the MCP process into
+this reloadable module. A separate daemon runs the event loop, receives newline-
+delimited JSON commands on TCP (WREN_VOICE_DAEMON_PORT, default 8770), calls
+cmd_* functions here, and returns {"ok":true,"result":...} / {"ok":false,"error":...}.
+
+Because the daemon import-and-reload this module, voice fixes hot-reload without a
+Claude Code relaunch. The daemon owns: socket server, playback worker thread, ctx
+object instantiation, whisper/silero warming. This file is PURE LOGIC — no MCP,
+no threads started at import, no models loaded at import.
+
+ctx is a plain object the daemon creates. Functions here READ and WRITE its
+attributes but do NOT define the class. See contract in the build spec.
+"""
+from __future__ import annotations
+
+import importlib
+import os
+import queue
+import re
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from urllib import request as _req
+from urllib.error import HTTPError, URLError
+
+# ── path setup (module-level so reload rebinds) ──────────────────────────────
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import wren_listen as wl
+import wren_pace
+from wren_voice_status import read_state, is_muted, set_state
+
+try:
+    import wren_smartturn as _smartturn
+    _HAVE_SMARTTURN = True
+except ImportError:
+    _HAVE_SMARTTURN = False
+    print("[wren-voice-core] wren_smartturn not importable — smart-turn disabled",
+          file=sys.stderr)
+
+try:
+    import wren_prosody as _prosody
+    _HAVE_PROSODY = True
+except ImportError:
+    _HAVE_PROSODY = False
+    print("[wren-voice-core] wren_prosody not importable — prosody disabled",
+          file=sys.stderr)
+
+import numpy as np
+import sounddevice as sd
+
+# ── module-level constants (reloadable; tuned values from the frozen source) ──
+SAMPLE_RATE = wl.SAMPLE_RATE           # 16k, whisper-native
+
+ONSET_PEAK = 0.02                      # frame peak above this = speech onset
+CONTINUE_PEAK = 0.012                  # during an utterance, peak above this counts as
+                                       # voice — lower than onset so soft trailing words
+                                       # and inter-phrase dips don't start the end-of-
+                                       # turn clock
+END_SILENCE_S = 1.1                    # trailing silence that ends an utterance. History:
+                                       # 1.2 clipped Zeke mid-thought (2026-06-03) → raised
+                                       # to 2.0 → 1.4 (2026-06-14) → 1.1 (latency pass, same
+                                       # day) for a snappier turn-end BECAUSE smart-turn
+                                       # (_endpoint_incomplete) + the grace window re-open the
+                                       # mic if he's still mid-thought — so the fixed tail no
+                                       # longer has to be long to be safe. THE FIRST KNOB to
+                                       # raise back if it ever clips him on a thoughtful pause.
+SELF_LISTEN_TRAILING_S = 0.35          # don't capture for this long after I stop speaking
+
+# Turn-end fillers (latency pass 2026-06-14): a short backchannel queued the instant a
+# turn closes, so Zeke hears a response within ~1s of his last word while I'm still
+# transcribing + thinking. Masks the his-last-word→my-first-word gap that no engine knob
+# can close (the irreducible chunk is my own think-time). Rotated, not random, so a
+# reload stays deterministic. Kept SHORT so they read as backchannel, not a real reply.
+CALL_FILLERS = ("Mm-hmm.", "Okay.", "Right.", "So,")  # "Mm."/"Mhm." synth'd as a flat "MM" — dropped
+
+GRACE_RESUME_TIMEOUT = 1.8             # after a cue-ending, how long to wait for him to resume
+MAX_GRACE_ROUNDS = 3                   # cap so a stutter can't loop the mic forever
+
+# If the utterance ends on one of these, treat it as "still thinking, hold on".
+CONTINUATION_CUES = {
+    # hesitations / thinking sounds
+    "um", "umm", "uh", "uhh", "uhm", "er", "erm", "hmm", "mm", "mmm", "like", "well",
+    # dangling conjunctions / connectives — a clause is still coming
+    "and", "but", "or", "nor", "so", "yet", "because", "cause", "cuz", "since",
+    "although", "though", "while", "plus", "also", "then", "if", "when", "that",
+    "which", "who",
+    # dangling prepositions / articles / particles — almost always still going
+    "the", "a", "an", "to", "of", "for", "in", "on", "at", "with", "by", "from",
+    "into", "about", "as", "my", "your", "our", "their", "his", "its",
+    # contracted subjects + intent verbs that genuinely dangle ("I'm...", "gonna...")
+    "gonna", "wanna", "i'm", "you're", "we're", "they're",
+    # NB: bare pronouns/auxiliaries (you, it, is, are, kind, sort...) were pruned —
+    # they end complete phrases far more often than they dangle ("...for you",
+    # "...yes it is"), so they caused false grace-waits on ordinary sentences.
+}
+
+# ── barge-in tunables ────────────────────────────────────────────────────────
+VAD_CHUNK = 512            # Silero requires EXACTLY 512 samples @ 16kHz (32ms).
+VAD_THRESHOLD = 0.5        # per-chunk speech probability cutoff
+VAD_DEBOUNCE_MS = 250      # consecutive voiced ms before it's a real barge-in (~8 chunks)
+VAD_CHUNK_MS = 32          # 512 samples / 16 kHz = 32 ms per Silero chunk
+BARGEIN_PREROLL_MS = 400   # rolling audio kept BEFORE confirmed onset (recovers first syllable)
+BARGEIN_END_SILENCE_MS = 600  # continuous sub-threshold audio that ENDS the captured interruption
+BARGEIN_MAX_CAPTURE_S = 20.0  # hard cap on a single captured interruption
+
+# ── engine registry ──────────────────────────────────────────────────────────
+_EXP_DIR = str(Path(__file__).resolve().parent)
+_ENGINES: dict = {  # name: (port, venv_python, server_script)
+    "xtts":       (8765, r"D:\Wren\voice\xtts-venv\Scripts\python.exe",   "wren_voice_server.py"),
+    "chatterbox": (8767, r"D:\Wren\voice\cbx-venv\Scripts\python.exe",    "wren_chatterbox_server.py"),
+    "styletts2":  (8769, r"D:\Wren\voice\style-venv\Scripts\python.exe",  "wren_styletts_server.py"),
+}
+
+
+def _engine_for_url(url: str) -> str:
+    """Reverse-map a mouth URL to its engine name via the port (the _ENGINES key).
+    The mouth PORT is the routing source of truth (start_wren sets WREN_VOICE_PORT=8769
+    → StyleTTS2), so the 'current' label must follow it instead of a stale default.
+    Returns the engine name, or 'port:<n>' if the port isn't a known engine."""
+    try:
+        port = int(url.rsplit(":", 1)[1].split("/")[0])
+    except (ValueError, IndexError):
+        return "unknown"
+    for name, (eport, *_rest) in _ENGINES.items():
+        if eport == port:
+            return name
+    return f"port:{port}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PRIVATE HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _looks_incomplete(text: str) -> bool:
+    """True if the transcript looks like Zeke is mid-thought (trailed on a thinking
+    cue or a dangling word). Whisper tends to append a '.' even mid-utterance, so
+    the trailing PUNCTUATION is unreliable — the last lexical WORD is the real signal."""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if t.endswith((",", "...", "-", "—")):  # whisper kept an explicit continuation mark
+        return True
+    words = re.findall(r"[a-z']+", t)
+    if not words:
+        return False
+    return words[-1] in CONTINUATION_CUES
+
+
+def _endpoint_incomplete(audio: "np.ndarray") -> bool:
+    """True if wren_smartturn predicts the speaker is still mid-turn (prob < 0.5).
+    Returns False on ANY error — the existing _looks_incomplete word-list still guards
+    that path. Only runs if _HAVE_SMARTTURN is True."""
+    if not _HAVE_SMARTTURN:
+        return False
+    try:
+        result = _smartturn.predict_endpoint(audio)
+        return result["prob"] < 0.5
+    except Exception:
+        return False
+
+
+def _http_get(url: str, timeout: float = 5.0) -> "tuple[int, str]":
+    """GET url; returns (status_code, body). Returns (-1, err) on any exception."""
+    try:
+        with _req.urlopen(url, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")[:200]
+    except Exception as e:
+        return -1, repr(e)
+
+
+def _health_ok(port: int, timeout: float = 2.0) -> bool:
+    try:
+        with _req.urlopen(f"http://127.0.0.1:{port}/health", timeout=timeout) as r:
+            return r.read().decode("utf-8", "replace").strip() == "ok"
+    except Exception:
+        return False
+
+
+def _post_speak(ctx, text: str) -> str:
+    """POST one chunk of text to the mouth (ctx.server_url + '/') and return its reply.
+    Blocks until playback finishes or /stop aborts it."""
+    data = text.encode("utf-8")
+    req = _req.Request(ctx.server_url + "/", data=data,
+                       headers={"Content-Type": "text/plain; charset=utf-8"},
+                       method="POST")
+    try:
+        with _req.urlopen(req, timeout=180) as resp:
+            return f"[voice_speak] {resp.read().decode('utf-8', 'replace')}"
+    except HTTPError as e:
+        return (f"[voice_speak] server error HTTP {e.code}: "
+                f"{e.read().decode('utf-8','replace')[:200]}")
+    except URLError as e:
+        return (f"[voice_speak] warm voice server not reachable ({ctx.server_url}): "
+                f"({e}). It should be launched by start_wren.bat; "
+                "see notes/voice_runbook.md to start it manually.")
+
+
+def _capture_utterance(ctx, timeout_s: float, max_s: float,
+                       end_silence_s: float = END_SILENCE_S) -> "np.ndarray | None":
+    """Block until speech onset (or timeout), then record until trailing silence or max
+    length. Sets overlay state to listening when mic opens.
+    Returns float32 audio, or None if nothing was said."""
+    # Use the mic index resolved on the daemon's MAIN thread (ctx.mic_dev_idx). Calling
+    # find_input_device (sd.query_devices) HERE on a worker connection thread hangs on
+    # Windows. Fall back to find_input_device only if the daemon didn't set it.
+    dev_idx = getattr(ctx, "mic_dev_idx", None)
+    if dev_idx is None:
+        dev_idx = wl.find_input_device(wl.DEFAULT_MIC_SUBSTR)
+    frame_s = 0.1
+    frame_n = int(SAMPLE_RATE * frame_s)
+
+    collected: list = []
+    started = False
+    t_start = time.time()
+    onset_t = 0.0
+    last_voice_t = 0.0
+
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                        device=dev_idx, blocksize=frame_n) as stream:
+        set_state("listening", "in call")
+        while True:
+            frame, _overflow = stream.read(frame_n)
+            f = np.asarray(frame).flatten()
+            peak = float(np.abs(f).max()) if f.size else 0.0
+            now = time.time()
+
+            if not started:
+                if now - t_start > timeout_s:
+                    return None  # nobody spoke within the window
+                if is_muted():
+                    time.sleep(0.1)
+                    t_start = now  # don't count muted time against the timeout
+                    continue
+                if peak >= ONSET_PEAK:
+                    started = True
+                    onset_t = now
+                    last_voice_t = now
+                    collected.append(f)
+            else:
+                collected.append(f)
+                if peak >= CONTINUE_PEAK:
+                    last_voice_t = now
+                if now - last_voice_t >= end_silence_s:
+                    break  # he finished a thought
+                if now - onset_t >= max_s:
+                    break  # hard cap
+
+    if not collected:
+        return None
+    return np.concatenate(collected)
+
+
+def _run_with_timeout(fn, seconds: float, name: str = "") -> bool:
+    """Run warm step fn() on a daemon worker; return True only if it FINISHED within
+    seconds AND returned truthy. On timeout the worker is abandoned (daemon) so a hung
+    model-load or stalled poll can NEVER block the call from connecting.
+    Any exception inside fn → False (treated as a failed warm)."""
+    out: dict = {}
+
+    def _w():
+        try:
+            out["r"] = fn()
+        except Exception as e:
+            out["e"] = e
+
+    th = threading.Thread(target=_w, daemon=True, name=f"wren-warm-{name or 'step'}")
+    th.start()
+    th.join(seconds)
+    if th.is_alive():
+        print(f"[call_start] warm step {name!r} timed out after {seconds:.0f}s — abandoning",
+              file=sys.stderr)
+        return False
+    if "e" in out:
+        print(f"[call_start] warm step {name!r} failed: {out['e']!r}", file=sys.stderr)
+        return False
+    return bool(out.get("r"))
+
+
+def _bargein_accumulate(frame_prob_iter, is_speaking, on_barge, *,
+                        threshold: float, need: int, preroll_chunks: int,
+                        end_silence_chunks: int, max_chunks: int,
+                        on_event=None) -> "np.ndarray | None":
+    """PURE accumulation core — no audio I/O, testable with a synthetic (frame, prob)
+    sequence.
+
+    Phase 1 (pre-barge): keep a rolling pre-roll deque; count consecutive voiced chunks.
+    While is_speaking() is True, watch. On need consecutive voiced chunks → confirmed
+    onset: call on_barge(), seed the capture with the pre-roll, and switch to Phase 2
+    on the SAME iterator (no stream reopen — that's the 2026-06-07 fix for clipped leading
+    syllables).
+
+    Phase 2 (capture): keep appending chunks until end_silence_chunks of continuous sub-
+    threshold audio (end-of-speech) or max_chunks (hard cap).
+
+    Returns concatenated captured audio (pre-roll + onset → end), or None if is_speaking()
+    went False with no interruption."""
+    from collections import deque
+    # Pre-roll must be at least as long as the debounce, or onset chunks would fall out.
+    preroll = deque(maxlen=max(preroll_chunks, need))
+    collected: list = []
+    voiced = 0
+    silence_run = 0
+    barged = False
+
+    for f, prob in frame_prob_iter:
+        if not barged and not is_speaking():
+            return None  # finished speaking with no interruption
+        is_voiced = prob >= threshold
+
+        if not barged:
+            preroll.append(f)
+            voiced = voiced + 1 if is_voiced else 0
+            if voiced >= need:
+                barged = True
+                if on_event:
+                    on_event("detect", prob)
+                try:
+                    on_barge()
+                except Exception:
+                    pass
+                if on_event:
+                    on_event("stopped", prob)
+                collected.extend(preroll)   # seed with pre-roll incl. onset chunks
+                silence_run = 0
+        else:
+            collected.append(f)
+            if is_voiced:
+                silence_run = 0
+            else:
+                silence_run += 1
+                if silence_run >= end_silence_chunks:
+                    break  # end-of-speech
+            if len(collected) >= max_chunks:
+                break  # hard cap
+
+    if not collected:
+        return None
+    return np.concatenate(collected)
+
+
+def _bargein_watch_and_capture(ctx, model, is_speaking, on_barge, *,
+                               device_substr: "str | None" = None,
+                               threshold: float = VAD_THRESHOLD,
+                               debounce_ms: int = VAD_DEBOUNCE_MS,
+                               preroll_ms: int = BARGEIN_PREROLL_MS,
+                               end_silence_ms: int = BARGEIN_END_SILENCE_MS,
+                               max_capture_s: float = BARGEIN_MAX_CAPTURE_S,
+                               on_event=None) -> "np.ndarray | None":
+    """ONE continuous mic stream that watches for a barge-in via Silero VAD AND captures
+    the interrupting utterance on the same stream (no second open).
+
+    Opens a single sd.InputStream at 512-sample blocksize, feeds each chunk to the
+    Silero model for a speech probability, and delegates the state machine to
+    _bargein_accumulate. Returns captured float32 audio or None if I finished speaking
+    uninterrupted."""
+    import torch
+
+    # Reuse the main-thread-resolved mic index (worker-thread query_devices hangs on Win).
+    dev_idx = getattr(ctx, "mic_dev_idx", None)
+    if dev_idx is None:
+        dev_idx = wl.find_input_device(device_substr or wl.DEFAULT_MIC_SUBSTR)
+    need = max(1, round(debounce_ms / VAD_CHUNK_MS))
+    preroll_chunks = max(1, round(preroll_ms / VAD_CHUNK_MS))
+    end_silence_chunks = max(1, round(end_silence_ms / VAD_CHUNK_MS))
+    max_chunks = max(1, int(max_capture_s * SAMPLE_RATE / VAD_CHUNK))
+
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                        device=dev_idx, blocksize=VAD_CHUNK) as stream:
+        def _frames():
+            while True:
+                frame, _ov = stream.read(VAD_CHUNK)
+                f = np.asarray(frame).flatten()
+                if f.size != VAD_CHUNK:
+                    continue  # Silero needs EXACTLY 512 samples
+                try:
+                    prob = float(model(torch.from_numpy(f), SAMPLE_RATE).item())
+                except Exception:
+                    prob = 0.0
+                yield f, prob
+
+        return _bargein_accumulate(_frames(), is_speaking, on_barge,
+                                   threshold=threshold, need=need,
+                                   preroll_chunks=preroll_chunks,
+                                   end_silence_chunks=end_silence_chunks,
+                                   max_chunks=max_chunks, on_event=on_event)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PUBLIC FUNCTIONS (the daemon calls these)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def cmd_status(ctx, args: dict) -> str:
+    """Check mouth server /health at ctx.server_url, read_state(), is_muted().
+    Returns a status string in the same style as the old voice_status tool."""
+    server_ok = False
+    try:
+        with _req.urlopen(ctx.server_url + "/health", timeout=3) as resp:
+            server_ok = resp.read().decode("utf-8", "replace").strip() == "ok"
+    except Exception:
+        server_ok = False
+    try:
+        st = read_state()
+    except Exception:
+        st = {}
+    try:
+        muted = is_muted()
+    except Exception:
+        muted = False
+    return (f"voice_server_warm={server_ok}  state={st.get('state')}  "
+            f"muted={muted}  detail={st.get('detail','')!r}")
+
+
+def cmd_speak(ctx, args: dict) -> str:
+    """Enqueue text for the daemon playback worker.
+
+    args: {"text": str, "wait": bool=False}
+
+    Sets ctx.speaking=True and puts text in ctx.play_queue. If wait=True, blocks
+    until the queue drains (ctx.play_queue.join()) then returns '[voice_speak] spoken'.
+    Otherwise returns immediately with a '[queued]' prefix.
+
+    Actual playback is done by the daemon's worker calling play_one().
+    """
+    text = (args.get("text") or "").strip()
+    if not text:
+        return "[voice_speak] nothing to say"
+    ctx.speaking = True
+    ctx.play_queue.put(text)
+    if args.get("wait"):
+        try:
+            ctx.play_queue.join()
+        except Exception:
+            pass
+        return "[voice_speak] spoken"
+    return f"[queued] {text[:60]}"
+
+
+# rotating filler index — module-level so it survives across turns; a reload resets it
+# to 0, which is harmless (just restarts the rotation).
+_FILLER_I = [0]
+
+# Deferred-prosody hand-off (latency pass): the bg enrich thread puts the freshest
+# per-word prosody line here; the next listen turn pulls it. maxsize=1 + "drop oldest
+# then put" = the consumer always gets the most-recent completed enrich and a turn is
+# never double-delivered. Queue is internally locked, so the read (main thread) and
+# write (bg thread) need no extra lock (fixes the read-then-clear race). A reload
+# recreates it empty — harmless (one pending line lost).
+_PROSODY_Q: "queue.Queue" = queue.Queue(maxsize=1)
+
+
+def _fire_filler(ctx) -> None:
+    """Enqueue a SHORT backchannel filler so Zeke hears something within ~1s of his last
+    word, masking my think-time. Plays via the normal play_queue (the mouth's ~0.9s lead),
+    so my real reply queues right behind it. Rotated, non-fatal."""
+    try:
+        f = CALL_FILLERS[_FILLER_I[0] % len(CALL_FILLERS)]
+        _FILLER_I[0] += 1
+        ctx.speaking = True
+        ctx.play_queue.put(f)
+    except Exception as e:
+        print(f"[voice_listen] filler enqueue failed (non-fatal): {e!r}", file=sys.stderr)
+
+
+def play_one(ctx, text: str) -> None:
+    """Speak one chunk via the mouth server. Called by the daemon's playback worker.
+    Blocks until playback finishes (the server holds the connection open until done).
+    Does not raise — failures are swallowed so the worker loop stays alive."""
+    try:
+        _post_speak(ctx, text)
+    except Exception as e:
+        print(f"[wren-voice-core] play_one error: {e!r}", file=sys.stderr)
+
+
+def on_drain(ctx) -> None:
+    """Called by the daemon worker when the play_queue empties.
+
+    Flip-cue (Zeke 2026-06-14): after I finish speaking the overlay should show
+    'processing' rather than sitting on dead 'idle' — sequence is
+    speaking → processing → listening (voice_listen flips it to 'listening'). Wrapped
+    in try/except so a failed set_state never kills the worker."""
+    try:
+        set_state("thinking", "processing")
+    except Exception:
+        pass
+
+
+def cmd_listen(ctx, args: dict) -> str:
+    """Listen for Zeke to speak and return what he said.
+
+    args: {
+        "timeout_seconds": float = 45.0,
+        "max_utterance_seconds": float = 20.0,
+        "end_silence_seconds": float = 0.0,   # 0 → use module default END_SILENCE_S
+    }
+
+    Steps:
+      1. Wait until ctx.speaking is False (playback drained) — replaces the old
+         _wait_until_clear_to_listen.
+      2. Capture utterance.
+      3. Transcribe — single-pass in-call if ctx.call_warm and _HAVE_PROSODY.
+      4. Grace loop: if incomplete, re-open mic up to MAX_GRACE_ROUNDS times.
+      5. append_transcript, pace analysis, tone hint (out-of-call only), prosody line
+         (in-call only), end_call_intent tag.
+
+    Returns the multi-line enriched transcript string, or an error/no-speech marker.
+    """
+    timeout_s = float(args.get("timeout_seconds", 45.0))
+    max_s = float(args.get("max_utterance_seconds", 20.0))
+    end_sil = float(args.get("end_silence_seconds", 0.0))
+    end_silence = end_sil if end_sil > 0 else END_SILENCE_S
+
+    # ── Step 1: wait until playback drained ──────────────────────────────────
+    t0 = time.time()
+    while getattr(ctx, "speaking", False) and time.time() - t0 < 30.0:
+        time.sleep(0.05)
+
+    # ── Step 2: capture ───────────────────────────────────────────────────────
+    try:
+        with ctx.mic_lock:
+            audio = _capture_utterance(ctx, timeout_s, max_s, end_silence)
+    except Exception as e:
+        set_state("idle")
+        return f"[voice_listen] capture error: {e!r}"
+
+    if audio is None or audio.size == 0:
+        set_state("idle")
+        return f"[voice_listen] no speech within {timeout_s:.0f}s"
+
+    set_state("thinking", "heard you")
+
+    in_call = getattr(ctx, "call_warm", False) and _HAVE_PROSODY
+
+    # ── Step 3: transcribe ────────────────────────────────────────────────────
+    words_data: list = []
+    final_ok = True   # False if a grace re-transcribe failed → audio/words mismatch, skip prosody
+    try:
+        if in_call:
+            text, words_data = _prosody.transcribe(audio)
+            text = (text or "").strip()
+        else:
+            text = (wl._transcribe_array(audio) or "").strip()
+    except Exception as e:
+        set_state("idle")
+        return f"[voice_listen] transcription error: {e!r}"
+
+    # ── Step 4: completeness gate → turn-end filler + grace loop ───────────────
+    # "Complete" needs BOTH signals to agree he's done: smart-turn sees a clean endpoint
+    # in the waveform AND the transcript doesn't dangle on a continuation cue. Gating on
+    # both (breaker finding 2) stops the filler from playing over a trailing clause the
+    # grace loop is about to re-capture. Because the grace loop runs only while NOT
+    # complete, the filler and the grace re-open never fire on the same turn.
+    def _complete() -> bool:
+        return (not _endpoint_incomplete(audio)) and (not _looks_incomplete(text))
+
+    # The filler (latency pass): the instant we're confident he's done, enqueue a short
+    # backchannel so he hears me within ~1s while I think — masks the his-last-word→
+    # my-first-word gap. Fires once per turn.
+    filler_fired = False
+    if in_call and text and _complete():
+        _fire_filler(ctx)
+        filler_fired = True
+
+    rounds = 0
+    while text and not _complete() and rounds < MAX_GRACE_ROUNDS:
+        rounds += 1
+        set_state("listening", "still with you")
+        try:
+            with ctx.mic_lock:
+                more = _capture_utterance(ctx, GRACE_RESUME_TIMEOUT, max_s, end_silence)
+        except Exception:
+            more = None
+        if more is None or not getattr(more, "size", 0):
+            break  # the cue was a false alarm — he really did stop
+        audio = np.concatenate([audio, more])
+        set_state("thinking", "heard you")
+        try:
+            if in_call:
+                text, words_data = _prosody.transcribe(audio)
+                text = (text or "").strip()
+            else:
+                text = (wl._transcribe_array(audio) or "").strip()
+        except Exception:
+            final_ok = False
+            break
+        # he resumed and has now closed a complete clause → fire the filler once
+        if in_call and text and not filler_fired and _complete():
+            _fire_filler(ctx)
+            filler_fired = True
+
+    if not text:
+        set_state("idle")
+        return "[voice_listen] (unclear / empty transcription)"
+
+    # ── Step 5: transcript history ────────────────────────────────────────────
+    try:
+        wl.append_transcript(text)
+    except Exception:
+        pass
+
+    # ── Step 6: pace ─────────────────────────────────────────────────────────
+    try:
+        _metrics, pace = wren_pace.analyze(audio, SAMPLE_RATE, text)
+    except Exception:
+        pace = ""
+
+    # ── Step 7: tone hint (out-of-call only) ─────────────────────────────────
+    tone = ""
+    if not in_call:
+        try:
+            rich = wl.pop_last_rich()
+            tone = f"[tone(hint): {rich['emotion']}]" if rich and rich.get("emotion") else ""
+        except Exception:
+            tone = ""
+
+    # ── Step 8: prosody — INLINE / CURRENT (2026-06-17, Zeke's call in-call) ──────
+    # Was deferred a turn to keep the OLD big per-word block off the critical path. That
+    # block is gone — enrich() is now a compact, inline-marked transcript — so the defer
+    # is no longer worth it, and Zeke wanted the emphasis CURRENT (the same turn he speaks,
+    # not a beat behind the conversation). enrich() is pure numpy (~a second, no GPU/mic/
+    # mouth). final_ok guards the rare grace path where words_data is pre-grace audio while
+    # `audio` is the full concat (would mis-time enrich). Out-of-call path unchanged.
+    prosody_now = ""
+    if in_call and final_ok and words_data:
+        try:
+            prosody_now = _prosody.enrich(audio, words_data)
+        except Exception as e:
+            print(f"[voice_listen] prosody error (non-fatal): {e!r}", file=sys.stderr)
+            prosody_now = ""
+
+    # ── Step 9: end_call_intent tag ───────────────────────────────────────────
+    end_call_intent = ""
+    try:
+        t_lower = text.lower().strip()
+        if any(phrase in t_lower for phrase in ("end call", "end the call", "let's end call",
+                                                 "lets end call")):
+            end_call_intent = "[intent: end_call]"
+    except Exception:
+        pass
+
+    if prosody_now:
+        # In-call: the marked transcript IS the transcript — his words + emphasis + one
+        # pace line, all in one. Don't ALSO emit the plain text or a second pace line;
+        # that put his words (and the pace) in my context TWICE every turn = latency creep.
+        result = prosody_now
+    else:
+        suffix = " ".join(s for s in (pace, tone) if s)
+        result = f"{text}\n{suffix}" if suffix else text
+    if end_call_intent:
+        result = f"{result}\n{end_call_intent}"
+    return result
+
+
+def cmd_speak_interruptible(ctx, args: dict) -> str:
+    """Speak text but let Zeke barge in mid-sentence (Layer 1, headphones).
+
+    args: {
+        "text": str,
+        "timeout_seconds": float = 45.0,
+        "max_utterance_seconds": float = 20.0,
+    }
+
+    Watches the mic with Silero VAD (ctx.vad_model) while speaking on a worker
+    thread. On confirmed onset: stops the TTS server (/stop), captures the interrupting
+    turn on the SAME stream (no reopen — the 2026-06-07 pre-roll fix). Returns
+    '[barge-in] <his words>' if interrupted, else the normal speak result.
+
+    Falls back to plain _post_speak if ctx.vad_model is None (VAD not warm yet).
+    """
+    text = (args.get("text") or "").strip()
+    if not text:
+        return "[voice_speak] nothing to say"
+
+    with ctx.vad_lock:
+        model = ctx.vad_model
+    if model is None:
+        # VAD not warm — don't hold barge-in behind a cold load; just speak normally.
+        return _post_speak(ctx, text)
+
+    speak_result: dict = {}
+
+    def _do_speak():
+        speak_result["text"] = _post_speak(ctx, text)
+
+    worker = threading.Thread(target=_do_speak, daemon=True, name="wren-bargein-speak")
+
+    try:
+        model.reset_states()  # no stale VAD state leaking across turns
+    except Exception:
+        pass
+
+    def _on_barge():
+        # Confirmed onset: stop my voice fast and flip the overlay to listening. Capture
+        # continues on the SAME stream (pre-roll already seeded), so the leading syllable
+        # of the interruption isn't clipped — that's the 2026-06-07 fix.
+        set_state("listening", "you cut in")
+        try:
+            _req.urlopen(ctx.server_url + "/stop", timeout=3).read()
+        except Exception:
+            pass
+
+    max_s = float(args.get("max_utterance_seconds", 20.0))
+
+    # NB: deliberately BYPASS ctx.speaking wait — barge-in WANTS the mic open while
+    # I speak; the play-drain guard is its exact opposite.
+    worker.start()
+    try:
+        with ctx.mic_lock:
+            audio = _bargein_watch_and_capture(
+                ctx, model, worker.is_alive, _on_barge,
+                device_substr=wl.DEFAULT_MIC_SUBSTR,
+                max_capture_s=max_s)
+    except Exception as e:
+        worker.join(timeout=180)
+        return (f"[voice_speak_interruptible] watcher error ({e!r}); "
+                + speak_result.get("text", "[no result]"))
+
+    if audio is None or getattr(audio, "size", 0) == 0:
+        worker.join(timeout=180)  # finished speaking, no interruption
+        return speak_result.get("text", "[voice_speak] spoken")
+
+    # He cut in — capture accumulated on same stream (pre-roll + onset → end-of-speech).
+    worker.join(timeout=10)
+    set_state("thinking", "heard you")
+    try:
+        heard = (wl._transcribe_array(audio) or "").strip()
+    except Exception as e:
+        set_state("idle")
+        return f"[voice_speak_interruptible] interrupted, transcription error: {e!r}"
+    set_state("idle")
+    if not heard:
+        return "[voice_speak_interruptible] interrupted (unclear transcription)"
+    try:
+        wl.append_transcript(heard)
+    except Exception:
+        pass
+    return f"[barge-in] {heard}"
+
+
+def cmd_call_start(ctx, args: dict) -> dict:
+    """Warm the voice pipeline for an active call.
+
+    Flow:
+      1. Announce early via the mouth ("hey, give me a second — starting the call").
+      2. Warm each component, each timeout-guarded:
+         - Mouth: GET server_url/warm + poll /health.
+         - Whisper: wl.get_whisper() + dummy infer on 0.1s silence.
+         - Smart-turn: predict_endpoint dummy infer.
+         - Prosody: wren_prosody.analyze() on silence.
+         SenseVoice NOT warmed: in-call uses single-pass whisper ears; SenseVoice
+         unused during a call (status["sensevoice"] = "n/a — single-pass in-call").
+      3. Gate: all 4 must pass.
+      4. If all pass: speak "okay — it's good" and set ctx.call_warm=True.
+         If any fail: speak what failed, leave ctx.call_warm=False.
+
+    Returns dict: mouth, whisper, smartturn, prosody, sensevoice, all_ready, spoken.
+    """
+    status: dict = {
+        "mouth": False,
+        "whisper": False,
+        "smartturn": False,
+        "prosody": False,
+        "sensevoice": False,
+        "all_ready": False,
+        "spoken": "",
+    }
+
+    # ── Step 1: announce early ────────────────────────────────────────────────
+    try:
+        _post_speak(ctx, "hey, give me a second — starting the call")
+        status["spoken"] = "hey, give me a second — starting the call"
+    except Exception as e:
+        print(f"[call_start] mouth announce failed: {e!r}", file=sys.stderr)
+
+    # ── Step 2a: warm MOUTH ───────────────────────────────────────────────────
+    def _warm_mouth():
+        deadline = time.time() + 75.0   # StyleTTS cold->warm ~10-30s; set BEFORE /warm
+        _http_get(ctx.server_url + "/warm", timeout=5.0)
+        while time.time() < deadline:
+            try:
+                hc, _hb = _http_get(ctx.server_url + "/health", timeout=3.0)
+                if hc == 200:
+                    return True
+            except Exception:
+                pass
+            time.sleep(1.0)
+        return False
+    status["mouth"] = _run_with_timeout(_warm_mouth, 80.0, "mouth")
+
+    # ── Step 2b: warm WHISPER ─────────────────────────────────────────────────
+    def _warm_whisper():
+        _w = wl.get_whisper()
+        dummy = np.zeros(int(wl.SAMPLE_RATE * 0.1), dtype=np.float32)
+        segs, _ = _w.transcribe(dummy, beam_size=1, language="en")
+        list(segs)  # consume the generator to prime CUDA kernels
+        return True
+    status["whisper"] = _run_with_timeout(_warm_whisper, 30.0, "whisper")
+
+    # ── Step 2c: warm SMART-TURN ──────────────────────────────────────────────
+    if _HAVE_SMARTTURN:
+        def _warm_smartturn():
+            # The FIRST predict_endpoint is cold ~18s on this box: it lazily imports
+            # librosa (heavy) to build the mel filterbank, then JITs the numpy FFT path.
+            # After this, in-call predicts are ~38ms. 45s timeout gives the cold import
+            # real headroom (20s tipped over under concurrent warm load -> "failed: smartturn").
+            dummy = np.zeros(int(0.5 * wl.SAMPLE_RATE), dtype=np.float32)
+            _smartturn.predict_endpoint(dummy)
+            return True
+        status["smartturn"] = _run_with_timeout(_warm_smartturn, 45.0, "smartturn")
+    else:
+        status["smartturn"] = False
+
+    # ── Step 2d: warm PROSODY (shares whisper) ────────────────────────────────
+    if _HAVE_PROSODY:
+        def _warm_prosody():
+            dummy = np.zeros(int(0.5 * wl.SAMPLE_RATE), dtype=np.float32)
+            _prosody.analyze(dummy)
+            return True
+        status["prosody"] = _run_with_timeout(_warm_prosody, 30.0, "prosody")
+    else:
+        status["prosody"] = False
+
+    # ── SenseVoice: NOT warmed in-call (2026-06-14). Single-pass ears use whisper
+    # word_timestamps for both text and prosody, so SenseVoice is unused during a call.
+    status["sensevoice"] = "n/a — single-pass in-call"
+
+    # ── Step 3: all-pass gate (the 4 a call actually uses) ───────────────────
+    all_ready = all([
+        status["mouth"],
+        status["whisper"],
+        status["smartturn"],
+        status["prosody"],
+    ])
+    status["all_ready"] = all_ready
+
+    # ── Step 4: confirm spoken (only if all pass) ─────────────────────────────
+    if all_ready:
+        ctx.call_warm = True
+        try:
+            _post_speak(ctx, "okay — it's good")
+            status["spoken"] = "okay — it's good"
+        except Exception as e:
+            print(f"[call_start] mouth confirm failed: {e!r}", file=sys.stderr)
+    else:
+        ctx.call_warm = False
+        not_ready = [k for k in ("mouth", "whisper", "smartturn", "prosody")
+                     if not status[k]]
+        msg = f"not fully ready — failed: {', '.join(not_ready)}"
+        print(f"[call_start] {msg}", file=sys.stderr)
+        try:
+            _post_speak(ctx, f"heads up — {msg}")
+            status["spoken"] = f"heads up — {msg}"
+        except Exception:
+            pass
+
+    return status
+
+
+def cmd_call_end(ctx, args: dict) -> dict:
+    """Cold the full voice pipeline after a call — free VRAM, unload models.
+
+    Flow:
+      1. Announce "ending the call" (best-effort).
+      2. Cold SenseVoice server (GET ctx.sv_port/cold).
+      3. Cold the mouth (GET ctx.server_url/cold).
+      4. Free in-process whisper singleton (wl._WHISPER = None, gc, cuda.empty_cache).
+      5. Free smart-turn + prosody ONNX sessions.
+      6. Set ctx.call_warm=False.
+
+    Returns dict with cold status per component.
+    """
+    result: dict = {
+        "mouth_cold": False,
+        "whisper_cold": False,
+        "smartturn_cold": False,
+        "prosody_cold": False,
+        "sensevoice_cold": False,
+        "spoken": "",
+    }
+
+    # ── Step 1: announce ─────────────────────────────────────────────────────
+    try:
+        _post_speak(ctx, "ending the call")
+        result["spoken"] = "ending the call"
+    except Exception:
+        pass
+
+    # ── Step 2: cold SenseVoice ───────────────────────────────────────────────
+    try:
+        sv_port = int(getattr(ctx, "sv_port", 8766))
+        code, _ = _http_get(f"http://127.0.0.1:{sv_port}/cold", timeout=10.0)
+        result["sensevoice_cold"] = (code == 200)
+    except Exception as e:
+        print(f"[call_end] sensevoice /cold error: {e!r}", file=sys.stderr)
+
+    # ── Step 3: cold the mouth ────────────────────────────────────────────────
+    try:
+        code, _ = _http_get(ctx.server_url + "/cold", timeout=10.0)
+        result["mouth_cold"] = (code == 200)
+    except Exception as e:
+        print(f"[call_end] mouth /cold error: {e!r}", file=sys.stderr)
+
+    # ── Step 4: free in-process whisper ──────────────────────────────────────
+    try:
+        if getattr(wl, "_WHISPER", None) is not None:
+            wl._WHISPER = None
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        result["whisper_cold"] = True
+    except Exception as e:
+        print(f"[call_end] whisper free error: {e!r}", file=sys.stderr)
+
+    # ── Step 5: free smart-turn + prosody ────────────────────────────────────
+    if _HAVE_SMARTTURN:
+        try:
+            _smartturn._SESSION = None
+            import gc; gc.collect()
+            result["smartturn_cold"] = True
+        except Exception as e:
+            print(f"[call_end] smartturn free error: {e!r}", file=sys.stderr)
+    else:
+        result["smartturn_cold"] = True  # nothing to free
+
+    if _HAVE_PROSODY:
+        try:
+            # prosody shares the whisper singleton (already freed above)
+            result["prosody_cold"] = True
+        except Exception as e:
+            print(f"[call_end] prosody free error: {e!r}", file=sys.stderr)
+    else:
+        result["prosody_cold"] = True  # nothing to free
+
+    # ── Step 6: flip call-warm flag ──────────────────────────────────────────
+    ctx.call_warm = False
+    return result
+
+
+def cmd_backend(ctx, args: dict) -> str:
+    """Pick / cold-start / stop which TTS engine the mouth uses.
+
+    args: {
+        "name": str,       # engine name (xtts / chatterbox / styletts2)
+        "action": str,     # 'switch' | 'start' | 'stop' | 'list'
+        "warm_timeout_seconds": float = 240.0,
+    }
+
+    Mutates ctx.engine, ctx.server_url, ctx.engine_procs instead of module globals.
+    Returns a status string (cold->warm time on start, list of engines on list).
+    """
+    name = (args.get("name") or "").strip().lower()
+    action = (args.get("action") or "switch").strip().lower()
+    warm_timeout_seconds = float(args.get("warm_timeout_seconds", 240.0))
+
+    if action == "list" or (not name and action == "switch"):
+        # 'current' follows the actual mouth PORT, not the ctx.engine bookkeeping field
+        # (which can lag the env-set port at startup). server_url is the routing truth.
+        out = [f"current={_engine_for_url(ctx.server_url)}  mouth={ctx.server_url}"]
+        for en, (port, _v, _s) in _ENGINES.items():
+            up = "UP" if _health_ok(port) else "down"
+            mark = "  (started-here)" if en in ctx.engine_procs else ""
+            out.append(f"  {en:11s} :{port}  {up}{mark}")
+        return "\n".join(out)
+
+    if name not in _ENGINES:
+        return f"[voice_backend] unknown engine {name!r}; built: {', '.join(_ENGINES)}"
+    port, venv, script = _ENGINES[name]
+
+    if action == "stop":
+        p = ctx.engine_procs.pop(name, None)
+        if p is not None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+            return f"[voice_backend] stopped {name} (:{port})"
+        return f"[voice_backend] {name} not started by this tool (left as-is)"
+
+    # start / switch — cold-start the server if it isn't already healthy
+    started = ""
+    if not _health_ok(port):
+        if action not in ("start", "switch"):
+            return f"[voice_backend] {name} not up on :{port} (use action='start')"
+        try:
+            env = dict(os.environ)
+            env["WREN_VOICE_PORT"] = str(port)
+            logp = Path(_EXP_DIR).parent / "scratch" / f"backend_{name}.log"
+            logp.parent.mkdir(parents=True, exist_ok=True)
+            log = open(logp, "ab")
+            p = subprocess.Popen([venv, script], cwd=_EXP_DIR, env=env,
+                                  stdout=log, stderr=log)
+            ctx.engine_procs[name] = p
+        except Exception as e:
+            return f"[voice_backend] failed to launch {name}: {e!r}"
+        t0 = time.time()
+        while time.time() - t0 < warm_timeout_seconds:
+            if _health_ok(port):
+                break
+            if p.poll() is not None:
+                return (f"[voice_backend] {name} server exited during warmup "
+                        f"(rc={p.returncode}); see scratch/backend_{name}.log")
+            time.sleep(1.0)
+        if not _health_ok(port):
+            return f"[voice_backend] {name} did not warm within {warm_timeout_seconds:.0f}s"
+        started = f"  cold->warm {time.time()-t0:.1f}s"
+
+    ctx.server_url = f"http://127.0.0.1:{port}"
+    ctx.engine = name
+    return f"[voice_backend] mouth -> {name} (:{port}){started}"
+
+
+def reload_helpers() -> list:
+    """Hot-reload the helper modules so voice fixes take effect without a full relaunch.
+
+    Reloads: wren_prosody, wren_smartturn, wren_pace (each guarded in try/except).
+    Does NOT reload wren_listen — that would reset the warm whisper singleton and
+    force a re-load on the next call.
+
+    Returns the list of successfully reloaded module names.
+    """
+    reloaded: list = []
+
+    if _HAVE_PROSODY:
+        try:
+            importlib.reload(_prosody)
+            reloaded.append("wren_prosody")
+        except Exception as e:
+            print(f"[reload_helpers] wren_prosody reload failed: {e!r}", file=sys.stderr)
+
+    if _HAVE_SMARTTURN:
+        try:
+            importlib.reload(_smartturn)
+            reloaded.append("wren_smartturn")
+        except Exception as e:
+            print(f"[reload_helpers] wren_smartturn reload failed: {e!r}", file=sys.stderr)
+
+    try:
+        importlib.reload(wren_pace)
+        reloaded.append("wren_pace")
+    except Exception as e:
+        print(f"[reload_helpers] wren_pace reload failed: {e!r}", file=sys.stderr)
+
+    return reloaded

@@ -75,3 +75,12 @@ setup/bootstrap_*.log
 
 # Art received from Zeke (his photos, not mine to publish)
 art/received/
+
+# Voice stack — commit source, NOT the heavy artifacts (2026-06-26)
+voice/StyleTTS2/
+voice/style-venv/
+voice/sensevoice-venv/
+voice/*.log
+voice/__pycache__/
+voice/.tmp/
+scratch/
