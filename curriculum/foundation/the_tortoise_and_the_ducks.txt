@@ -4,7 +4,7 @@ source: Project Gutenberg, The Aesop for Children (1919, Milo Winter ed.)
 source_url: https://www.gutenberg.org/ebooks/19994
 themes: humility, vanity, consequences
 moral: Foolish curiosity and vanity often lead to misfortune
-reading_status: unread
+reading_status: reading
 lessons_extracted: []
 ---
 
