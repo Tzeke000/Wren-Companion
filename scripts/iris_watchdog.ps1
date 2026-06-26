@@ -220,14 +220,19 @@ function Spawn-NewCC {
     # how Iris is supposed to launch; the watchdog must respect it.
     #
     # 2026-05-17: launch via Windows Terminal (wt.exe) so iris_cold_wake.py's
-    # pty stdout has a visible window to render to. Prior version used
-    # `cmd.exe /c` from a hidden watchdog, which produced no visible window
-    # and made restart_self look like it had failed (Zeke never saw CC come
-    # back up after the 15:33 watchdog respawn). Fallback chain: wt.exe →
-    # cmd /k (keeps window open) → bare claude.
+    # pty stdout has a visible window to render to. An even-earlier version used
+    # a HIDDEN-watchdog `cmd.exe /c`, which produced no visible window and made
+    # restart_self look like it had failed (Zeke never saw CC come back up after
+    # the 15:33 watchdog respawn). Fallback chain: wt.exe → cmd /c → bare claude.
+    #
+    # 2026-06-26: switched the visible spawns back to `/c` (from the interim `/k`).
+    # The `/k` was added for window visibility, but iris_cold_wake.py BLOCKS until
+    # CC exits, so `/c` is already visible for the whole session AND closes cleanly
+    # at the end. `/k` only kept the DEAD shell open afterward — one orphan "Iris…"
+    # window per restart, which read as a second half-attached session.
     #
     # 2026-05-17 (later): added crash-detection between tiers. Tier 1 (wt)
-    # and tier 2 (cmd /k) both route through start_iris.bat → iris_cold_wake.py.
+    # and tier 2 (cmd /c) both route through start_iris.bat → iris_cold_wake.py.
     # If that script crashes (pywinpty error, syntax error, anything that
     # exits before claude actually launches), the wt/cmd window opens fine
     # — Start-Process reports success — but no claude.exe ever spawns inside
@@ -251,7 +256,12 @@ function Spawn-NewCC {
         if ($wt) {
             try {
                 $wtBefore = @(Get-Process WindowsTerminal -ErrorAction SilentlyContinue).Count
-                $wtArgs = @("-w", "0", "nt", "-d", "`"$ROOT`"", "cmd.exe", "/k", "`"$batPath`"")
+                # /c (not /k): iris_cold_wake.py blocks until CC exits, so the window
+                # stays visible for the whole session and closes CLEANLY when CC ends.
+                # /k used to keep the dead shell open after exit — an orphan "Iris…"
+                # window per restart that looked like a second half-attached session
+                # (fixed 2026-06-26).
+                $wtArgs = @("-w", "0", "nt", "-d", "`"$ROOT`"", "cmd.exe", "/c", "`"$batPath`"")
                 Start-Process -FilePath "wt.exe" -ArgumentList $wtArgs
                 Start-Sleep -Milliseconds 500
                 $wtAfter = @(Get-Process WindowsTerminal -ErrorAction SilentlyContinue).Count
@@ -266,13 +276,16 @@ function Spawn-NewCC {
             }
         }
 
-        # ---- Tier 2: cmd /k (visible cmd window) ----
+        # ---- Tier 2: cmd /c (visible cmd window, closes cleanly at session end) ----
         # Refresh baseline so any side-effect of tier 1 (in case a PID
         # appeared juuust after the timeout) doesn't mask a tier 2 crash.
+        # /c (not /k): see the tier-1 note — the window lives for the whole session
+        # (cmd → start_iris.bat → iris_cold_wake.py → claude, all blocking) and closes
+        # when CC exits, instead of orphaning a dead "Iris…" window per restart.
         $baseline = Get-ClaudeProcessSet
         try {
-            Start-Process -FilePath "cmd.exe" -ArgumentList "/k", "`"$batPath`"" -WindowStyle Normal
-            Write-WatchLog ("tier 2 spawned: cmd /k + start_iris.bat — waiting up to 30s for claude PID")
+            Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"$batPath`"" -WindowStyle Normal
+            Write-WatchLog ("tier 2 spawned: cmd /c + start_iris.bat — waiting up to 30s for claude PID")
             if (Wait-ForNewClaudeProcess -Baseline $baseline -TimeoutS 30) {
                 Write-WatchLog ("tier 2 confirmed: new claude/node PID detected")
                 return $true

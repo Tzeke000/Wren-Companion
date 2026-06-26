@@ -13,6 +13,7 @@ Run persistently (in the main .venv):
 """
 from __future__ import annotations
 
+import ctypes
 import os
 import socket
 import subprocess
@@ -40,6 +41,43 @@ _DETACHED = 0x00000008 | 0x00000200
 
 def _log(msg: str) -> None:
     print(f"[voice-watchdog {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+_SINGLETON_MUTEX = None  # module-global: holds the named-mutex handle for the process lifetime
+
+
+def _acquire_singleton() -> bool:
+    """Refuse to start if another voice_watchdog already runs (CLAUDE.md §8 pattern).
+
+    Uses a Windows named mutex via ctypes (no pywin32 dependency). The mutex is
+    released automatically when the holding process dies, so there is no stale-lock
+    problem the way a PID file would have. Returns True if WE acquired it (this is
+    the sole watchdog), False if another instance already holds it.
+
+    Born 2026-06-26: start_iris.bat launches this unconditionally on every boot, so a
+    restart that re-runs the bat while the prior watchdog still lived produced TWO
+    watchdogs fighting over the mouth/daemon ports — the double-spawn that doubled
+    Iris's voice. This guard makes the second instance exit cleanly instead.
+
+    Fails OPEN: if the mutex can't be created at all, we run anyway — a possible
+    double is no-worse-than-before, but no watchdog at all would leave the voice
+    unguarded.
+    """
+    global _SINGLETON_MUTEX
+    ERROR_ALREADY_EXISTS = 183
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateMutexW(None, False, "IrisVoiceWatchdog")
+        if not handle:
+            _log("singleton: CreateMutexW returned NULL; proceeding without guard")
+            return True
+        if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            return False
+        _SINGLETON_MUTEX = handle  # keep the handle alive for the process lifetime
+        return True
+    except Exception as e:  # noqa: BLE001 — fail open, never block the voice on a guard bug
+        _log(f"singleton: guard errored ({e!r}); proceeding without guard")
+        return True
 
 
 def _mouth_ok() -> bool:
@@ -96,4 +134,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if not _acquire_singleton():
+        _log("another voice_watchdog already holds the singleton mutex — exiting (no double)")
+        raise SystemExit(0)
     main()
