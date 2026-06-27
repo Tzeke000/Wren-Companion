@@ -4217,6 +4217,17 @@ def _eager_init_engines() -> None:
             print(f"[iris_runtime] concept_graph ready (nodes={len(_cg.nodes)}, edges={len(_cg.edges)})", file=sys.stderr, flush=True)
         except Exception as _cge:
             print(f"[iris_runtime] concept_graph skipped: {_cge!r}", file=sys.stderr, flush=True)
+        # Family graph seed (Zeke 2026-06-27): weave Iris + sisters + Zeke into the
+        # concept graph so the brain tab shows us connected, not all Zeke-stemmed.
+        # Idempotent (find_or_create + add_edge dedupe); guarded so it can't abort boot.
+        try:
+            _cg_seed = _g.get("_concept_graph")
+            if _cg_seed is not None:
+                from brain.iris_family_graph_seed import seed_family
+                _fam = seed_family(_cg_seed)
+                print(f"[iris_runtime] family graph seeded: {_fam}", file=sys.stderr, flush=True)
+        except Exception as _fse:
+            print(f"[iris_runtime] family graph seed skipped: {_fse!r}", file=sys.stderr, flush=True)
         try:
             (ROOT / "state").mkdir(parents=True, exist_ok=True)
             print("[iris_runtime] journal ready (state/journal.jsonl)", file=sys.stderr, flush=True)
