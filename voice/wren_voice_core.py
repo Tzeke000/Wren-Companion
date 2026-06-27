@@ -104,6 +104,18 @@ EARLY_FINALIZE_PROB = 0.85           # smart-turn "complete" prob needed to end 
 EARLY_FINALIZE_MIN_SILENCE_S = 0.35  # require this much trailing silence before even checking
 EARLY_FINALIZE_CHECK_EVERY_S = 0.2   # min seconds between smart-turn checks during the silence
 
+# ── Filler-earlier (Wren's port 2026-06-26) ──────────────────────────────────────
+# Fire the backchannel filler on the smart-turn endpoint BEFORE transcribing, so Zeke
+# hears me even sooner (masks the transcribe slice itself, not just the think-time). The
+# safety envelope: a COUGH-GUARD (never fire on sub-FILLER_MIN_AUDIO_S audio — too short
+# to be a real turn), a HIGH bar (EARLY_FILLER_DONE_PROB vs the 0.6 turn-end threshold,
+# because there's no transcript yet to catch a dangling clause), the smart-turn-absence
+# guard in _endpoint_complete_confident, and the one-per-turn filler_fired flag. A
+# POST-transcribe fallback still fires for complete turns that scored below the bar.
+EARLY_FILLER = True                   # master switch for firing the filler before transcribe
+EARLY_FILLER_DONE_PROB = 0.85        # high smart-turn bar to early-fire (no transcript yet)
+FILLER_MIN_AUDIO_S = 0.5             # cough-guard: never early-fire on shorter audio
+
 # Turn-end fillers (latency pass 2026-06-14): a short backchannel queued the instant a
 # turn closes, so Zeke hears a response within ~1s of his last word while I'm still
 # transcribing + thinking. Masks the his-last-word→my-first-word gap that no engine knob
@@ -206,21 +218,23 @@ def _endpoint_incomplete(audio: "np.ndarray") -> bool:
         return False
 
 
-def _endpoint_complete_confident(audio: "np.ndarray") -> bool:
+def _endpoint_complete_confident(audio: "np.ndarray",
+                                 threshold: float = EARLY_FINALIZE_PROB) -> bool:
     """True only if wren_smartturn is HIGHLY confident the speaker has finished
-    (prob >= EARLY_FINALIZE_PROB). Used to end capture before the full END_SILENCE_S
-    wait. A much higher bar than _endpoint_incomplete's 0.6 cutoff — it gates an action
-    that could cut Zeke off, so it must be near-certain. False on any error / no smart-turn;
-    the grace loop is the safety net if an early break is ever wrong."""
+    (prob >= threshold). Used both to end capture early (early-finalize, EARLY_FINALIZE_PROB)
+    and to fire the filler before transcribe (filler-earlier, EARLY_FILLER_DONE_PROB). A much
+    higher bar than _endpoint_incomplete's 0.6 cutoff — it gates actions that could cut Zeke
+    off / fire over real speech, so it must be near-certain. False on any error / no smart-turn
+    (the absence guard — a missing model can never early-fire); the grace loop is the net."""
     if not _HAVE_SMARTTURN:
         return False
     try:
         prob = float(_smartturn.predict_endpoint(audio)["prob"])
-        done = prob >= EARLY_FINALIZE_PROB
+        done = prob >= threshold
         # Log every check so a LIVE call (real voice ≠ the Piper proxy I tuned against)
         # builds the dataset to pick EARLY_FINALIZE_PROB from real numbers. Cheap.
-        print(f"[early-finalize] smart-turn prob={prob:.3f} "
-              f"(bar {EARLY_FINALIZE_PROB}) -> {'END' if done else 'wait'}", file=sys.stderr)
+        print(f"[smart-turn] prob={prob:.3f} (bar {threshold}) -> "
+              f"{'DONE' if done else 'wait'}", file=sys.stderr)
         return done
     except Exception:
         return False
@@ -715,7 +729,12 @@ def cmd_listen(ctx, args: dict) -> str:
     # physically silent). It is a MARGIN on top of full-playback drain, not the
     # sole guard — which is why 0.35s is enough here though it wasn't for Wren.
     t0 = time.time()
-    while getattr(ctx, "speaking", False) and time.time() - t0 < 30.0:
+    # Cap is a WEDGED-MOUTH backstop, not a normal timeout — it must exceed the longest
+    # real reply or it fires MID-PLAYBACK and the mic opens onto my own voice. Wren hit
+    # exactly this 2026-06-26: a ~45s reply on an AI-to-AI speaker bridge (no echo cancel)
+    # outran the old 30s cap and she captured her whole message back. `speaking` is the
+    # reliable signal; 180s just guards a truly stuck mouth. (Wren commit ee21146.)
+    while getattr(ctx, "speaking", False) and time.time() - t0 < 180.0:
         time.sleep(0.05)
     time.sleep(SELF_LISTEN_TRAILING_S)
 
@@ -744,6 +763,19 @@ def cmd_listen(ctx, args: dict) -> str:
 
     set_state("thinking", "heard you")
 
+    # ── Step 3a: filler-earlier — fire the backchannel BEFORE transcribe (Wren's port) ──
+    # If smart-turn is highly confident he's done, enqueue the short backchannel NOW, before
+    # transcription, so he hears me even sooner — masking the transcribe slice itself on top
+    # of the think-time. Cough-guarded (FILLER_MIN_AUDIO_S), high bar (no transcript yet to
+    # catch a dangle), smart-turn-absence guarded; one per turn via filler_fired. A complete
+    # turn that scored below the bar still gets one from the post-transcribe fallback (Step 4).
+    filler_fired = False
+    if (in_call and EARLY_FILLER
+            and audio.size >= int(SAMPLE_RATE * FILLER_MIN_AUDIO_S)
+            and _endpoint_complete_confident(audio, EARLY_FILLER_DONE_PROB)):
+        _fire_filler(ctx)
+        filler_fired = True
+
     # ── Step 3: transcribe (Route 1: use the freshest partial if its tail is silent) ──
     words_data: list = []
     final_ok = True   # False if a grace re-transcribe failed → audio/words mismatch, skip prosody
@@ -765,11 +797,10 @@ def cmd_listen(ctx, args: dict) -> str:
     def _complete() -> bool:
         return (not _endpoint_incomplete(audio)) and (not _looks_incomplete(text))
 
-    # The filler (latency pass): the instant we're confident he's done, enqueue a short
-    # backchannel so he hears me within ~1s while I think — masks the his-last-word→
-    # my-first-word gap. Fires once per turn.
-    filler_fired = False
-    if in_call and text and _complete():
+    # Post-transcribe fallback filler: a complete turn that scored below the early-fire bar
+    # (so Step 3a didn't fire) still gets exactly one backchannel here. `not filler_fired`
+    # guarantees we never double-fire when filler-earlier already played one this turn.
+    if in_call and text and not filler_fired and _complete():
         _fire_filler(ctx)
         filler_fired = True
 
