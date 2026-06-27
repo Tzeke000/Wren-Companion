@@ -70,6 +70,26 @@ def _resolve_memory_dir() -> Path:
 
 _MEMORY_DIR = _resolve_memory_dir()
 
+# Repo root fallback for the profiles/ tree (Iris's people/things model). Same
+# defensive-fallback rationale as _IRIS_FALLBACK: if env/cwd resolution misses,
+# this still works on the machine this was built on.
+_REPO_FALLBACK = Path(r"D:\Wren-Companion")
+
+
+def _resolve_profiles_dir() -> Path:
+    """Resolve the repo profiles/ tree (recursive people/things model). The
+    profiles layer lives in the repo (not the auto-memory dir) but must be read
+    into cognition on boot like the corpus — a profile no one reads is dead."""
+    proj_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if proj_dir:
+        c = Path(proj_dir) / "profiles"
+        if c.exists() and c.is_dir():
+            return c
+    c = Path.cwd() / "profiles"
+    if c.exists() and c.is_dir():
+        return c
+    return _REPO_FALLBACK / "profiles"
+
 
 def _load_corpus(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """Load every .md file in the auto-memory dir.
@@ -137,10 +157,47 @@ def _load_corpus(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         except Exception as e:
             errors.append({"file": p.name, "error": repr(e)})
 
+    # ── Profiles layer (Iris, 2026-06-27) ───────────────────────────────────
+    # The people/things model lives in a RECURSIVE tree under repo profiles/,
+    # not the flat corpus, so include it here via rglob. FAIL-OPEN: any error
+    # walking profiles leaves the corpus result intact (no-worse-than-before).
+    # Boot's single "read everything" call must cover profiles too, or they're
+    # dead files.
+    profiles_count = 0
+    try:
+        profiles_dir = _resolve_profiles_dir()
+        if profiles_dir.exists() and profiles_dir.is_dir():
+            prof_md = sorted(profiles_dir.rglob("*.md"),
+                             key=lambda p: p.stat().st_mtime, reverse=True)
+            for p in prof_md:
+                try:
+                    st = p.stat()
+                    size = st.st_size
+                    if list_only:
+                        content = None
+                    elif max_bytes_per_file and size > max_bytes_per_file:
+                        content = None
+                    else:
+                        content = p.read_text(encoding="utf-8", errors="replace")
+                    files.append({
+                        "name": f"profiles/{p.relative_to(profiles_dir).as_posix()}",
+                        "path": str(p),
+                        "mtime_iso": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                        "size_bytes": size,
+                        "content": content,
+                        "kind": "profile",
+                    })
+                    profiles_count += 1
+                except Exception as e:
+                    errors.append({"file": str(p), "error": repr(e)})
+    except Exception as e:
+        errors.append({"file": "profiles/", "error": repr(e)})
+
     return {
         "ok": True,
         "count": len(files),
         "total_in_dir": len(all_md),
+        "profiles_count": profiles_count,
         "dir": str(memory_dir),
         "files": files,
         "errors": errors,
