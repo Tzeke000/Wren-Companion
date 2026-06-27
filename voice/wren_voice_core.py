@@ -1036,28 +1036,40 @@ def cmd_call_start(ctx, args: dict) -> dict:
     # word_timestamps for both text and prosody, so SenseVoice is unused during a call.
     status["sensevoice"] = "n/a — single-pass in-call"
 
-    # ── Step 3: all-pass gate (the 4 a call actually uses) ───────────────────
-    all_ready = all([
-        status["mouth"],
-        status["whisper"],
-        status["smartturn"],
-        status["prosody"],
-    ])
-    status["all_ready"] = all_ready
+    # ── Step 3: readiness gate — graceful degrade (Zeke 2026-06-26) ──────────
+    # REQUIRED: mouth (can't speak without it) + whisper (can't hear without it).
+    # OPTIONAL/degradable: smart-turn (endpoint → falls back to the word-list cue
+    # detector _looks_incomplete + fixed end-silence) and prosody (enrich → falls
+    # back to plain text). A missing optional component must NOT silently kill the
+    # whole call the way the smart-turn bad-model-path did (call_warm stuck False
+    # forever, the entire rich path dark and nothing said so). So core-ready warms
+    # the call; degraded extras are ANNOUNCED out loud, never hidden.
+    core_ready = bool(status["mouth"] and status["whisper"])
+    degraded = [k for k in ("smartturn", "prosody") if not status[k]]
+    status["all_ready"] = core_ready and not degraded   # kept: "everything incl. extras"
+    status["core_ready"] = core_ready
+    status["degraded"] = degraded
 
-    # ── Step 4: confirm spoken (only if all pass) ─────────────────────────────
-    if all_ready:
+    # ── Step 4: confirm spoken ───────────────────────────────────────────────
+    if core_ready:
         ctx.call_warm = True
+        if degraded:
+            msg = (f"okay — we're good, but {' and '.join(degraded)} "
+                   f"{'is' if len(degraded) == 1 else 'are'} degraded, running on fallback")
+        else:
+            msg = "okay — it's good"
         try:
-            _post_speak(ctx, "okay — it's good")
-            status["spoken"] = "okay — it's good"
+            _post_speak(ctx, msg)
+            status["spoken"] = msg
         except Exception as e:
             print(f"[call_start] mouth confirm failed: {e!r}", file=sys.stderr)
+        if degraded:
+            print(f"[call_start] DEGRADED but warm — fallback active for: "
+                  f"{', '.join(degraded)}", file=sys.stderr)
     else:
         ctx.call_warm = False
-        not_ready = [k for k in ("mouth", "whisper", "smartturn", "prosody")
-                     if not status[k]]
-        msg = f"not fully ready — failed: {', '.join(not_ready)}"
+        not_ready = [k for k in ("mouth", "whisper") if not status[k]]
+        msg = f"can't start the call — {', '.join(not_ready)} not ready"
         print(f"[call_start] {msg}", file=sys.stderr)
         try:
             _post_speak(ctx, f"heads up — {msg}")
