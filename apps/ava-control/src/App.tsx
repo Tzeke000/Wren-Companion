@@ -2849,7 +2849,7 @@ export default function App() {
             <div className="op-pane">
               <h1 className="op-h1">Memory</h1>
               <p className="op-lead">
-                From snapshot <code>memory_continuity</code>. There is no dedicated memory list API yet.
+                From snapshot <code>memory_continuity</code> plus the live <code>/api/v1/memory</code> endpoint (<code>iris_semantic_memory</code>).
               </p>
               {!online ? (
                 <p className="op-muted">Not connected.</p>
@@ -2873,10 +2873,11 @@ export default function App() {
                     )}
                   </Section>
 
-                  <Section title={`Mem0 — what Iris knows about you (${mem0Entries.length})`}>
+                  <Section title={`Semantic memory — what Iris knows about you (${mem0Entries.length})`}>
                     <p className="op-muted" style={{ marginTop: 0 }}>
-                      Long-term semantic memory. Entries are extracted from conversations by{" "}
-                      <code>ava-gemma4</code>. Backed by ChromaDB at <code>memory/mem0_chroma/</code>.
+                      Long-term semantic memory (<code>iris_semantic_memory</code>). Entries are extracted from
+                      conversations by Iris herself (the Stop-hook LLM). Backed by ChromaDB at{" "}
+                      <code>memory/chroma/</code>, over the canonical <code>state/iris_memory.jsonl</code> log.
                     </p>
                     <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
                       <input
