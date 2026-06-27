@@ -849,7 +849,8 @@ def cmd_listen(ctx, args: dict) -> str:
         print(f"[voice_listen] in-call transcribe failed ({e!r}); plain-whisper fallback",
               file=sys.stderr)
         try:
-            text = (wl._transcribe_array(audio) or "").strip()
+            with _WHISPER_LOCK:   # full parity: never overlap a lingering partial pass
+                text = (wl._transcribe_array(audio) or "").strip()
             words_data = []
         except Exception as e2:
             set_state("idle")
@@ -885,11 +886,12 @@ def cmd_listen(ctx, args: dict) -> str:
         audio = np.concatenate([audio, more])
         set_state("thinking", "heard you")
         try:
-            if in_call:
-                text, words_data = _prosody.transcribe(audio)
-                text = (text or "").strip()
-            else:
-                text = (wl._transcribe_array(audio) or "").strip()
+            with _WHISPER_LOCK:   # full parity: serialize against any lingering partial pass
+                if in_call:
+                    text, words_data = _prosody.transcribe(audio)
+                    text = (text or "").strip()
+                else:
+                    text = (wl._transcribe_array(audio) or "").strip()
         except Exception:
             final_ok = False
             break
