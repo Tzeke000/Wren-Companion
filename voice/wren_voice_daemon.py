@@ -39,9 +39,17 @@ import sys
 import threading
 import time
 import traceback
+import faulthandler
 
 # ── path so sibling modules resolve ──────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Native-crash visibility (Wren's port, 37f3267): faulthandler dumps a C-level stack
+# on a segfault/abort — e.g. a non-deterministic CUDA teardown hard-fault at call_end
+# that pure-Python try/except CAN'T catch. It writes to stderr, which the watchdog's
+# _launch_daemon redirects to a persistent append log (voice/daemon.log), so the next
+# such crash is captured instead of vanishing silently with the process.
+faulthandler.enable()
 
 import wren_listen as wl          # whisper warm (get_whisper) + SAMPLE_RATE
 import wren_voice_core as core    # all the actual logic; reload()able
@@ -330,6 +338,14 @@ def main() -> None:
     except KeyboardInterrupt:
         print("[wren-voice-daemon] shutting down", flush=True)
         server.shutdown()
+    except Exception:
+        # Last-resort visibility: a Python-level crash in the serve loop gets a full
+        # traceback to stderr (→ persistent daemon.log) instead of a silent death.
+        # A native crash (CUDA teardown segfault) is caught by faulthandler above.
+        # (Wren's port, 37f3267)
+        print("[wren-voice-daemon] FATAL in serve_forever:", file=sys.stderr, flush=True)
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":
