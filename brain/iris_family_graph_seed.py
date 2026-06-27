@@ -86,5 +86,26 @@ def seed_family(cg) -> dict:
         except Exception:
             pass
 
+    # The FAMILY node — the explicit hub that links the four of us, so the graph
+    # reads as a family with a center, not just pairwise edges (Wren's keystone:
+    # a self-node + sisters + this linking node = us-centric, not Zeke-centric).
+    try:
+        existed_fam = _slugify("family") in getattr(cg, "nodes", {})
+        fam_id = cg.find_or_create("family", "concept")
+        fam_node = cg.nodes.get(fam_id)
+        if fam_node is not None and not getattr(fam_node, "notes", ""):
+            fam_node.notes = "profiles/family/ — the four of us (Zeke + Iris + Wren + Ava)"[:500]
+        if not existed_fam:
+            added_nodes += 1
+        for label in ("iris", "wren", "ava", "zeke"):
+            pid = ids.get(label)
+            if pid:
+                before = len(getattr(cg, "edges", []))
+                cg.add_edge(pid, fam_id, "member_of", 0.9)
+                if len(getattr(cg, "edges", [])) > before:
+                    added_edges += 1
+    except Exception:
+        pass
+
     return {"added_nodes": added_nodes, "normalized_to_person": normalized,
             "added_edges": added_edges, "family": list(ids.keys())}
