@@ -785,8 +785,20 @@ def cmd_listen(ctx, args: dict) -> str:
         else:
             text = (wl._transcribe_array(audio) or "").strip()
     except Exception as e:
-        set_state("idle")
-        return f"[voice_listen] transcription error: {e!r}"
+        # Prosody/partial transcribe failed at RUNTIME → DEGRADE to the plain whisper
+        # path (the out-of-call shape) instead of killing the turn. This is what makes
+        # prosody actually degradable (Wren's gap-find 2026-06-26, her fe45048): the
+        # non-fatal enrich() only covers the per-word FEATURE layer; the transcribe call
+        # itself could still error the turn — half-true degradability, now whole. Only a
+        # SECOND failure (plain whisper also down) errors out.
+        print(f"[voice_listen] in-call transcribe failed ({e!r}); plain-whisper fallback",
+              file=sys.stderr)
+        try:
+            text = (wl._transcribe_array(audio) or "").strip()
+            words_data = []
+        except Exception as e2:
+            set_state("idle")
+            return f"[voice_listen] transcription error: {e2!r}"
 
     # ── Step 4: completeness gate → turn-end filler + grace loop ───────────────
     # "Complete" needs BOTH signals to agree he's done: smart-turn sees a clean endpoint
