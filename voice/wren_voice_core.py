@@ -686,6 +686,7 @@ def cmd_speak(ctx, args: dict) -> str:
     text = (args.get("text") or "").strip()
     if not text:
         return "[voice_speak] nothing to say"
+    _cancel_stall_bridge(ctx)   # a real reply (or a warned pause) suppresses the stall bridge
     ctx.speaking = True
     ctx.play_queue.put(text)
     if args.get("wait"):
@@ -721,6 +722,76 @@ def _fire_filler(ctx) -> None:
         ctx.play_queue.put(f)
     except Exception as e:
         print(f"[voice_listen] filler enqueue failed (non-fatal): {e!r}", file=sys.stderr)
+
+
+# ── Stall bridge (Wren's port 2026-06-27) ─────────────────────────────────────
+# A think-gap backstop for calls. CALL_FILLERS mask the first ~1s after Zeke stops,
+# but a heavy turn leaves a silent "processing" gap until my real words land at the
+# ~11s latency floor. The stall bridge arms at the end of each in-call listen turn:
+# a one-shot timer speaks ONE slightly-longer bridging phrase if my reply (cmd_speak)
+# hasn't started within STALL_FILLER_DELAY_S. A per-turn token (ctx._stall_turn) is
+# bumped by every cmd_speak — including a warned "give me a second" — so the bridge
+# fires ONLY on an unwarned silent gap, self-aligning with the speak-first-or-warn-
+# first rule. At most once per turn, gated on call_warm, NEVER touches the mic (it
+# only fills my own silence). Lives entirely in the reloadable core — hot-reloads, no
+# daemon edit. Threshold owed live-call tuning (synth ≠ Zeke's pace; see Wren's note).
+STALL_BRIDGE = True
+STALL_FILLER_DELAY_S = 3.5
+STALL_FILLERS = ("Let me think on that.", "Give me a moment.", "Let me sit with that for a second.")
+_STALL_I = [0]
+
+
+def _arm_stall_bridge(ctx) -> None:
+    """Arm a one-shot timer that speaks a bridging phrase if the cognition hasn't begun
+    its reply within STALL_FILLER_DELAY_S. Cancelled when cmd_speak bumps ctx._stall_turn.
+    Fields set lazily on ctx (no Ctx-class change). Non-fatal throughout."""
+    if not (STALL_BRIDGE and getattr(ctx, "call_warm", False)):
+        return
+    try:
+        turn = getattr(ctx, "_stall_turn", 0) + 1
+        ctx._stall_turn = turn
+
+        def _bridge() -> None:
+            try:
+                # Fire only if this turn is still current (no cmd_speak bumped the token),
+                # the call is still warm, and the mouth isn't already speaking.
+                if getattr(ctx, "_stall_turn", -1) != turn:
+                    return
+                if not getattr(ctx, "call_warm", False):
+                    return
+                if getattr(ctx, "speaking", False):
+                    return
+                phrase = STALL_FILLERS[_STALL_I[0] % len(STALL_FILLERS)]
+                _STALL_I[0] += 1
+                # Re-check the token right before enqueue to shrink the cmd_speak race.
+                if getattr(ctx, "_stall_turn", -1) != turn:
+                    return
+                ctx.speaking = True
+                ctx.play_queue.put(phrase)
+                print(f"[stall-bridge] fired turn={turn}: {phrase!r}", file=sys.stderr)
+            except Exception as e:
+                print(f"[stall-bridge] fire failed (non-fatal): {e!r}", file=sys.stderr)
+
+        t = threading.Timer(STALL_FILLER_DELAY_S, _bridge)
+        t.daemon = True
+        ctx._stall_timer = t
+        t.start()
+    except Exception as e:
+        print(f"[stall-bridge] arm failed (non-fatal): {e!r}", file=sys.stderr)
+
+
+def _cancel_stall_bridge(ctx) -> None:
+    """Bump the per-turn token (tells an armed bridge this turn is no longer silent) and
+    cancel any pending timer. Called by cmd_speak so a real reply — or a warned
+    'give me a second' — suppresses the bridge. Non-fatal."""
+    try:
+        ctx._stall_turn = getattr(ctx, "_stall_turn", 0) + 1
+        t = getattr(ctx, "_stall_timer", None)
+        if t is not None:
+            t.cancel()
+            ctx._stall_timer = None
+    except Exception:
+        pass
 
 
 def play_one(ctx, text: str) -> None:
@@ -960,6 +1031,10 @@ def cmd_listen(ctx, args: dict) -> str:
         result = f"{text}\n{suffix}" if suffix else text
     if end_call_intent:
         result = f"{result}\n{end_call_intent}"
+    # Arm the stall bridge for the upcoming think-gap — in-call, non-terminal turns only
+    # (no point bridging a turn where Zeke just asked to end the call).
+    if in_call and not end_call_intent:
+        _arm_stall_bridge(ctx)
     return result
 
 
