@@ -67,15 +67,34 @@ def _mouth_down_err() -> dict[str, Any]:
                       f"voice/wren_styletts_server.py")}
 
 
+def _set_orb_tts(g: dict[str, Any], speaking: bool, amplitude: float) -> None:
+    """Bridge the out-of-process daemon's speak/listen activity into iris_runtime's
+    globals so the orb reacts. The orb polls /api/v1/tts/state for {speaking, amplitude}
+    (and the snapshot's voice_loop.tts_speaking), but those read iris_runtime's `_g` —
+    which the NEW StyleTTS daemon never touches (it plays audio in its own process), so
+    the orb sat dead while I talked. Setting them here, at the tool layer the cognition
+    calls, is hot-reloadable — no iris_runtime restart. FAIL-OPEN: a bad write must never
+    break the actual speak/listen path. PHASE 1 = state reaction (speaking on/off); the
+    real per-frame amplitude envelope is PHASE 2 (needs live amplitude from the daemon)."""
+    try:
+        if g is not None:
+            g["_tts_speaking"] = bool(speaking)
+            g["_tts_amplitude"] = float(amplitude)
+    except Exception:
+        pass
+
+
 def _speak_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     p = params or {}
     if not _mouth_up():
         return _mouth_down_err()
+    _set_orb_tts(g, True, 0.6)  # orb: show speaking for this turn
     return _daemon_call("speak", {"text": p.get("text", ""), "wait": bool(p.get("wait", False))})
 
 
 def _listen_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     p = params or {}
+    _set_orb_tts(g, False, 0.0)  # orb: stop speaking — I'm listening now
     return _daemon_call("listen", {
         "timeout_seconds": float(p.get("timeout_seconds", 45.0)),
         "max_utterance_seconds": float(p.get("max_utterance_seconds", 20.0)),
@@ -87,6 +106,7 @@ def _speak_interruptible_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[s
     p = params or {}
     if not _mouth_up():
         return _mouth_down_err()
+    _set_orb_tts(g, True, 0.6)  # orb: show speaking for this turn
     return _daemon_call("speak_interruptible", {
         "text": p.get("text", ""),
         "timeout_seconds": float(p.get("timeout_seconds", 45.0)),
@@ -103,6 +123,7 @@ def _call_start_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 
 
 def _call_end_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    _set_orb_tts(g, False, 0.0)  # orb: back to idle when the call ends
     return _daemon_call("call_end", {})
 
 
