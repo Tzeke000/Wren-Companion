@@ -765,13 +765,46 @@ def _warmup() -> None:
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────────
+# ── Singleton server: bind the port FIRST (before the slow model load) ───────────
+# 2026-06-26 (Iris): the mouth used to _load_model() + _warmup() (~40s, but minutes
+# under GPU contention) BEFORE binding the port. During that window /health returned
+# 503, the watchdog read "mouth down" and relaunched — but since no instance held the
+# port until warm, several loaded at once, fought over the GPU (slower still), and the
+# losers of the port race never exited → a pile of zombie mouths. Binding FIRST makes
+# the port a real singleton lock + a liveness signal the watchdog can see, while the
+# model loads in the background and /health honestly reports 503 until warm.
+# allow_reuse_address = False is load-bearing on Windows: with SO_REUSEADDR a second
+# bind to the same port SUCCEEDS (Windows lets it steal the socket), defeating the
+# singleton — so we leave it off and a duplicate launch raises WSAEADDRINUSE and exits.
+class _SingletonHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+    daemon_threads = True
+
+
 def main() -> int:
     if not REF_WAV.is_file():
         print(f"[styletts] ERROR: reference voice not found: {REF_WAV}")
         return 1
-    _load_model()
-    _warmup()
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    # Bind FIRST — claims the port (singleton) and gives the watchdog a liveness
+    # signal, while /health stays 503 "loading" until the background warm completes.
+    try:
+        server = _SingletonHTTPServer((HOST, PORT), Handler)
+    except OSError as e:
+        print(f"[styletts] port {PORT} already held ({e}); another mouth is alive — "
+              f"exiting cleanly (singleton, no duplicate)", flush=True)
+        return 0
+    print(f"[styletts] bound :{PORT}; loading model in background "
+          f"(/health=503 until warm)", flush=True)
+
+    def _bg_load() -> None:
+        try:
+            _load_model()
+            _warmup()   # sets _READY = True once the model is warm
+        except Exception as e:
+            print(f"[styletts] background model load FAILED: {e!r}", flush=True)
+
+    threading.Thread(target=_bg_load, daemon=True, name="styletts-bg-load").start()
+
     print(f"[styletts] serving on http://{HOST}:{PORT}/")
     try:
         server.serve_forever()

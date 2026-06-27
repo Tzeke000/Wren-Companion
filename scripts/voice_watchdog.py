@@ -31,8 +31,13 @@ DAEMON_SCRIPT = VOICE / "wren_voice_daemon.py"
 MOUTH_PORT = 8769
 DAEMON_PORT = 8770
 CHECK_EVERY = 15.0       # seconds between health checks
-WARM_GRACE = 75.0        # after a (re)launch, don't relaunch again for this long
-                         # (StyleTTS2 cold load + warmup is ~15-40s; gives real headroom)
+WARM_GRACE = 75.0        # after a (re)launch with the port still DOWN, don't relaunch
+                         # again for this long (spacing for a genuinely dead service)
+MOUTH_STUCK_AFTER = 300.0  # port UP but /health != ok this long → the mouth is stuck
+                           # (not just warming) → evict + relaunch. Generous on purpose:
+                           # the mouth now binds the port immediately and loads the model
+                           # in the background, so legit warmup keeps the port up the
+                           # whole time; only a hung load should ever cross 5 minutes.
 
 # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — child survives the watchdog and isn't
 # tied to its console, so a watchdog restart doesn't take the voice services with it.
@@ -97,6 +102,25 @@ def _port_listening(port: int) -> bool:
         return False
 
 
+def _kill_on_port(port: int) -> None:
+    """Evict whatever process is listening on `port` (Windows, dependency-free).
+
+    Used only to clear a STUCK mouth (port up but never /health-ok) so a fresh one
+    can bind — the mouth's allow_reuse_address=False singleton means a relaunch can't
+    take the port from a stuck holder, so we must remove the holder first. Best-effort;
+    a failure just means the next cycle tries again. CREATE_NO_WINDOW so no console flashes.
+    """
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+             f"Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue "
+             f"| ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}"],
+            timeout=15, creationflags=0x08000000)
+        _log(f"evicted stuck process holding :{port}")
+    except Exception as e:  # noqa: BLE001 — best-effort; never crash the watchdog
+        _log(f"kill-on-port {port} failed ({e!r}); will retry next cycle")
+
+
 def _launch_mouth() -> None:
     env = dict(os.environ)
     env["WREN_VOICE_PORT"] = str(MOUTH_PORT)
@@ -120,16 +144,40 @@ def main() -> None:
     _log(f"watchdog up — mouth :{MOUTH_PORT}, daemon :{DAEMON_PORT}, every {CHECK_EVERY:.0f}s")
     last_mouth = 0.0
     last_daemon = 0.0
+    mouth_unhealthy_since = 0.0   # when the port-up-but-not-ok window started (0 = healthy/down)
     while True:
         now = time.time()
-        if not _mouth_ok() and now - last_mouth > WARM_GRACE:
-            _log("mouth DOWN")
-            _launch_mouth()
-            last_mouth = now
+
+        # ── Mouth: liveness is the PORT, not /health (the mouth binds the port up-front
+        # and warms the model in the background, so a listening-but-503 mouth is loading,
+        # not dead — relaunching it only spawns duplicates that self-exit on the bind). ──
+        if _port_listening(MOUTH_PORT):
+            if _mouth_ok():
+                mouth_unhealthy_since = 0.0                     # warm + serving
+            else:
+                if mouth_unhealthy_since == 0.0:
+                    mouth_unhealthy_since = now                 # start the warming/stuck clock
+                elif now - mouth_unhealthy_since > MOUTH_STUCK_AFTER:
+                    _log(f"mouth STUCK >{MOUTH_STUCK_AFTER:.0f}s (port up, never /health-ok) "
+                         f"— evicting + relaunching")
+                    _kill_on_port(MOUTH_PORT)
+                    time.sleep(1.0)
+                    _launch_mouth()
+                    last_mouth = now
+                    mouth_unhealthy_since = 0.0
+        else:
+            mouth_unhealthy_since = 0.0
+            if now - last_mouth > WARM_GRACE:
+                _log("mouth DOWN (port not listening) — launching")
+                _launch_mouth()
+                last_mouth = now
+
+        # ── Daemon: port-based liveness (binds fast; no slow foreground load). ──
         if not _port_listening(DAEMON_PORT) and now - last_daemon > WARM_GRACE:
-            _log("daemon DOWN")
+            _log("daemon DOWN — launching")
             _launch_daemon()
             last_daemon = now
+
         time.sleep(CHECK_EVERY)
 
 
