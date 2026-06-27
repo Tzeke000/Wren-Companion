@@ -21,6 +21,7 @@ Preprocessing spec (from pipecat-ai/smart-turn GitHub + whisper/audio.py):
 """
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -39,7 +40,17 @@ _CHUNK_S = 8                          # smart-turn uses an 8-second context wind
 _N_SAMPLES = _CHUNK_S * _SR          # 128 000 samples
 _N_FRAMES = _N_SAMPLES // _HOP       # 800 frames
 
-_MODEL_PATH = Path(r"D:\Wren\state\smartturn\smart-turn-v3.2-cpu.onnx")
+# Machine-local model path (Iris fix 2026-06-26): was hardcoded to D:\Wren\state\...
+# (Wren's machine), so smart-turn FileNotFoundError'd on the tower and call_start's
+# smart-turn gate could never pass → call_warm stayed False → the whole in-call path
+# (prosody, streaming partials, early-finalize) never activated. Resolve relative to
+# this repo, with WREN_SMARTTURN_MODEL as an override.
+_MODEL_PATH = Path(
+    os.environ.get(
+        "WREN_SMARTTURN_MODEL",
+        str(Path(__file__).resolve().parents[1] / "state" / "smartturn" / "smart-turn-v3.2-cpu.onnx"),
+    )
+)
 
 # Lazy singleton — loaded once on first predict_endpoint() call.
 _SESSION: "ort.InferenceSession | None" = None
