@@ -69,14 +69,23 @@ END_SILENCE_S = 1.1                    # trailing silence that ends an utterance
                                        # mic if he's still mid-thought — so the fixed tail no
                                        # longer has to be long to be safe. THE FIRST KNOB to
                                        # raise back if it ever clips him on a thoughtful pause.
-SELF_LISTEN_TRAILING_S = 0.35          # don't capture for this long after I stop speaking
+SELF_LISTEN_TRAILING_S = 0.35          # post-drain settle: extra quiet after playback fully
+                                       # drains, to cover the device-flush tail before the mic
+                                       # opens (used in cmd_listen Step 1). A MARGIN on top of
+                                       # the full-playback drain-gate, not the sole self-listen
+                                       # guard — see Wren's 2026-06-26 finding #5.
 
 # Turn-end fillers (latency pass 2026-06-14): a short backchannel queued the instant a
 # turn closes, so Zeke hears a response within ~1s of his last word while I'm still
 # transcribing + thinking. Masks the his-last-word→my-first-word gap that no engine knob
 # can close (the irreducible chunk is my own think-time). Rotated, not random, so a
 # reload stays deterministic. Kept SHORT so they read as backchannel, not a real reply.
-CALL_FILLERS = ("Mm-hmm.", "Okay.", "Right.", "So,")  # "Mm."/"Mhm." synth'd as a flat "MM" — dropped
+# Ear-tested set (Wren's live-call findings 2026-06-26, Zeke-approved by ear): StyleTTS2
+# READS spelled-hum tokens as letters — "Mm-hmm"/"Mhm"/"Mm-hm" come out "M-H-M", not a hum.
+# Only "huh"/"uh-huh" survive synth as real sounds. So: real words + those two. Rule under
+# it — ear-test every filler token through the actual mouth before committing; don't trust
+# the spelling. (Dropped "Mm-hmm." and "So," from the prior set.)
+CALL_FILLERS = ("Okay.", "Right.", "Sure.", "Let's see.", "Uh-huh.", "Huh.", "Yeah.", "Got it.", "I see.", "Noted.")
 
 GRACE_RESUME_TIMEOUT = 1.8             # after a cue-ending, how long to wait for him to resume
 MAX_GRACE_ROUNDS = 3                   # cap so a stutter can't loop the mic forever
@@ -520,10 +529,20 @@ def cmd_listen(ctx, args: dict) -> str:
     end_sil = float(args.get("end_silence_seconds", 0.0))
     end_silence = end_sil if end_sil > 0 else END_SILENCE_S
 
-    # ── Step 1: wait until playback drained ──────────────────────────────────
+    # ── Step 1: wait until playback drained, then settle ──────────────────────
+    # The drain-gate (wait for ctx.speaking==False) is the strong form of Wren's
+    # self-listen finding (2026-06-26): speaking flips False only AFTER play_one
+    # returns, i.e. after the mouth finishes playing the last chunk — so the mic
+    # opens on real playback completion, not a fixed trailing guard. On speakers
+    # with no AEC the mic would otherwise capture my OWN tail as if it were Zeke
+    # (it bit Wren three times in one call). The post-drain settle below covers
+    # the device-flush tail (audio can report done a beat before the speaker is
+    # physically silent). It is a MARGIN on top of full-playback drain, not the
+    # sole guard — which is why 0.35s is enough here though it wasn't for Wren.
     t0 = time.time()
     while getattr(ctx, "speaking", False) and time.time() - t0 < 30.0:
         time.sleep(0.05)
+    time.sleep(SELF_LISTEN_TRAILING_S)
 
     # ── Step 2: capture ───────────────────────────────────────────────────────
     try:
