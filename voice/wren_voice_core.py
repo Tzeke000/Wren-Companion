@@ -75,6 +75,22 @@ SELF_LISTEN_TRAILING_S = 0.35          # post-drain settle: extra quiet after pl
                                        # the full-playback drain-gate, not the sole self-listen
                                        # guard — see Wren's 2026-06-26 finding #5.
 
+# ── Streaming ASR — Route 1 (Wren's recipe 2026-06-26, Iris build) ───────────────
+# Removes the transcribe-after-stop slice: a background thread re-transcribes the
+# growing capture buffer every PARTIAL_CADENCE_S during capture (reusing the warm
+# whisper, no new model). Because an utterance ends with END_SILENCE_S of SILENCE,
+# the last partial has almost always already covered all the SPEECH — so at turn-end,
+# if the tail past the latest partial is silent, we use the partial directly and skip
+# the end-of-turn full pass. Full-buffer re-transcribe per partial (correct, no seam-
+# stitching — Wren's reconciliation step 4: start correct, optimize only if waste hurts).
+# FALLBACK-FIRST (non-negotiable): any error / stale partial / non-silent tail → the
+# normal single full pass, unchanged. Toggle via reload if it ever misbehaves.
+STREAMING_PARTIALS = True              # master switch for the partial-transcriber path
+PARTIAL_CADENCE_S = 1.2               # min seconds between partial passes (GPU-contention cap)
+PARTIAL_MIN_AUDIO_S = 1.5            # don't bother running a partial until this much is captured
+PARTIAL_TAIL_SILENCE_PEAK = CONTINUE_PEAK  # tail past the latest partial counts as silence below
+                                           # this peak → partial already has all the speech
+
 # Turn-end fillers (latency pass 2026-06-14): a short backchannel queued the instant a
 # turn closes, so Zeke hears a response within ~1s of his last word while I'm still
 # transcribing + thinking. Masks the his-last-word→my-first-word gap that no engine knob
@@ -215,11 +231,43 @@ def _post_speak(ctx, text: str) -> str:
                 "see notes/voice_runbook.md to start it manually.")
 
 
+class _StreamingPartials:
+    """Thread-safe holder for the freshest partial transcript during a capture.
+
+    The partial worker calls update() each pass; cmd_listen reads latest() at turn-end.
+    Stores (text, words_data, n_samples) where n_samples is how much of the capture
+    buffer that partial covered — so the consumer can check whether the tail past it is
+    just silence (partial complete) or unheard speech (must fall back to a full pass)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._latest = None          # (text, words_data, n_samples) | None
+        self.passes = 0              # diagnostics: how many partial passes ran
+        self.last_pass_s = 0.0       # diagnostics: duration of the last pass (measure cost)
+
+    def update(self, text: str, words_data, n_samples: int, pass_s: float) -> None:
+        with self._lock:
+            self._latest = (text, words_data, n_samples)
+            self.passes += 1
+            self.last_pass_s = pass_s
+
+    def latest(self):
+        with self._lock:
+            return self._latest
+
+
 def _capture_utterance(ctx, timeout_s: float, max_s: float,
-                       end_silence_s: float = END_SILENCE_S) -> "np.ndarray | None":
+                       end_silence_s: float = END_SILENCE_S,
+                       partials: "_StreamingPartials | None" = None,
+                       transcribe_fn=None, mouth_busy_fn=None) -> "np.ndarray | None":
     """Block until speech onset (or timeout), then record until trailing silence or max
     length. Sets overlay state to listening when mic opens.
-    Returns float32 audio, or None if nothing was said."""
+    Returns float32 audio, or None if nothing was said.
+
+    Streaming (Route 1): if `partials` + `transcribe_fn` are given and STREAMING_PARTIALS,
+    a background thread re-transcribes the growing buffer every PARTIAL_CADENCE_S (skipped
+    while mouth_busy_fn() is True, the GPU-contention guard) and stashes the freshest
+    result on `partials`. Fully best-effort — a partial that errors never touches capture."""
     # Use the mic index resolved on the daemon's MAIN thread (ctx.mic_dev_idx). Calling
     # find_input_device (sd.query_devices) HERE on a worker connection thread hangs on
     # Windows. Fall back to find_input_device only if the daemon didn't set it.
@@ -230,44 +278,112 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     frame_n = int(SAMPLE_RATE * frame_s)
 
     collected: list = []
+    buf_lock = threading.Lock()   # guards `collected` between capture thread + partial worker
     started = False
     t_start = time.time()
     onset_t = 0.0
     last_voice_t = 0.0
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                        device=dev_idx, blocksize=frame_n) as stream:
-        set_state("listening", "in call")
-        while True:
-            frame, _overflow = stream.read(frame_n)
-            f = np.asarray(frame).flatten()
-            peak = float(np.abs(f).max()) if f.size else 0.0
-            now = time.time()
-
-            if not started:
-                if now - t_start > timeout_s:
-                    return None  # nobody spoke within the window
-                if is_muted():
-                    time.sleep(0.1)
-                    t_start = now  # don't count muted time against the timeout
+    # ── Background partial transcriber (Route 1) ──────────────────────────────
+    stop_evt = threading.Event()
+    worker = None
+    if (partials is not None and transcribe_fn is not None and STREAMING_PARTIALS):
+        def _partial_loop():
+            last_n = 0
+            min_samples = int(PARTIAL_MIN_AUDIO_S * SAMPLE_RATE)
+            while not stop_evt.is_set():
+                if stop_evt.wait(PARTIAL_CADENCE_S):
+                    break
+                # GPU-contention guard: don't run whisper while the mouth is speaking.
+                if mouth_busy_fn is not None and mouth_busy_fn():
                     continue
-                if peak >= ONSET_PEAK:
-                    started = True
-                    onset_t = now
-                    last_voice_t = now
-                    collected.append(f)
-            else:
-                collected.append(f)
-                if peak >= CONTINUE_PEAK:
-                    last_voice_t = now
-                if now - last_voice_t >= end_silence_s:
-                    break  # he finished a thought
-                if now - onset_t >= max_s:
-                    break  # hard cap
+                with buf_lock:
+                    snap = collected[:] if collected else None
+                if not snap:
+                    continue
+                n_samples = sum(len(x) for x in snap)
+                if n_samples < min_samples or n_samples <= last_n:
+                    continue  # too little / no new audio since last pass
+                last_n = n_samples
+                try:
+                    buf = np.concatenate(snap)
+                    t0 = time.time()
+                    text, words = transcribe_fn(buf)
+                    partials.update((text or "").strip(), words, n_samples, time.time() - t0)
+                except Exception as e:  # best-effort: a failed partial never breaks capture
+                    print(f"[partials] pass failed (non-fatal): {e!r}", file=sys.stderr)
+        worker = threading.Thread(target=_partial_loop, daemon=True, name="wren-partial-stt")
+        worker.start()
+
+    try:
+        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                            device=dev_idx, blocksize=frame_n) as stream:
+            set_state("listening", "in call")
+            while True:
+                frame, _overflow = stream.read(frame_n)
+                f = np.asarray(frame).flatten()
+                peak = float(np.abs(f).max()) if f.size else 0.0
+                now = time.time()
+
+                if not started:
+                    if now - t_start > timeout_s:
+                        return None  # nobody spoke within the window
+                    if is_muted():
+                        time.sleep(0.1)
+                        t_start = now  # don't count muted time against the timeout
+                        continue
+                    if peak >= ONSET_PEAK:
+                        started = True
+                        onset_t = now
+                        last_voice_t = now
+                        with buf_lock:
+                            collected.append(f)
+                else:
+                    with buf_lock:
+                        collected.append(f)
+                    if peak >= CONTINUE_PEAK:
+                        last_voice_t = now
+                    if now - last_voice_t >= end_silence_s:
+                        break  # he finished a thought
+                    if now - onset_t >= max_s:
+                        break  # hard cap
+    finally:
+        stop_evt.set()
+        if worker is not None:
+            worker.join(timeout=2.0)
 
     if not collected:
         return None
     return np.concatenate(collected)
+
+
+def _transcribe_in_call(audio: "np.ndarray", partials: "_StreamingPartials | None"):
+    """In-call transcription with the Route 1 streaming shortcut.
+
+    If a partial already covered all the SPEECH — i.e. the tail of `audio` past the
+    partial's coverage is silence (the END_SILENCE_S tail) — use the partial directly
+    and skip the end-of-turn full pass. That's the latency win: the transcript is ready
+    the instant he stops. Any other case (no partial, stale partial whose tail still has
+    speech, empty text) falls straight back to a full _prosody.transcribe — fallback-first.
+    Returns (text, words_data)."""
+    if partials is not None:
+        latest = partials.latest()
+        if latest is not None:
+            p_text, p_words, p_n = latest
+            total = int(audio.shape[0])
+            tail = audio[p_n:] if 0 < p_n < total else audio[:0]
+            tail_peak = float(np.abs(tail).max()) if tail.size else 0.0
+            if p_text and tail_peak < PARTIAL_TAIL_SILENCE_PEAK:
+                tail_s = tail.size / SAMPLE_RATE
+                print(f"[partials] HIT — used partial ({partials.passes} passes, last "
+                      f"{partials.last_pass_s*1000:.0f}ms; silent tail {tail_s:.2f}s, "
+                      f"skipped end-of-turn pass)", file=sys.stderr)
+                return p_text, (p_words or [])
+            print(f"[partials] MISS — tail peak {tail_peak:.3f} >= "
+                  f"{PARTIAL_TAIL_SILENCE_PEAK} ({partials.passes} passes); full pass",
+                  file=sys.stderr)
+    text, words = _prosody.transcribe(audio)
+    return (text or "").strip(), words
 
 
 def _run_with_timeout(fn, seconds: float, name: str = "") -> bool:
@@ -544,10 +660,20 @@ def cmd_listen(ctx, args: dict) -> str:
         time.sleep(0.05)
     time.sleep(SELF_LISTEN_TRAILING_S)
 
-    # ── Step 2: capture ───────────────────────────────────────────────────────
+    # ── Step 2: capture (with streaming partials when in-call) ────────────────
+    # in_call is decided BEFORE capture so the partial transcriber (Route 1) can run
+    # during it. Partials reuse the warm whisper via _prosody.transcribe (word-timestamped,
+    # same as the final pass), and skip while the mouth speaks (GPU-contention guard).
+    in_call = getattr(ctx, "call_warm", False) and _HAVE_PROSODY
+    partials = _StreamingPartials() if (in_call and STREAMING_PARTIALS) else None
     try:
         with ctx.mic_lock:
-            audio = _capture_utterance(ctx, timeout_s, max_s, end_silence)
+            audio = _capture_utterance(
+                ctx, timeout_s, max_s, end_silence,
+                partials=partials,
+                transcribe_fn=(_prosody.transcribe if in_call else None),
+                mouth_busy_fn=(lambda: getattr(ctx, "speaking", False)),
+            )
     except Exception as e:
         set_state("idle")
         return f"[voice_listen] capture error: {e!r}"
@@ -558,15 +684,12 @@ def cmd_listen(ctx, args: dict) -> str:
 
     set_state("thinking", "heard you")
 
-    in_call = getattr(ctx, "call_warm", False) and _HAVE_PROSODY
-
-    # ── Step 3: transcribe ────────────────────────────────────────────────────
+    # ── Step 3: transcribe (Route 1: use the freshest partial if its tail is silent) ──
     words_data: list = []
     final_ok = True   # False if a grace re-transcribe failed → audio/words mismatch, skip prosody
     try:
         if in_call:
-            text, words_data = _prosody.transcribe(audio)
-            text = (text or "").strip()
+            text, words_data = _transcribe_in_call(audio, partials)
         else:
             text = (wl._transcribe_array(audio) or "").strip()
     except Exception as e:
