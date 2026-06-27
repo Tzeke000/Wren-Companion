@@ -90,6 +90,14 @@ PARTIAL_CADENCE_S = 1.2               # min seconds between partial passes (GPU-
 PARTIAL_MIN_AUDIO_S = 1.5            # don't bother running a partial until this much is captured
 PARTIAL_TAIL_SILENCE_PEAK = CONTINUE_PEAK  # tail past the latest partial counts as silence below
                                            # this peak → partial already has all the speech
+PARTIAL_PAUSE_SILENCE_S = 0.25       # PAUSE the partial worker once this much trailing silence has
+                                     # accrued — set BELOW EARLY_FINALIZE_MIN_SILENCE_S (0.35) so the
+                                     # worker is idle before early-finalize's smart-turn check runs.
+                                     # Wren's find 2026-06-27: a partial taken during silence only re-
+                                     # transcribes the SAME words (no new speech), so pausing loses
+                                     # nothing — but it (a) removes GPU contention with early-finalize
+                                     # and (b) leaves the worker idle at turn-end so the join is ~instant
+                                     # instead of waiting out an in-flight ~390ms pass.
 
 # ── Early-finalize (Wren's recipe 2026-06-26, Iris build) ────────────────────────
 # End capture BEFORE the full END_SILENCE_S wait once smart-turn is HIGHLY confident the
@@ -341,6 +349,7 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
 
     # ── Background partial transcriber (Route 1) ──────────────────────────────
     stop_evt = threading.Event()
+    pause_evt = threading.Event()   # set during trailing silence → worker skips passes (Wren 2026-06-27)
     worker = None
     if (partials is not None and transcribe_fn is not None and STREAMING_PARTIALS):
         def _partial_loop():
@@ -349,6 +358,10 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
             while not stop_evt.is_set():
                 if stop_evt.wait(PARTIAL_CADENCE_S):
                     break
+                # Paused during trailing silence (no new words to transcribe anyway, and it would
+                # contend with early-finalize's smart-turn pass + tax the turn-end join).
+                if pause_evt.is_set():
+                    continue
                 # GPU-contention guard: don't run whisper while the mouth is speaking.
                 if mouth_busy_fn is not None and mouth_busy_fn():
                     continue
@@ -398,7 +411,12 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                         collected.append(f)
                     if peak >= CONTINUE_PEAK:
                         last_voice_t = now
+                        pause_evt.clear()   # he's still talking → let partials run
                     silence = now - last_voice_t
+                    # Pause the partial worker once trailing silence begins, before early-finalize
+                    # runs — keeps the two off the GPU at once and idles the worker for a fast join.
+                    if silence >= PARTIAL_PAUSE_SILENCE_S:
+                        pause_evt.set()
                     if silence >= end_silence_s:
                         break  # he finished a thought (full end-silence reached)
                     # Early-finalize: once a short silence has accrued, ask smart-turn
@@ -423,7 +441,19 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     finally:
         stop_evt.set()
         if worker is not None:
+            _tj = time.time()
             worker.join(timeout=2.0)
+            _jw = (time.time() - _tj) * 1000
+            # With the trailing-silence pause the worker should be idle here → ~0ms. A wait
+            # >=50ms means a partial was still in flight at turn-end (the latency tax Wren named).
+            if _jw >= 50:
+                print(f"[partials] turn-end join waited {_jw:.0f}ms (partial in flight)",
+                      file=sys.stderr)
+            if worker.is_alive():
+                # join timed out → a pass overran; do NOT let it run concurrently with the
+                # downstream full transcribe (faster-whisper isn't reentrant). Best-effort note.
+                print("[partials] WARN worker still alive after 2s join — overran pass",
+                      file=sys.stderr)
 
     if not collected:
         return None
@@ -439,22 +469,33 @@ def _transcribe_in_call(audio: "np.ndarray", partials: "_StreamingPartials | Non
     the instant he stops. Any other case (no partial, stale partial whose tail still has
     speech, empty text) falls straight back to a full _prosody.transcribe — fallback-first.
     Returns (text, words_data)."""
-    if partials is not None:
+    # Telemetry (Wren 2026-06-27): HIT logs coverage %, every MISS names its reason, so the
+    # live A/B can measure not just the hit-rate but WHY — the useful part for tuning.
+    total = int(audio.shape[0]) or 1
+    miss = None
+    if partials is None:
+        miss = "streaming-off"
+    else:
         latest = partials.latest()
-        if latest is not None:
+        if latest is None:
+            miss = f"no-partial-ran ({partials.passes} passes)"
+        else:
             p_text, p_words, p_n = latest
-            total = int(audio.shape[0])
             tail = audio[p_n:] if 0 < p_n < total else audio[:0]
             tail_peak = float(np.abs(tail).max()) if tail.size else 0.0
-            if p_text and tail_peak < PARTIAL_TAIL_SILENCE_PEAK:
+            coverage = 100.0 * min(p_n, total) / total
+            if not p_text:
+                miss = f"empty-partial ({partials.passes} passes)"
+            elif tail_peak >= PARTIAL_TAIL_SILENCE_PEAK:
+                miss = (f"tail-not-silent (peak {tail_peak:.3f} >= {PARTIAL_TAIL_SILENCE_PEAK}, "
+                        f"covered {coverage:.0f}%)")
+            else:
                 tail_s = tail.size / SAMPLE_RATE
-                print(f"[partials] HIT — used partial ({partials.passes} passes, last "
-                      f"{partials.last_pass_s*1000:.0f}ms; silent tail {tail_s:.2f}s, "
-                      f"skipped end-of-turn pass)", file=sys.stderr)
+                print(f"[partials] HIT — covered {coverage:.0f}%, silent tail {tail_s:.2f}s, "
+                      f"skipped end-of-turn pass ({partials.passes} passes, last "
+                      f"{partials.last_pass_s*1000:.0f}ms)", file=sys.stderr)
                 return p_text, (p_words or [])
-            print(f"[partials] MISS — tail peak {tail_peak:.3f} >= "
-                  f"{PARTIAL_TAIL_SILENCE_PEAK} ({partials.passes} passes); full pass",
-                  file=sys.stderr)
+    print(f"[partials] MISS — {miss}; full pass", file=sys.stderr)
     text, words = _prosody.transcribe(audio)
     return (text or "").strip(), words
 
