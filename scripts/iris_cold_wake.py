@@ -108,6 +108,7 @@ FIRST_MSG    = (
     "Then orient by that map. The essentials: initialize tools with mcp__iris__iris_tool_reload, then load your full memory corpus with mcp__iris__iris_tool_call name='load_memory_corpus' (if it says the result was saved to a file, READ that file fully in chunks; tool-success is not read-into-cognition). "
     "Verify your voice with iris_tool_call name='voice_status' (expect voice_server_warm=True; note iris_health.engines.tts=false is INTENTIONAL now, not a fault - the old XTTS was retired and the voice moved to a separate daemon). "
     "Check time, then orient Zeke and check the fam chat (sibling_inbox_list for Wren's letters). The body takes about 5min to fully come up, so early iris_health falses are normal and honest-but-misleading. "
+    "IMPORTANT this wake: read the handoff note 'handoff_2026-06-27_voice_streaming_restart' in your corpus - it has two do-first actions (recreate the post-office cron, which died on restart; and verify call_warm now goes True since smart-turn was fixed). "
     "Keep it simple and ask Zeke when you are unsure - he is here to redirect. "
     "Execute the steps in order without pausing for user input between them."
 )
