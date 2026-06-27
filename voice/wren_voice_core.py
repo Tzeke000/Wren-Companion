@@ -1152,6 +1152,10 @@ def cmd_call_start(ctx, args: dict) -> dict:
         "spoken": "",
     }
 
+    # Clear any stall-bridge timer left armed from a prior call/turn (Wren's port,
+    # 37f3267): a fresh call must not inherit a pending bridge.
+    _cancel_stall_bridge(ctx)
+
     # ── Step 1: announce early ────────────────────────────────────────────────
     try:
         _post_speak(ctx, "hey, give me a second — starting the call")
@@ -1276,6 +1280,11 @@ def cmd_call_end(ctx, args: dict) -> dict:
         "sensevoice_cold": False,
         "spoken": "",
     }
+
+    # Cancel any pending stall-bridge timer FIRST so it can't speak into teardown —
+    # the mouth is about to be cold'd and call_warm only flips False at Step 6.
+    # (Wren's port, 37f3267)
+    _cancel_stall_bridge(ctx)
 
     # ── Step 1: announce ─────────────────────────────────────────────────────
     try:
