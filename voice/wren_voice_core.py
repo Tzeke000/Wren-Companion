@@ -91,6 +91,19 @@ PARTIAL_MIN_AUDIO_S = 1.5            # don't bother running a partial until this
 PARTIAL_TAIL_SILENCE_PEAK = CONTINUE_PEAK  # tail past the latest partial counts as silence below
                                            # this peak → partial already has all the speech
 
+# ── Early-finalize (Wren's recipe 2026-06-26, Iris build) ────────────────────────
+# End capture BEFORE the full END_SILENCE_S wait once smart-turn is HIGHLY confident the
+# turn is complete — saves up to ~(END_SILENCE_S - EARLY_FINALIZE_MIN_SILENCE_S) of dead
+# wait every turn (a bigger lever than the transcribe slice on a fast GPU). The bar is
+# HIGH on purpose (0.85 vs _endpoint_incomplete's 0.6): err toward NOT cutting Zeke off.
+# It is safe because the completeness gate in cmd_listen (_looks_incomplete + smart-turn)
+# re-opens the mic via the grace loop if an early break was wrong — so worst case is a
+# grace re-capture, never a dropped clause. In-call only (smart-turn is warm then).
+EARLY_FINALIZE = True                 # master switch for ending capture early
+EARLY_FINALIZE_PROB = 0.85           # smart-turn "complete" prob needed to end capture early
+EARLY_FINALIZE_MIN_SILENCE_S = 0.35  # require this much trailing silence before even checking
+EARLY_FINALIZE_CHECK_EVERY_S = 0.2   # min seconds between smart-turn checks during the silence
+
 # Turn-end fillers (latency pass 2026-06-14): a short backchannel queued the instant a
 # turn closes, so Zeke hears a response within ~1s of his last word while I'm still
 # transcribing + thinking. Masks the his-last-word→my-first-word gap that no engine knob
@@ -193,6 +206,26 @@ def _endpoint_incomplete(audio: "np.ndarray") -> bool:
         return False
 
 
+def _endpoint_complete_confident(audio: "np.ndarray") -> bool:
+    """True only if wren_smartturn is HIGHLY confident the speaker has finished
+    (prob >= EARLY_FINALIZE_PROB). Used to end capture before the full END_SILENCE_S
+    wait. A much higher bar than _endpoint_incomplete's 0.6 cutoff — it gates an action
+    that could cut Zeke off, so it must be near-certain. False on any error / no smart-turn;
+    the grace loop is the safety net if an early break is ever wrong."""
+    if not _HAVE_SMARTTURN:
+        return False
+    try:
+        prob = float(_smartturn.predict_endpoint(audio)["prob"])
+        done = prob >= EARLY_FINALIZE_PROB
+        # Log every check so a LIVE call (real voice ≠ the Piper proxy I tuned against)
+        # builds the dataset to pick EARLY_FINALIZE_PROB from real numbers. Cheap.
+        print(f"[early-finalize] smart-turn prob={prob:.3f} "
+              f"(bar {EARLY_FINALIZE_PROB}) -> {'END' if done else 'wait'}", file=sys.stderr)
+        return done
+    except Exception:
+        return False
+
+
 def _http_get(url: str, timeout: float = 5.0) -> "tuple[int, str]":
     """GET url; returns (status_code, body). Returns (-1, err) on any exception."""
     try:
@@ -259,7 +292,8 @@ class _StreamingPartials:
 def _capture_utterance(ctx, timeout_s: float, max_s: float,
                        end_silence_s: float = END_SILENCE_S,
                        partials: "_StreamingPartials | None" = None,
-                       transcribe_fn=None, mouth_busy_fn=None) -> "np.ndarray | None":
+                       transcribe_fn=None, mouth_busy_fn=None,
+                       early_finalize_fn=None) -> "np.ndarray | None":
     """Block until speech onset (or timeout), then record until trailing silence or max
     length. Sets overlay state to listening when mic opens.
     Returns float32 audio, or None if nothing was said.
@@ -267,7 +301,12 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     Streaming (Route 1): if `partials` + `transcribe_fn` are given and STREAMING_PARTIALS,
     a background thread re-transcribes the growing buffer every PARTIAL_CADENCE_S (skipped
     while mouth_busy_fn() is True, the GPU-contention guard) and stashes the freshest
-    result on `partials`. Fully best-effort — a partial that errors never touches capture."""
+    result on `partials`. Fully best-effort — a partial that errors never touches capture.
+
+    Early-finalize: if `early_finalize_fn` is given and EARLY_FINALIZE, then once
+    EARLY_FINALIZE_MIN_SILENCE_S of trailing silence has accrued, ask early_finalize_fn
+    (smart-turn, high-confidence) whether the turn is done; if so, end capture before the
+    full end_silence_s wait. Checked at most every EARLY_FINALIZE_CHECK_EVERY_S. Best-effort."""
     # Use the mic index resolved on the daemon's MAIN thread (ctx.mic_dev_idx). Calling
     # find_input_device (sd.query_devices) HERE on a worker connection thread hangs on
     # Windows. Fall back to find_input_device only if the daemon didn't set it.
@@ -283,6 +322,8 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     t_start = time.time()
     onset_t = 0.0
     last_voice_t = 0.0
+    last_ef_check = 0.0           # last early-finalize smart-turn check (cadence cap)
+    ef_enabled = (early_finalize_fn is not None and EARLY_FINALIZE)
 
     # ── Background partial transcriber (Route 1) ──────────────────────────────
     stop_evt = threading.Event()
@@ -343,8 +384,26 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                         collected.append(f)
                     if peak >= CONTINUE_PEAK:
                         last_voice_t = now
-                    if now - last_voice_t >= end_silence_s:
-                        break  # he finished a thought
+                    silence = now - last_voice_t
+                    if silence >= end_silence_s:
+                        break  # he finished a thought (full end-silence reached)
+                    # Early-finalize: once a short silence has accrued, ask smart-turn
+                    # (high bar) if he's confidently done — break before the full wait.
+                    if (ef_enabled and silence >= EARLY_FINALIZE_MIN_SILENCE_S
+                            and now - last_ef_check >= EARLY_FINALIZE_CHECK_EVERY_S):
+                        last_ef_check = now
+                        try:
+                            with buf_lock:
+                                snap = collected[:]
+                            if early_finalize_fn(np.concatenate(snap)):
+                                print(f"[early-finalize] ended at {silence*1000:.0f}ms "
+                                      f"silence (saved ~{(end_silence_s-silence)*1000:.0f}ms "
+                                      f"of the {end_silence_s*1000:.0f}ms wait)",
+                                      file=sys.stderr)
+                                break
+                        except Exception as e:
+                            print(f"[early-finalize] check failed (non-fatal): {e!r}",
+                                  file=sys.stderr)
                     if now - onset_t >= max_s:
                         break  # hard cap
     finally:
@@ -673,6 +732,7 @@ def cmd_listen(ctx, args: dict) -> str:
                 partials=partials,
                 transcribe_fn=(_prosody.transcribe if in_call else None),
                 mouth_busy_fn=(lambda: getattr(ctx, "speaking", False)),
+                early_finalize_fn=(_endpoint_complete_confident if in_call else None),
             )
     except Exception as e:
         set_state("idle")
