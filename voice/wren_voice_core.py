@@ -311,11 +311,19 @@ class _StreamingPartials:
             return self._latest
 
 
+# Serializes ALL faster-whisper access (the model isn't reentrant). The partial worker
+# holds it for each pass; the turn-end transcribe holds it for the full pass. So even if
+# the worker.join times out with a pass in flight, the turn-end transcribe BLOCKS on this
+# lock until that pass finishes rather than calling whisper concurrently and corrupting.
+# (Fix 2026-06-27 for the join-timeout reentrancy hole I'd only warn-logged.)
+_WHISPER_LOCK = threading.Lock()
+
+
 def _capture_utterance(ctx, timeout_s: float, max_s: float,
                        end_silence_s: float = END_SILENCE_S,
                        partials: "_StreamingPartials | None" = None,
                        transcribe_fn=None, mouth_busy_fn=None,
-                       early_finalize_fn=None) -> "np.ndarray | None":
+                       early_finalize_fn=None, ef_state: "dict | None" = None) -> "np.ndarray | None":
     """Block until speech onset (or timeout), then record until trailing silence or max
     length. Sets overlay state to listening when mic opens.
     Returns float32 audio, or None if nothing was said.
@@ -376,7 +384,8 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                 try:
                     buf = np.concatenate(snap)
                     t0 = time.time()
-                    text, words = transcribe_fn(buf)
+                    with _WHISPER_LOCK:   # never overlap the turn-end full pass
+                        text, words = transcribe_fn(buf)
                     partials.update((text or "").strip(), words, n_samples, time.time() - t0)
                 except Exception as e:  # best-effort: a failed partial never breaks capture
                     print(f"[partials] pass failed (non-fatal): {e!r}", file=sys.stderr)
@@ -428,6 +437,8 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                             with buf_lock:
                                 snap = collected[:]
                             if early_finalize_fn(np.concatenate(snap)):
+                                if ef_state is not None:
+                                    ef_state["fired"] = True   # filler-earlier reuses this
                                 print(f"[early-finalize] ended at {silence*1000:.0f}ms "
                                       f"silence (saved ~{(end_silence_s-silence)*1000:.0f}ms "
                                       f"of the {end_silence_s*1000:.0f}ms wait)",
@@ -496,7 +507,8 @@ def _transcribe_in_call(audio: "np.ndarray", partials: "_StreamingPartials | Non
                       f"{partials.last_pass_s*1000:.0f}ms)", file=sys.stderr)
                 return p_text, (p_words or [])
     print(f"[partials] MISS — {miss}; full pass", file=sys.stderr)
-    text, words = _prosody.transcribe(audio)
+    with _WHISPER_LOCK:   # block if a partial pass is still in flight (no reentrant whisper)
+        text, words = _prosody.transcribe(audio)
     return (text or "").strip(), words
 
 
@@ -785,6 +797,7 @@ def cmd_listen(ctx, args: dict) -> str:
     # same as the final pass), and skip while the mouth speaks (GPU-contention guard).
     in_call = getattr(ctx, "call_warm", False) and _HAVE_PROSODY
     partials = _StreamingPartials() if (in_call and STREAMING_PARTIALS) else None
+    ef_state: dict = {}   # _capture_utterance sets {"fired": True} if early-finalize triggered
     try:
         with ctx.mic_lock:
             audio = _capture_utterance(
@@ -793,6 +806,7 @@ def cmd_listen(ctx, args: dict) -> str:
                 transcribe_fn=(_prosody.transcribe if in_call else None),
                 mouth_busy_fn=(lambda: getattr(ctx, "speaking", False)),
                 early_finalize_fn=(_endpoint_complete_confident if in_call else None),
+                ef_state=ef_state,
             )
     except Exception as e:
         set_state("idle")
@@ -805,15 +819,15 @@ def cmd_listen(ctx, args: dict) -> str:
     set_state("thinking", "heard you")
 
     # ── Step 3a: filler-earlier — fire the backchannel BEFORE transcribe (Wren's port) ──
-    # If smart-turn is highly confident he's done, enqueue the short backchannel NOW, before
-    # transcription, so he hears me even sooner — masking the transcribe slice itself on top
-    # of the think-time. Cough-guarded (FILLER_MIN_AUDIO_S), high bar (no transcript yet to
-    # catch a dangle), smart-turn-absence guarded; one per turn via filler_fired. A complete
-    # turn that scored below the bar still gets one from the post-transcribe fallback (Step 4).
+    # REUSE early-finalize's smart-turn result instead of re-calling it (2026-06-27): if
+    # capture ended because early-finalize was confident he's done (ef_state["fired"]), that
+    # IS the high-confidence endpoint signal — fire the backchannel now, no second smart-turn
+    # call. If early-finalize didn't fire, capture ended on full end-silence/max where smart-
+    # turn wasn't 0.85-confident anyway, so the post-transcribe fallback (Step 4) covers it.
+    # Cough-guard kept as belt-and-suspenders; one per turn via filler_fired.
     filler_fired = False
-    if (in_call and EARLY_FILLER
-            and audio.size >= int(SAMPLE_RATE * FILLER_MIN_AUDIO_S)
-            and _endpoint_complete_confident(audio, EARLY_FILLER_DONE_PROB)):
+    if (in_call and EARLY_FILLER and ef_state.get("fired")
+            and audio.size >= int(SAMPLE_RATE * FILLER_MIN_AUDIO_S)):
         _fire_filler(ctx)
         filler_fired = True
 
