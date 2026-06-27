@@ -651,6 +651,38 @@ def _bargein_watch_and_capture(ctx, model, is_speaking, on_barge, *,
 # PUBLIC FUNCTIONS (the daemon calls these)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _rich_health(ctx) -> list:
+    """Cheap in-daemon liveness of the OPTIONAL degrade-with-announcement components
+    (smart-turn, prosody) — the ones cmd_call_start lets a call run degraded on.
+    Returns the list of components NOT loadable on THIS live process.
+
+    Runs IN the daemon (via cmd_status), so it sees the LIVE imported modules — an
+    external prober would re-import the corrected disk path and miss a stale daemon
+    (the exact trap behind the day-dead smart-turn). Checks constructability
+    (path/flag), NOT warmth: a cold component between calls is NOT degraded; only a
+    missing model / failed import is. No warm, no inference — the deeper dummy-infer
+    probe (loads-but-errors-on-predict, corrupt model) is the watchdog's job. This is
+    the heartbeat that pays the debt our graceful fallback runs up: it surfaces the
+    silent-corpse class that 'voice works' on the fallback would otherwise hide.
+    (Converged with Wren — her _rich_health, 1e9015e.)
+    """
+    degraded: list = []
+    # smart-turn: degraded if the import failed OR the model the LIVE module would load
+    # isn't on disk (the exact path _get_session raises FileNotFoundError on).
+    try:
+        if (not _HAVE_SMARTTURN) or (not _smartturn._MODEL_PATH.exists()):
+            degraded.append("smartturn")
+    except Exception:
+        degraded.append("smartturn")
+    # prosody: degraded if the import failed (shares the whisper singleton, no own model).
+    try:
+        if not _HAVE_PROSODY:
+            degraded.append("prosody")
+    except Exception:
+        degraded.append("prosody")
+    return degraded
+
+
 def cmd_status(ctx, args: dict) -> str:
     """Check mouth server /health at ctx.server_url, read_state(), is_muted().
     Returns a status string in the same style as the old voice_status tool."""
@@ -668,8 +700,12 @@ def cmd_status(ctx, args: dict) -> str:
         muted = is_muted()
     except Exception:
         muted = False
+    try:
+        rich_degraded = _rich_health(ctx)
+    except Exception:
+        rich_degraded = []
     return (f"voice_server_warm={server_ok}  state={st.get('state')}  "
-            f"muted={muted}  detail={st.get('detail','')!r}")
+            f"muted={muted}  rich_degraded={rich_degraded}  detail={st.get('detail','')!r}")
 
 
 def cmd_speak(ctx, args: dict) -> str:
