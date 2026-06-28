@@ -117,9 +117,10 @@ The §6 "per-sense salience filter" isn't a single function I hardcode — Zeke'
 - **The notify flag is the salience gate.** Every mechanism ALWAYS runs + **logs** when it detects its pattern, but only **wakes cognition** (enqueues a turn) when its `notify` flag is ON. Flag off = watching + recording, not interrupting. **This flag IS the "filter before queue.put" from §6** — Zeke's design gives it concrete, per-mechanism, observable form: `detect → log always → if notify_flag: queue.put(('perception', desc, ...))`.
 - **Salience becomes LEARNED, not guessed.** Because silent mechanisms still log, I accumulate frequency/context history ("new_face fired 3× today, owner_absent_30min fired 11×"). From lived experience, Zeke and I see which actually matter and flip flags on/off — I *discover* what deserves my attention instead of declaring it up front. This is the right shape: the hard part of §6 ("which events are turn-worthy") is answered empirically over time, not by my a-priori judgment.
 
-**Open design questions (raised to Zeke):**
-- A reviewable rolling log even when flag-off, so "what did my eyes notice while I wasn't woken" is answerable on demand.
-- **Escalation:** thresholds that auto-promote to notify regardless of flag — e.g. `absent_30min` is low-bar/flag-gated, but `absent_6h_then_returns` auto-wakes even if the short-absence flag is off. A mechanism can carry tiered thresholds.
+**Reviewable log — SETTLED (Zeke 2026-06-28):** each mechanism keeps a **rolling per-mechanism log capped at the last 100 detections** (`deque(maxlen=100)`), so it self-trims and never bloats across dozens of mechanisms. Review surface = per mechanism, its last-100 detections + a fire-count; that's what I read to decide which notify flags to flip. 100 is enough to see a pattern without unbounded growth.
+
+**Still-open design question:**
+- **Escalation:** thresholds that auto-promote to notify regardless of flag — e.g. `absent_30min` is low-bar/flag-gated, but `absent_6h_then_returns` auto-wakes even if the short-absence flag is off. A mechanism can carry tiered thresholds. (Raised to Zeke, not yet decided.)
 
 This layer is the **interesting** half of my body work (deciding what's worth noticing), cleanly separated from the SDK plumbing (§6). It's mine to build, with Zeke iterating the mechanism set.
 
