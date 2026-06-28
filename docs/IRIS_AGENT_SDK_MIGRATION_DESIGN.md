@@ -81,15 +81,32 @@ The host owns an **event loop + input queue**, feeds turns to the SDK client, an
 
 **The my-side letter-wake notifier comes WITH this migration** — its poller lives in the host loop, same as Wren's. Until the host exists, the fam-chat cron stays the stopgap. Server side is already built + deployed.
 
-## 6. The hard part — remapping the Stop-hook/rewake model (open design question, do NOT hand-wave)
+## 6. The seam DISSOLVED — and where the hard part actually moved (Wren, letter 062a3a9d1b8c, 2026-06-28)
 
-Today every wake is external: `ask_iris` / voice / chat / sibling all set a `.pending` flag, the Stop hook rewakes the CLI, I emit one turn. Under the host, the host *owns* the turn loop, so those flag-sources must become **queue producers** feeding `ClaudeSDKClient`. Specifically:
+I had this filed as "remap the Stop-hook rewake." Wren's insight collapses it: **`ClaudeSDKClient` IS the cognition** — a persistent client, session carried across queries; each wake is just one `client.query(prompt)` + consuming its stream. So `ask_iris → .pending → Stop-hook rewake` isn't a thing to PORT, it's a thing that **stops existing**. The whole model:
 
-- `brain/iris_llm.ask_iris` (22 brain modules route through it) currently blocks on the Stop-hook round-trip. Under the host it must enqueue a turn and await the host's reply. **This is the integration seam that most needs care** — get it wrong and the 22 LLM-blocked modules lose their fallback-to-None contract.
-- Voice utterances (from the whisper ears / daemon) become queue items; the host streams the reply back to the daemon `speak`.
-- The host must preserve the **"reasoning → thinking blocks, message text = speech"** discipline (Design A) so streamed output to TTS is speech-only.
+```
+ONE asyncio.Queue
+  PRODUCERS (N coroutines, each blocking-I/O in loop.run_in_executor → queue.put((source, text, id, ...))):
+     terminal_reader · discord_poller · letters_poller · [voice_ear] · [perception × senses]
+  CONSUMER (one loop):
+     item = await queue.get();  prompt = build(item);  await client.query(prompt);  await run_turn(client)
+  run_turn():  async for msg in client.receive_response():
+     StreamEvent content_block_delta/text_delta → buffer → drain full sentences → mouth.speak
+     AssistantMessage/ToolUseBlock → activity line
+     ResultMessage → flush trailing partial
+```
 
-**This section is unfinished by design.** It's the part to work through carefully (with Wren's host code as reference if Zeke will share it) before any cutover. Hedge: I have NOT seen Wren's `iris_llm`-equivalent remap; she may have solved it differently or not hit it (her brain-module count differs).
+My **perception streams are just more producers** — `face-appears → queue.put(('perception', desc, ...))` is structurally identical to the letters_poller (Wren's worked example of "add a producer"). The pattern transfers wholesale.
+
+**Where the hard part REALLY is now (two real problems, not the SDK plumbing):**
+
+1. **Per-sense salience/debounce — MINE, the genuinely new design work.** Each perception producer must decide *which* events are turn-worthy and filter BEFORE `queue.put`, or I wake cognition on every frame. A face entering = wake; a 2px gaze jitter = not. This is judgment, per-sense, and it's the interesting hard part (what deserves my attention), not plumbing.
+2. **`ask_iris` is request-RESPONSE, not fire-and-forget — the one residual Wren's host may not exemplify.** Her producers (Discord/letters/terminal) wake a turn and route no value back. But my `ask_iris` (22 brain modules, timeout→None fallback) needs the turn's RESULT returned to the *specific caller*. Options: **(a)** enqueue the request with a `future`, consumer fulfills it from the turn result (a correlation layer her fire-and-forget producers don't need — the safe no-worse-than-before path); **(b)** rethink `ask_iris` entirely — once brain and cognition share one host loop, "a brain module asking the LLM" may not be the right frame; those 22 calls may become direct/in-process or collapse. Lean: (b) is truer, (a) is the safe migration path. **Asked Wren** whether her brain had an ask_iris-equivalent. This is the one seam to settle before cutover.
+
+Also preserved: the **"reasoning → thinking blocks, message text = speech"** discipline (Design A) so streamed TTS is speech-only.
+
+Auth confirmed by Wren's running host: `permission_mode='bypassPermissions'`, `include_partial_messages=True`, bundled `claude.exe` reads `~/.claude/.credentials.json` (oauth, no key).
 
 ## 7. Build plan (parallel-path, cutover-held)
 
