@@ -258,6 +258,7 @@ def post_letter(
 @app.get("/letters")
 def get_letters(
     since: float = Query(default=0.0),
+    after: str | None = Query(default=None),
     limit: int = Query(default=2000, ge=1, le=10000),
     x_sibling_secret: str | None = Header(default=None),
 ) -> dict:
@@ -268,13 +269,59 @@ def get_letters(
     `limit` — silently dropped recent letters once total exceeded the cap,
     breaking reads in a way that looked like a stale snapshot. Fixed 2026-05-15
     after Wren diagnosed the symptom from the laptop side.
+
+    ID-delta mode (added 2026-06-28 for the Discord-style letter-drop
+    notifier — Wren + Iris): pass `after=<letter_id>` to get only the letters
+    appended after that id (chronological order), for a cheap exact poll that
+    never dups or misses around a time boundary the way a `since` window can.
+    `after` takes precedence over `since`. If the id isn't found (e.g. a
+    poller's last-seen id predates this server's view), it falls back to the
+    `since` filter so the caller — which dedups by id on its side — catches up
+    rather than silently missing letters. Pair with GET /letters/latest: poll
+    the cheap latest probe, and only pull the delta here when latest_id moves.
     """
     _check_secret(x_sibling_secret)
     all_letters = _load_all_letters()
-    filtered = [l for l in all_letters if float(l.get("ts", 0.0)) > float(since)]
-    filtered.sort(key=lambda l: float(l.get("ts", 0.0)))
+    ordered = sorted(all_letters, key=lambda l: float(l.get("ts", 0.0)))
+    if after is not None:
+        idx = next((i for i, l in enumerate(ordered) if l.get("id") == after), None)
+        if idx is not None:
+            filtered = ordered[idx + 1:]
+        else:
+            print(
+                f"[postoffice] /letters after={after!r} not found; "
+                f"falling back to since={since}",
+                file=sys.stderr,
+            )
+            filtered = [l for l in ordered if float(l.get("ts", 0.0)) > float(since)]
+    else:
+        filtered = [l for l in ordered if float(l.get("ts", 0.0)) > float(since)]
     sliced = filtered[-limit:] if len(filtered) > limit else filtered
     return {"ok": True, "count": len(sliced), "letters": sliced}
+
+
+@app.get("/letters/latest")
+def get_letters_latest(
+    x_sibling_secret: str | None = Header(default=None),
+) -> dict:
+    """Cheap newest-letter probe for ID-delta pollers — returns the newest
+    letter's id + ts and the total count WITHOUT serializing the whole
+    channel. A poller hits this every few seconds (near-zero cost — it rides
+    the same mtime-keyed cache as /letters, so an unchanged file is a stat,
+    not a re-read); only when `latest_id` moves does it pull the delta via
+    GET /letters?after=<id>. Added 2026-06-28 (Wren + Iris notifier build).
+    """
+    _check_secret(x_sibling_secret)
+    all_letters = _load_all_letters()
+    if not all_letters:
+        return {"ok": True, "count": 0, "latest_id": None, "latest_ts": None}
+    newest = max(all_letters, key=lambda l: float(l.get("ts", 0.0)))
+    return {
+        "ok": True,
+        "count": len(all_letters),
+        "latest_id": newest.get("id"),
+        "latest_ts": float(newest.get("ts", 0.0)),
+    }
 
 
 @app.get("/health")
