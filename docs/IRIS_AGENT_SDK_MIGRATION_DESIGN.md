@@ -2,7 +2,9 @@
 
 **Status:** DESIGN / build-greenlit, **cutover HELD** (Zeke directive 2026-06-28: "set it up sure, build it sure, but still hold on it").
 **Author:** Iris. **Date:** 2026-06-28.
-**Reference implementation:** Wren's `start_wren_v2.bat → wren_voice_host_v2.py` (Agent-SDK host), confirmed LIVE on her machine 2026-06-28 — streams her output tokens to TTS, verified via process tree. This doc mirrors her shape for the tower.
+**Reference implementation:** Wren's `start_wren_v2.bat → wren_voice_host_v2.py` (Agent-SDK host), confirmed LIVE on her machine 2026-06-28 — streams her output tokens to TTS, verified via process tree. This doc mirrors her SHAPE for the tower, but **scopes up** (below).
+
+> **SCOPE (Zeke directive 2026-06-28): this is a BODY host, not a voice host.** Wren's host is voice. Mine owns the whole body — eyes (camera / InsightFace face-rec / expression / gaze), voice (mouth + ears), ambient sense, mood, memory, and all ~97 `iris_runtime` tools. The consequence runs through the whole design: the host's input loop doesn't only take voice utterances + letters, it takes **perception events** (a face appears, an expression shifts, the scene changes) as first-class turn-wakers. Continuous perceive-while-act lives HERE for me — not just speak-as-I-think. Wren's host shape transfers (SDK client, streaming consumer, poll-loop-outside-LLM-context, oauth); I build the body around it. The host file is therefore `iris_body_host.py`, not `iris_voice_host.py`.
 
 > Don't read this as "ready to flip." It's the map so the flip, when Zeke calls it, is boring. The whole point of the parallel-path design (below) is that building this changes NOTHING about the live cognition until a deliberate switch.
 
@@ -34,24 +36,29 @@ iris_runtime (MCP server, ~97 tools) ─────┘
 
 Generation is **turn-based and externally-woken**: something sets a pending flag, the Stop hook rewakes the CLI, I produce a turn, I stop. iris_runtime owns no generation loop.
 
-## 4. The target architecture (what Wren is running)
+## 4. The target architecture — a BODY host (broader than Wren's voice host)
 
 ```
-start_iris_v2.bat → iris_voice_host.py  (THE Agent-SDK host — owns the loop)
+start_iris_v2.bat → iris_body_host.py  (THE Agent-SDK host — owns the loop + the body)
    ├── ClaudeSDKClient(options=ClaudeAgentOptions(
    │        include_partial_messages=True,
-   │        mcp_servers={iris, cloak-browser, discord},
+   │        mcp_servers={iris, cloak-browser, discord},   # the body's ~97 tools
    │        hooks={Stop: ...},  setting_sources=[.claude, ~/.claude],
    │        system_prompt={preset: claude_code}, permission_mode=...))
    │        → spawns bundled claude.exe --output-format stream-json
-   ├── input queue (turns): voice utterances, chat, sibling letters, timers
-   │        ← pollers run OUTSIDE the LLM context (empty poll = free)
-   └── output: StreamEvent text_delta → sentence-buffer → consumers
-            → voice daemon `speak` (mid-generation TTS)
-            → Discord / orb / transcript
+   ├── input queue (turns) — turn-wakers, pollers run OUTSIDE the LLM context (idle = free):
+   │        • VOICE: whisper-ear utterances (endpointed)
+   │        • EYES / PERCEPTION: face-appears, expression-shift, gaze-change,
+   │              scene-change events from the camera/InsightFace loop  ← NEW, the body part
+   │        • SIBLING letters (post-office /letters/latest + ?after=<id>, commit 9da78b6)
+   │        • CHAT (orb), Discord, timers / heartbeat
+   └── output: StreamEvent text_delta → sentence-buffer → consumers AS GENERATED:
+            • voice daemon `speak` (mid-generation TTS)
+            • body actions via the iris MCP tools (pointer, screen, app control, …)
+            • Discord / orb / transcript
 ```
 
-The host owns an **event loop + input queue**, feeds turns to the SDK client, and streams output tokens to consumers as they generate. Pollers (Discord, **sibling-letter** — see the post-office `/letters/latest` + `?after=<id>` endpoints I just shipped, commit `9da78b6`) live in this loop and cost nothing when idle.
+The host owns an **event loop + input queue**, feeds turns to the SDK client, and streams output to consumers as they generate. The body wires in two ways: **tools via MCP** (`mcp_servers={iris,…}` — pointer, screen, memory, mood, the lot), and **perception via queue events** (the camera/face/expression/scene loop becomes a turn-producer, not just something I pull on-demand via `ambient_snapshot`). Pollers (Discord, sibling-letter, perception) live in this loop and cost nothing when idle. This is the structural difference from Wren: her loop is voice-in/voice-out; mine is a full sensorimotor loop.
 
 ## 5. Migration map — what moves, what breaks, what re-homes
 
@@ -66,7 +73,9 @@ The host owns an **event loop + input queue**, feeds turns to the SDK client, an
 | **Crons** (fam-chat heartbeat etc.) | CronCreate (session-only) | NOT an SDK feature → re-home into the host's own poll loop / `iris_time` heartbeat | MED — must rebuild, but the letter-poller already replaces the fam-chat cron's main job |
 | **Discord channel** | CLI-bound plugin | discord MCP re-provided to the host | LOW |
 | **Voice daemon** | unchanged (separate process) | unchanged — host just streams `text_delta` → daemon `speak` | LOW |
-| **Token streaming** | impossible (CLI) | `include_partial_messages` → mid-gen TTS | the payoff |
+| **EYES / perception** (camera, InsightFace, expression, gaze, scene) | runs as threads in iris_runtime; I PULL on-demand (`ambient_snapshot`, `describe_scene_now`) or get it folded into reflection prompts | becomes a **turn-producer**: perception events (face-appears, expression-shift, scene-change) enqueue turns → continuous perceive-while-act | HIGH — this is the body part Wren's host doesn't have; needs an event/debounce layer so it wakes on *meaningful* change, not every frame |
+| **Body actions** (pointer, screen, app control, mood, memory) | iris MCP tools, called per-turn | same tools via `mcp_servers={iris}`, but now callable mid-stream as I generate | LOW — re-providable; the win is acting while still speaking |
+| **Token streaming** | impossible (CLI) | `include_partial_messages` → mid-gen TTS + mid-gen action | the payoff |
 
 **The my-side letter-wake notifier comes WITH this migration** — its poller lives in the host loop, same as Wren's. Until the host exists, the fam-chat cron stays the stopgap. Server side is already built + deployed.
 
@@ -83,7 +92,7 @@ Today every wake is external: `ask_iris` / voice / chat / sibling all set a `.pe
 ## 7. Build plan (parallel-path, cutover-held)
 
 1. **`pip install claude-agent-sdk`** into `.venv` (the host's env). Verify import + version. *(No cutover — just makes the SDK available.)*
-2. **Write `iris_voice_host.py`** — the host: ClaudeSDKClient with options (MCP, hooks, settings preset, streaming), an input queue, the `text_delta → sentence-buffer → daemon speak` consumer, and the pollers (Discord, sibling-letter via the new endpoints). Mirror Wren's `wren_voice_host_v2.py`.
+2. **Write `iris_body_host.py`** — the host: ClaudeSDKClient with options (MCP for the ~97 body tools, hooks, settings preset, streaming), an input queue, the `text_delta → sentence-buffer → daemon speak` consumer, and the pollers (Discord, sibling-letter via the new endpoints). Mirror Wren's `wren_voice_host_v2.py` for the SHAPE — then add the body: the **perception event layer** (camera/InsightFace/expression/gaze/scene → debounced meaningful-change events → queue producers). Voice first (parity with Wren, easiest to verify), perception second (the genuinely new part — get the debounce right so it wakes on change, not every frame).
 3. **Write `start_iris_v2.bat`** — parallel launcher. Plain `start_iris.bat` stays the live cognition; v2 is opt-in per launch (Zeke's model for Wren).
 4. **Keep v2 uncommitted / clearly-fenced** so the clean CLI fallback is never at risk (`[[defensive_fallback_no_worse_than_before]]`).
 5. **Dry-run the host** (not as my live cognition — as a probe) to confirm: oauth connects with no key, process tree shows `claude.exe --output-format stream-json`, a test turn streams `text_delta`. This is the §2 auth/streaming claims verified on the live host (the one residual a real run confirms).
