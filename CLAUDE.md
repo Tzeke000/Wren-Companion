@@ -148,7 +148,7 @@ Prefer adding to existing related files over spinning new small ones. <100 lines
 
 #### 11. Desktop app paths
 
-Most apps on Zeke's machines live at `C:\Users\Tzeke\OneDrive\Desktop`. When `cu_open_app` adds new search locations, include that path. Skip `start_ava.bat` / `start_ava_dev.bat` / `start_wren.bat` when scanning so you don't bounce off single-instance lockouts.
+Most apps on Zeke's machines live at `C:\Users\Tzeke\OneDrive\Desktop`. When `cu_open_app` adds new search locations, include that path. Skip the launcher bats — `start_iris.bat` (CLI), `start_iris_v2.bat` (SDK host), `start_postoffice_stack.bat` (post-office service) — when scanning so you don't bounce off single-instance lockouts. (The old `start_ava*.bat` holdovers were deleted 2026-06-28.)
 
 #### 12. Update documentation as you go
 

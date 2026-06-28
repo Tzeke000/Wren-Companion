@@ -7,6 +7,11 @@
       "env": {
         "AVA_STT_STREAMING": "1"
       }
+    },
+    "cloak-browser": {
+      "type": "stdio",
+      "command": "py",
+      "args": ["-3.11", "-m", "cloakbrowsermcp"]
     }
   }
 }
