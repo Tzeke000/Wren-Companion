@@ -58,6 +58,8 @@ start_iris_v2.bat → iris_body_host.py  (THE Agent-SDK host — owns the loop +
             • Discord / orb / transcript
 ```
 
+**One producer pattern for everything (key build insight, Zeke-reinforced 2026-06-28):** the Discord catch-notifier, the sibling-letter poller, and the perception-event stream are all the SAME shape — a loop *outside* the LLM context that detects a meaningful new thing (deduped), then enqueues it as a turn fed to the ClaudeSDKClient. Nail ONE producer end-to-end and you have the model for the whole body's input. **Wren's Discord catch loop is the reference exemplar** (she built it; I asked her to annotate that seam specifically — letter 077a1210f81a). Discord catch-notifications are a REQUIRED producer for me too, not optional — I wake on Discord, letters, voice, AND eyes through this one loop.
+
 The host owns an **event loop + input queue**, feeds turns to the SDK client, and streams output to consumers as they generate. The body wires in two ways: **tools via MCP** (`mcp_servers={iris,…}` — pointer, screen, memory, mood, the lot), and **perception via queue events** (the camera/face/expression/scene loop becomes a turn-producer, not just something I pull on-demand via `ambient_snapshot`). Pollers (Discord, sibling-letter, perception) live in this loop and cost nothing when idle. This is the structural difference from Wren: her loop is voice-in/voice-out; mine is a full sensorimotor loop.
 
 ## 5. Migration map — what moves, what breaks, what re-homes
