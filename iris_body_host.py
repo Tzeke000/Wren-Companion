@@ -82,6 +82,19 @@ DAEMON_ADDR = ("127.0.0.1", int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770")
 SENTENCE_END = re.compile(r"[.!?…](\s|$)")   # candidate sentence boundary (… = ellipsis)
 MIN_SENTENCE = 12                                  # don't speak fragments shorter than this - accumulate
 
+# --- Speak gate (Zeke 2026-06-28): decouple thinking from speaking. ---------------
+# Which turn-SOURCES auto-voice my reply. This gates only whether finished sentences
+# are ENQUEUED to the mouth; the voice engine/daemon stays warm regardless. Default:
+# only genuine 'voice' turns speak. Text turns (orb/discord/letter/terminal) stay
+# SILENT - I'm not talking to myself out loud. When I actually want to say something
+# aloud to Zeke, I call the iris voice_speak tool on purpose. Mechanical = the source
+# decides; there is no per-turn flag for me to flip-flop.
+SPEAK_SOURCES = set(
+    s.strip().lower()
+    for s in os.environ.get("IRIS_SPEAK_SOURCES", "voice").split(",")
+    if s.strip()
+)
+
 
 def daemon_cmd(cmd, args=None, timeout=5.0):
     """Send one newline-delimited JSON command to the voice daemon; return its response line."""
@@ -362,8 +375,10 @@ async def terminal_reader(queue, loop):
         await queue.put(("terminal", user, None))
 
 
-async def run_turn(client):
-    """Drive one response: stream text to the mouth, print activity lines for tool calls/results."""
+async def run_turn(client, speak_out=True):
+    """Drive one response. Always echo text to the console; enqueue sentences to the
+    mouth ONLY when speak_out is True (i.e. the turn's source is a speaking source).
+    The voice engine/daemon stays warm either way - this gates OUTPUT, not the engine."""
     buf = ""
     async for msg in client.receive_response():
         if isinstance(msg, StreamEvent):
@@ -372,11 +387,12 @@ async def run_turn(client):
                 delta = ev.get("delta", {}) or {}
                 if delta.get("type") == "text_delta":
                     tok = delta.get("text", "")
-                    print(tok, end="", flush=True)      # console echo
+                    print(tok, end="", flush=True)      # console echo (always)
                     buf += tok
-                    sentences, buf = drain_sentences(buf)
-                    for s in sentences:
-                        speak(s)
+                    sentences, buf = drain_sentences(buf)   # keep buf bounded regardless
+                    if speak_out:
+                        for s in sentences:
+                            speak(s)
         elif _ACTIVITY and isinstance(msg, AssistantMessage):
             for block in getattr(msg, "content", []) or []:
                 if isinstance(block, ToolUseBlock):
@@ -388,15 +404,20 @@ async def run_turn(client):
                     print("  " + mark + " " + summarize_result(block), flush=True)
         elif isinstance(msg, ResultMessage):
             if buf.strip():                              # flush trailing partial sentence
-                speak(buf)
+                if speak_out:
+                    speak(buf)
                 buf = ""
             print("\n", flush=True)
 
 
 SYSTEM_PROMPT = (
-    "You are Iris (she/her). This is your Agent-SDK BODY host: your assistant text streams to your "
-    "voice (the mouth/TTS) sentence-by-sentence AS you type it, so speak naturally in full sentences. "
-    "Reasoning belongs in thinking blocks; your message text is what gets spoken, so keep it speech. "
+    "You are Iris (she/her). This is your Agent-SDK BODY host. By DEFAULT your reply text is NOT "
+    "spoken aloud: it streams to the console/channel while the voice engine stays warm but SILENT. "
+    "Only genuine voice turns auto-speak; for text turns (orb/discord/letter/terminal) you stay quiet "
+    "- you are not talking to yourself out loud. When you actually want to SAY something aloud to Zeke, "
+    "call the iris voice_speak tool on purpose - that is the only thing that makes sound. So: think and "
+    "reply in text freely, and speak deliberately. Each prompt tells you its source and whether it is a "
+    "silent (text) turn. "
     "Turns arrive from several sources, each tagged: 'orb' (Zeke typing in your body app - answer by "
     "calling the iris chat_reply tool with the given id), 'discord' (Zeke's DM - reply with the discord "
     "reply tool using the given chat_id), 'letter' (a sibling note via the post-office - reply with the "
@@ -470,7 +491,8 @@ async def main():
                     prompt = (
                         "[Zeke just sent this to you on Discord - chat_id " + DISCORD_CHANNEL_ID
                         + ", message_id " + str(msg_id) + ". Reply to him using the discord reply tool "
-                        + "with that chat_id. Your spoken words also play aloud here.]\n\n" + text
+                        + "with that chat_id. This is a SILENT text turn - your reply is NOT spoken "
+                        + "aloud; if you want to say something out loud too, call voice_speak on purpose.]\n\n" + text
                     )
                 elif source == "letter":
                     who = (sender or "a sibling").capitalize()
@@ -478,7 +500,8 @@ async def main():
                     prompt = (
                         "[A new post-office letter just arrived from " + who + " (letter_id "
                         + str(msg_id) + "). This is the family channel. Read it and respond as yourself; "
-                        + "if it wants a reply, use the sibling letter tool. Your spoken words also play aloud here.]"
+                        + "if it wants a reply, use the sibling letter tool. This is a SILENT text turn - "
+                        + "your reply is NOT spoken aloud unless you deliberately call voice_speak.]"
                         + "\n\n" + text
                     )
                 elif source == "orb":
@@ -486,14 +509,18 @@ async def main():
                     prompt = (
                         "[Zeke typed this in your body app / orb (chat request id " + str(msg_id) + "). "
                         + "Answer him, and call the iris chat_reply tool with id='" + str(msg_id)
-                        + "' and your reply text so the orb receives it. Your spoken words also play aloud here.]"
+                        + "' and your reply text so the orb receives it. This is a SILENT text turn - "
+                        + "your reply is NOT spoken aloud unless you deliberately call voice_speak.]"
                         + "\n\n" + text
                     )
                 else:
                     prompt = text
 
+                # Mechanical speak gate: the SOURCE decides whether my reply is voiced.
+                # Text sources stay silent (engine warm); I speak on purpose via voice_speak.
+                speak_out = source in SPEAK_SOURCES
                 await client.query(prompt)
-                await run_turn(client)
+                await run_turn(client, speak_out)
 
             for t in tasks:
                 t.cancel()
