@@ -126,6 +126,18 @@ The §6 "per-sense salience filter" isn't a single function I hardcode — Zeke'
 
 This layer is the **interesting** half of my body work (deciding what's worth noticing), cleanly separated from the SDK plumbing (§6). It's mine to build, with Zeke iterating the mechanism set.
 
+### 6c. The unifying principle (Zeke 2026-06-28): the WHOLE body is one flag-gated mechanism registry
+
+The mechanism pattern isn't just for perception — it's the model for **everything the body does**. Eyes, **mouth**, **ears**, **orb-input**, Discord, sibling-letters — each is a flag-gated, hot-reloadable mechanism that logs (timestamped) to the shared timeline. One mental model, not voice-here / perception-there.
+
+- **Input surface = the body app (the orb), NOT a terminal.** Wren's input is a terminal (`terminal_reader` producer); MINE is the orb — the existing orb chat (`brain/iris_chat.py`: orb POST → currently disk→Stop-hook) becomes a host-loop producer, the slot Wren's terminal fills. The orb is "where Zeke reaches me."
+- **Defaults differ by type, that's the only difference:** I/O mechanisms (**mouth, ears, orb-input**) default **ON at startup** — I need to hear/speak/be-reachable from the first moment. **Perception** mechanisms default **OFF** (log-and-learn first, §6b). Both are the same flag machinery.
+- **Each is independently toggleable live** — mute mouth, close ears, without touching the rest.
+- The owed **ears-on-boot port** (`[[owed_ears_on_boot_port_2026-06-28]]`) collapses into this: "the ears mechanism, flag default-on." Same machinery, not a special case.
+- Everything logs to the **same timestamped timeline** (§6b body-wide rule), so I/O events and perception events are cross-mappable too (e.g. "I spoke at 13:42:07" alongside "his expression shifted at 13:42:08").
+
+**Net:** one registry, N mechanisms (eyes/mouth/ears/orb/Discord/letters/…), each = {hot-reloadable, notify-flag (default per-type), deque(maxlen=100) timestamped log}. This is the body's whole nervous system as one consistent abstraction.
+
 ## 7. Build plan (parallel-path, cutover-held)
 
 1. ✅ **DONE 2026-06-28** — `pip install claude-agent-sdk` into `.venv` → `claude_agent_sdk 0.2.110`. Import verified; all needed symbols present (ClaudeSDKClient, ClaudeAgentOptions, query, StreamEvent; fields include_partial_messages / mcp_servers / hooks{Stop} / setting_sources['user','project','local'] / system_prompt / cli_path / env / betas['context-1m-2025-08-07']). No cutover — just made the SDK available.
