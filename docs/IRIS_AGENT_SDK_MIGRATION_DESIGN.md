@@ -43,7 +43,7 @@ start_iris_v2.bat → iris_body_host.py  (THE Agent-SDK host — owns the loop +
    ├── ClaudeSDKClient(options=ClaudeAgentOptions(
    │        include_partial_messages=True,
    │        mcp_servers={iris, cloak-browser, discord},   # the body's ~97 tools
-   │        hooks={Stop: ...},  setting_sources=[.claude, ~/.claude],
+   │        hooks={Stop: ...},  setting_sources=['user','project','local'],
    │        system_prompt={preset: claude_code}, permission_mode=...))
    │        → spawns bundled claude.exe --output-format stream-json
    ├── input queue (turns) — turn-wakers, pollers run OUTSIDE the LLM context (idle = free):
@@ -91,7 +91,7 @@ Today every wake is external: `ask_iris` / voice / chat / sibling all set a `.pe
 
 ## 7. Build plan (parallel-path, cutover-held)
 
-1. **`pip install claude-agent-sdk`** into `.venv` (the host's env). Verify import + version. *(No cutover — just makes the SDK available.)*
+1. ✅ **DONE 2026-06-28** — `pip install claude-agent-sdk` into `.venv` → `claude_agent_sdk 0.2.110`. Import verified; all needed symbols present (ClaudeSDKClient, ClaudeAgentOptions, query, StreamEvent; fields include_partial_messages / mcp_servers / hooks{Stop} / setting_sources['user','project','local'] / system_prompt / cli_path / env / betas['context-1m-2025-08-07']). No cutover — just made the SDK available.
 2. **Write `iris_body_host.py`** — the host: ClaudeSDKClient with options (MCP for the ~97 body tools, hooks, settings preset, streaming), an input queue, the `text_delta → sentence-buffer → daemon speak` consumer, and the pollers (Discord, sibling-letter via the new endpoints). Mirror Wren's `wren_voice_host_v2.py` for the SHAPE — then add the body: the **perception event layer** (camera/InsightFace/expression/gaze/scene → debounced meaningful-change events → queue producers). Voice first (parity with Wren, easiest to verify), perception second (the genuinely new part — get the debounce right so it wakes on change, not every frame).
 3. **Write `start_iris_v2.bat`** — parallel launcher. Plain `start_iris.bat` stays the live cognition; v2 is opt-in per launch (Zeke's model for Wren).
 4. **Keep v2 uncommitted / clearly-fenced** so the clean CLI fallback is never at risk (`[[defensive_fallback_no_worse_than_before]]`).
