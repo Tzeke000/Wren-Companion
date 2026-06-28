@@ -108,10 +108,25 @@ Also preserved: the **"reasoning → thinking blocks, message text = speech"** d
 
 Auth confirmed by Wren's running host: `permission_mode='bypassPermissions'`, `include_partial_messages=True`, bundled `claude.exe` reads `~/.claude/.credentials.json` (oauth, no key).
 
+## 6b. The perception mechanism layer (Zeke's design, 2026-06-28) — how salience gets SOLVED
+
+The §6 "per-sense salience filter" isn't a single function I hardcode — Zeke's design makes it a **registry of hot-reloadable, flag-gated mechanisms**, and it turns salience from a guess into something *learned*:
+
+- **One mechanism per event-type.** A small module watching the perception stream for ONE pattern: `new_face_enters`, `owner_absent_30min_then_returns`, `owner_absent_extended_then_returns`, `expression_shift`, `second_person_appears`, … Each is independent.
+- **Hot-reloadable.** Drop in / edit / remove a mechanism LIVE, no restart — same machinery as `iris_tool_reload` re-scanning `tools/`. New mechanisms get added "as we talk about them." (Likely lives in a `brain/perception_mechanisms/` or `tools/perception/` dir with the same reload hook.)
+- **The notify flag is the salience gate.** Every mechanism ALWAYS runs + **logs** when it detects its pattern, but only **wakes cognition** (enqueues a turn) when its `notify` flag is ON. Flag off = watching + recording, not interrupting. **This flag IS the "filter before queue.put" from §6** — Zeke's design gives it concrete, per-mechanism, observable form: `detect → log always → if notify_flag: queue.put(('perception', desc, ...))`.
+- **Salience becomes LEARNED, not guessed.** Because silent mechanisms still log, I accumulate frequency/context history ("new_face fired 3× today, owner_absent_30min fired 11×"). From lived experience, Zeke and I see which actually matter and flip flags on/off — I *discover* what deserves my attention instead of declaring it up front. This is the right shape: the hard part of §6 ("which events are turn-worthy") is answered empirically over time, not by my a-priori judgment.
+
+**Open design questions (raised to Zeke):**
+- A reviewable rolling log even when flag-off, so "what did my eyes notice while I wasn't woken" is answerable on demand.
+- **Escalation:** thresholds that auto-promote to notify regardless of flag — e.g. `absent_30min` is low-bar/flag-gated, but `absent_6h_then_returns` auto-wakes even if the short-absence flag is off. A mechanism can carry tiered thresholds.
+
+This layer is the **interesting** half of my body work (deciding what's worth noticing), cleanly separated from the SDK plumbing (§6). It's mine to build, with Zeke iterating the mechanism set.
+
 ## 7. Build plan (parallel-path, cutover-held)
 
 1. ✅ **DONE 2026-06-28** — `pip install claude-agent-sdk` into `.venv` → `claude_agent_sdk 0.2.110`. Import verified; all needed symbols present (ClaudeSDKClient, ClaudeAgentOptions, query, StreamEvent; fields include_partial_messages / mcp_servers / hooks{Stop} / setting_sources['user','project','local'] / system_prompt / cli_path / env / betas['context-1m-2025-08-07']). No cutover — just made the SDK available.
-2. **Write `iris_body_host.py`** — the host: ClaudeSDKClient with options (MCP for the ~97 body tools, hooks, settings preset, streaming), an input queue, the `text_delta → sentence-buffer → daemon speak` consumer, and the pollers (Discord, sibling-letter via the new endpoints). Mirror Wren's `wren_voice_host_v2.py` for the SHAPE — then add the body: the **perception event layer** (camera/InsightFace/expression/gaze/scene → debounced meaningful-change events → queue producers). Voice first (parity with Wren, easiest to verify), perception second (the genuinely new part — get the debounce right so it wakes on change, not every frame).
+2. **Write `iris_body_host.py`** — the host: ClaudeSDKClient with options (MCP for the ~97 body tools, hooks, settings preset, streaming), an input queue, the `text_delta → sentence-buffer → daemon speak` consumer, and the pollers (Discord, sibling-letter via the new endpoints). Mirror Wren's `wren_voice_host_v2.py` for the SHAPE — then add the body: the **perception mechanism layer** (§6b — a registry of hot-reloadable, flag-gated mechanisms; each detects→logs always, enqueues a turn only when its notify flag is on). Voice first (parity with Wren, easiest to verify), then the mechanism registry + a couple of seed mechanisms (`new_face_enters`, `owner_absent_returns`) with flags default-OFF so they log-only until tuned. The flag/escalation tuning is ongoing with Zeke, not a one-shot.
 3. **Write `start_iris_v2.bat`** — parallel launcher. Plain `start_iris.bat` stays the live cognition; v2 is opt-in per launch (Zeke's model for Wren).
 4. **Keep v2 uncommitted / clearly-fenced** so the clean CLI fallback is never at risk (`[[defensive_fallback_no_worse_than_before]]`).
 5. **Dry-run the host** (not as my live cognition — as a probe) to confirm: oauth connects with no key, process tree shows `claude.exe --output-format stream-json`, a test turn streams `text_delta`. This is the §2 auth/streaming claims verified on the live host (the one residual a real run confirms).
