@@ -4166,12 +4166,19 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
             time.sleep(interval)
         except Exception as e:
             print(f"[iris_video] loop error: {e!r}", file=sys.stderr, flush=True)
-            time.sleep(2.0)
+            # Release and set cap=None — let the top-of-loop recover. Blindly reopening here
+            # (a) re-seized the camera even while the body is PAUSED (violating the yield
+            # contract — Zeke/another app was told it had the device), and (b) skipped the
+            # _open_cam() size-config + isOpened() gate + backoff, so a dead/busy device
+            # degraded into a tight failed-read spin instead of the proper 1s-backoff revalidate.
+            # (2026-06-29 sweep fix.)
             try:
-                cap.release()
+                if cap is not None:
+                    cap.release()
             except Exception:
                 pass
-            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            cap = None
+            time.sleep(2.0)
 
 
 def _eager_init_engines() -> None:

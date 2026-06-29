@@ -723,8 +723,14 @@ def cmd_speak(ctx, args: dict) -> str:
     if not text:
         return "[voice_speak] nothing to say"
     _cancel_stall_bridge(ctx)   # a real reply (or a warned pause) suppresses the stall bridge
-    ctx.speaking = True
+    # Enqueue BEFORE flipping the flag. The playback worker resets ctx.speaking=False when
+    # it observes an empty queue; if we set speaking=True first and the worker's empty-check
+    # lands in the gap before put(), it resets the flag to False while this reply is about to
+    # play — and a concurrent listen's drain-gate (`while ctx.speaking`) then opens the mic
+    # onto my own voice (self-listen, real on speakers-no-AEC). put()-first means the worker
+    # always sees the queued item, so it never spuriously clears the flag. (2026-06-29 race fix.)
     ctx.play_queue.put(text)
+    ctx.speaking = True
     if args.get("wait"):
         try:
             ctx.play_queue.join()
@@ -754,8 +760,8 @@ def _fire_filler(ctx) -> None:
     try:
         f = CALL_FILLERS[_FILLER_I[0] % len(CALL_FILLERS)]
         _FILLER_I[0] += 1
+        ctx.play_queue.put(f)        # put before flag — see cmd_speak (self-listen race)
         ctx.speaking = True
-        ctx.play_queue.put(f)
     except Exception as e:
         print(f"[voice_listen] filler enqueue failed (non-fatal): {e!r}", file=sys.stderr)
 
@@ -802,8 +808,8 @@ def _arm_stall_bridge(ctx) -> None:
                 # Re-check the token right before enqueue to shrink the cmd_speak race.
                 if getattr(ctx, "_stall_turn", -1) != turn:
                     return
+                ctx.play_queue.put(phrase)   # put before flag — see cmd_speak (self-listen race)
                 ctx.speaking = True
-                ctx.play_queue.put(phrase)
                 print(f"[stall-bridge] fired turn={turn}: {phrase!r}", file=sys.stderr)
             except Exception as e:
                 print(f"[stall-bridge] fire failed (non-fatal): {e!r}", file=sys.stderr)

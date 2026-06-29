@@ -609,8 +609,16 @@ def save_mood(mood: dict):
         p.parent.mkdir(parents=True, exist_ok=True)
         mood = dict(mood)
         mood["_saved_at"] = now_iso()
-        with open(p, "w", encoding="utf-8") as f:
+        # Atomic write: open(p,"w") truncates the file BEFORE json.dump repopulates it,
+        # so a concurrent reader (orb snapshot / mood loop / iris_memory.add, all reading
+        # every few seconds) hits the empty window → `Expecting value: line 1 column 1`
+        # (observed). A crash mid-dump would leave it permanently truncated → mood state
+        # silently lost. tmp+replace makes readers always see a complete old-or-new file.
+        # (Matches iris_memory/iris_time/iris_chat. 2026-06-29 sweep fix.)
+        tmp = p.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(mood, f, indent=2, ensure_ascii=False)
+        tmp.replace(p)
     except Exception as e:
         print(f"[mood_core] save error: {e}")
 
@@ -634,8 +642,12 @@ def save_mood_raw(mood: dict):
         p.parent.mkdir(parents=True, exist_ok=True)
         mood = dict(mood)
         mood["_saved_at"] = now_iso()
-        with open(p, "w", encoding="utf-8") as f:
+        # Atomic write (see save_mood) — truncating open() caused the observed torn-read
+        # `Expecting value: line 1 column 1`. tmp+replace closes the window.
+        tmp = p.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(mood, f, indent=2, ensure_ascii=False)
+        tmp.replace(p)
     except Exception as e:
         print(f"[mood_core] raw save error: {e}")
 
