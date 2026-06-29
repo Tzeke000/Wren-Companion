@@ -140,7 +140,31 @@ EARS_ON = os.environ.get("IRIS_EARS", "on").strip().lower() not in ("0", "off", 
 # so raise it. Smart-turn endpointing still decides when he's actually DONE within these bounds -
 # these are only the outer backstops, not a turn timer.
 VOICE_LISTEN_TIMEOUT_S = float(os.environ.get("IRIS_VOICE_LISTEN_TIMEOUT_S", "300"))
-VOICE_MAX_UTTERANCE_S = float(os.environ.get("IRIS_VOICE_MAX_UTTERANCE_S", "60"))
+VOICE_MAX_UTTERANCE_S = float(os.environ.get("IRIS_VOICE_MAX_UTTERANCE_S", "300"))
+
+# --- Perception (the EYES, built 2026-06-29) ---------------------------------------
+# iris_runtime's always-on camera loop fires VISUAL signals (face_appeared / face_lost /
+# expression_changed / ...) into its in-process SignalBus. The body host is a SEPARATE
+# process and can't read that bus directly, so it polls iris_runtime's orb_http HTTP
+# surface (:5876 /api/v1/signals?after=<ts>) - the same id-delta shape as the letters
+# poller - and enqueues salient visual events as ('perception', desc, ts) turns. The
+# perception turn is SILENT (not in SPEAK_SOURCES): I get woken to NOTICE the change and
+# decide whether to act/greet, rather than narrating every frame aloud. Salience is a
+# gate, not a firehose (the perception research): by default we wake only on presence
+# changes (a face arriving/leaving), debounced; everything else logs but doesn't wake.
+OPERATOR_URL = os.environ.get("IRIS_OPERATOR_URL", "http://127.0.0.1:5876").rstrip("/")
+PERCEPTION_ON = os.environ.get("IRIS_PERCEPTION", "on").strip().lower() not in (
+    "0", "off", "false", "no", "")
+PERCEPTION_POLL_INTERVAL = float(os.environ.get("IRIS_PERCEPTION_POLL_S", "1.5"))
+# Which signal types are turn-worthy (wake me). Presence changes only, by default.
+PERCEPTION_WAKE_SIGNALS = set(
+    s.strip() for s in os.environ.get(
+        "IRIS_PERCEPTION_WAKE_SIGNALS", "face_appeared,face_lost").split(",")
+    if s.strip()
+)
+# Per-type debounce: ignore a repeat of the same signal within this many seconds, so a
+# face flickering in/out at the detection edge can't spam-wake cognition.
+PERCEPTION_DEBOUNCE_S = float(os.environ.get("IRIS_PERCEPTION_DEBOUNCE_S", "20"))
 
 
 def _is_speak_tool(block):
@@ -518,6 +542,84 @@ async def voice_reader(queue, loop, mic_gate):
             await queue.put(("voice", text, None))
 
 
+# ----------------------------------------------------------------- Perception inbound (the EYES)
+def signals_get(after, types):
+    """GET iris_runtime's recent signal-bus events (ts > after). Stdlib-only, blocking;
+    call it in an executor. Returns the parsed dict, or {} on any error (fail-soft)."""
+    url = OPERATOR_URL + "/api/v1/signals?after=" + urllib.parse.quote(str(after))
+    if types:
+        url += "&types=" + urllib.parse.quote(types)
+    req = urllib.request.Request(url, headers={"User-Agent": "IrisHost/2.0"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _describe_perception(sig):
+    """Turn a raw vision signal into a short, plain-language nudge for the cognition turn."""
+    stype = sig.get("type") or ""
+    data = sig.get("data") or {}
+    # NB: face_appeared data carries person_id; face_lost carries prior_person_id;
+    # face_changed carries from/to (see iris_runtime _iris_video_capture_loop).
+    who = str(data.get("person_id") or data.get("prior_person_id")
+              or data.get("to") or data.get("name") or "").strip()
+
+    def _named(w):
+        return bool(w) and w.lower() not in ("unknown", "none", "")
+
+    if stype == "face_appeared":
+        if _named(who):
+            return "A face just appeared in view - recognized as " + who + "."
+        return "A face just appeared in view (not yet recognized)."
+    if stype == "face_lost":
+        if _named(who):
+            return who + " is no longer in view."
+        return "The person who was in view has left."
+    if stype == "face_changed":
+        frm = str(data.get("from") or "").strip()
+        to = str(data.get("to") or "").strip()
+        return ("The person in view changed"
+                + ((" from " + frm) if _named(frm) else "")
+                + ((" to " + to) if _named(to) else "") + ".")
+    if stype == "expression_changed":
+        expr = str(data.get("expression") or "").strip()
+        return "Expression changed" + ((" to " + expr) if expr else "") + "."
+    if stype == "attention_changed":
+        return "Attention/gaze state changed: " + str(data.get("state") or data)
+    # Generic fallback so an unmapped-but-wanted signal still reads sensibly.
+    return stype.replace("_", " ") + ": " + (str(data) if data else "(no detail)")
+
+
+async def perception_reader(queue, loop, start_ts):
+    """Poll iris_runtime's /api/v1/signals for salient VISUAL events and enqueue them as
+    ('perception', desc, ts) turns. id-delta on ts (no history replay before start_ts);
+    per-type debounce so an edge-flickering face can't spam cognition. Fail-soft: a down
+    operator endpoint just means no eyes this tick (voice/orb/letters keep working)."""
+    cursor = float(start_ts)
+    last_fired = {}            # signal_type -> ts we last WOKE on
+    types_param = ",".join(sorted(PERCEPTION_WAKE_SIGNALS))
+    print("[host] perception eyes: ON - polling iris_runtime signals every "
+          + str(PERCEPTION_POLL_INTERVAL) + "s (wake on: " + (types_param or "<none>") + ").")
+    while True:
+        await asyncio.sleep(PERCEPTION_POLL_INTERVAL)
+        try:
+            resp = await loop.run_in_executor(None, lambda c=cursor: signals_get(c, types_param))
+        except Exception as e:
+            print("\n[host] perception poll failed (non-fatal): " + repr(e), file=sys.stderr)
+            continue
+        sigs = resp.get("signals") or []
+        for sig in sorted(sigs, key=lambda x: float(x.get("ts") or 0.0)):
+            ts = float(sig.get("ts") or 0.0)
+            if ts > cursor:
+                cursor = ts            # advance past every signal we've seen, fired or not
+            stype = sig.get("type") or ""
+            if stype not in PERCEPTION_WAKE_SIGNALS:
+                continue
+            if ts <= last_fired.get(stype, 0.0) + PERCEPTION_DEBOUNCE_S:
+                continue               # debounce: too soon after the last wake on this type
+            last_fired[stype] = ts
+            await queue.put(("perception", _describe_perception(sig), ts))
+
+
 async def run_turn(client, speak_out=True, source=None):
     """Drive one response. Always echo text to the console; enqueue sentences to the
     mouth ONLY when speak_out is True (i.e. the turn's source is a speaking source).
@@ -701,6 +803,15 @@ async def main():
             else:
                 print("[host] voice ears: OFF - IRIS_EARS disabled.", file=sys.stderr)
 
+            # Eyes: poll iris_runtime's signal bus (over orb_http) for salient visual events.
+            # Gated on PERCEPTION_ON; fail-soft if the operator endpoint isn't up yet (the
+            # self-heal attach may still be settling - the poller just retries each tick).
+            if PERCEPTION_ON and PERCEPTION_WAKE_SIGNALS:
+                tasks.append(asyncio.create_task(perception_reader(queue, loop, start_ts)))
+            else:
+                print("[host] perception eyes: OFF - IRIS_PERCEPTION disabled or no wake signals.",
+                      file=sys.stderr)
+
             token = load_bot_token()
             if token:
                 try:
@@ -775,6 +886,17 @@ async def main():
                         + "CONVERSATIONALLY - short, like real speech, not a written report. Lead with the "
                         + "answer; the latency tax is real, so don't think out loud before you speak.]"
                         + "\n\n" + text
+                    )
+                elif source == "perception":
+                    print("\n[perception <- eyes] " + text, flush=True)
+                    prompt = (
+                        "[Your EYES noticed something - a salient visual change just happened (this is the "
+                        + "camera/face-recognition layer waking you, not Zeke typing). NOTICE it and decide "
+                        + "whether it's worth acting on. Often the right move is nothing, or a quiet internal "
+                        + "note; if it genuinely warrants saying something to Zeke out loud (e.g. he just "
+                        + "walked up), call voice_speak on purpose - this is otherwise a SILENT turn and your "
+                        + "text is NOT spoken. Don't narrate every flicker; be the watchful, slow-to-react "
+                        + "version of yourself.]\n\n" + text
                     )
                 else:
                     prompt = text

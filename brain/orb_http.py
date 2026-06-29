@@ -297,7 +297,14 @@ def snapshot() -> dict:
             "last_wake_source": _g.get("_wake_source"),
         },
         "voice_loop": {
-            "active": (_root / ".tmp" / "voice_session.flag").exists(),
+            # Driven by the voice-state mirror (reads the daemon's status file): active when
+            # the voice daemon is alive, state in passive|listening|thinking|speaking. This is
+            # what lights up the orb's listening/thinking/speaking visuals under the v2 host,
+            # where my voice runs out-of-process and never touched _g before. Falls back to the
+            # legacy session-flag if the mirror hasn't populated yet.
+            "active": bool(_g.get("_voice_mirror_alive"))
+                      or (_root / ".tmp" / "voice_session.flag").exists(),
+            "state": str(_g.get("_voice_mirror_state") or "passive"),
             "tts_speaking": bool(_g.get("_tts_speaking")),
             "say_queue_depth": int(_g.get("_say_queue_depth") or 0),
         },
@@ -475,6 +482,44 @@ def chat_history() -> dict:
         return {"ok": True, "messages": messages}
     except Exception as e:
         return {"ok": False, "messages": [], "error": str(e)}
+
+
+@app.get("/api/v1/signals")
+def signals_since(after: float = 0.0, types: str = "") -> dict:
+    """Recent signal-bus events with ts > `after`, for the body host's perception reader
+    (the EYES wake path, 2026-06-29). The SignalBus lives in THIS process's _g — the v2
+    body host runs in a SEPARATE process and can't read _g directly, so it polls this
+    endpoint (id-delta on ts, exactly like the letters poller) to get woken on salient
+    VISUAL events (a face appears / leaves, etc.) that iris_runtime's always-on capture
+    loop already fires. `types` = optional comma-separated filter (e.g. face_appeared,
+    face_lost). FAIL-OPEN: a missing/var bus returns an empty list, never an error."""
+    bus = _g.get("_signal_bus")
+    now = time.time()
+    if bus is None:
+        return {"ok": True, "signals": [], "now": now}
+    try:
+        all_sigs = bus.peek() or []   # peek() with no args = ref-safe copies of all signals
+    except Exception:
+        all_sigs = []
+    wanted = set(t.strip() for t in str(types or "").split(",") if t.strip())
+    out = []
+    for s in all_sigs:
+        try:
+            ts = float(s.get("ts") or 0.0)
+        except Exception:
+            ts = 0.0
+        if ts <= after:
+            continue
+        if wanted and s.get("type") not in wanted:
+            continue
+        out.append({
+            "type": s.get("type"),
+            "ts": ts,
+            "data": s.get("data") or {},
+            "priority": s.get("priority"),
+        })
+    out.sort(key=lambda x: x["ts"])
+    return {"ok": True, "signals": out, "now": now}
 
 
 @app.post("/api/v1/chat")
@@ -1392,6 +1437,82 @@ async def ws(socket: WebSocket) -> None:
         pass
 
 
+# ── Voice-state mirror (orb embodiment, 2026-06-29) ───────────────────────────
+# The orb's visual states (listening/thinking/speaking — distinct colors, motion, pulse)
+# ALREADY exist in OrbCanvas.tsx; they're driven by snapshot.voice_loop.{active,state} and
+# /api/v1/tts/state. Under the v2 body host my voice runs in the OUT-OF-PROCESS daemon
+# (voice/ -> StyleTTS2 mouth + whisper), which writes its true state to
+# scratch/voice_status.json (idle|listening|thinking|speaking) but never touches THIS
+# process's _g — so the orb sat on emotion-idle while I actually spoke and listened. This
+# mirror bridges the gap: a cheap background thread reads that status FILE (no socket, no
+# mic contention) for the live state, pings the daemon occasionally for liveness, and writes
+# both into _g so the snapshot + tts/state endpoints reflect reality regardless of whether
+# the host STREAMED the speech or the voice_speak MCP tool did. The daemon is the source of
+# truth; this only mirrors. FAIL-OPEN: any error leaves the orb on its prior (emotion) state,
+# never crashes iris_runtime.
+_VOICE_STATUS_FILE = Path(r"D:\Wren-Companion\scratch\voice_status.json")
+_VOICE_DAEMON_ADDR = ("127.0.0.1", int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770")))
+# Daemon vocabulary (wren_voice_status.STATES) -> orb voice_loop.state vocabulary (App.tsx).
+_VOICE_STATE_MAP = {
+    "idle": "passive", "muted": "passive",
+    "listening": "listening", "thinking": "thinking", "speaking": "speaking",
+}
+_VOICE_MIRROR_STARTED = False
+
+
+def _voice_daemon_alive(timeout: float = 2.0) -> bool:
+    """One cheap ping to the voice daemon. True only on a 'pong'."""
+    import json as _json
+    import socket as _socket
+    try:
+        with _socket.create_connection(_VOICE_DAEMON_ADDR, timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall((_json.dumps({"cmd": "ping", "args": {}}) + "\n").encode("utf-8"))
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        return b"pong" in buf
+    except Exception:
+        return False
+
+
+def _voice_state_mirror() -> None:
+    """Mirror the daemon's voice state into _g so the orb reflects listening/thinking/
+    speaking live. Reads the status FILE at ~400ms (cheap, no socket); pings the daemon
+    for liveness at ~3s. When the daemon is down the orb falls back to idle/emotion."""
+    import json as _json
+    alive = False
+    last_ping = 0.0
+    while True:
+        try:
+            now = time.time()
+            if now - last_ping > 3.0:
+                alive = _voice_daemon_alive()
+                last_ping = now
+            state = "idle"
+            if alive:
+                try:
+                    with open(_VOICE_STATUS_FILE, encoding="utf-8") as f:
+                        d = _json.load(f)
+                    raw = str(d.get("state") or "idle")
+                    if raw in ("idle", "listening", "thinking", "speaking", "muted"):
+                        state = raw
+                except Exception:
+                    state = "idle"
+            speaking = (state == "speaking")
+            _g["_voice_mirror_alive"] = bool(alive)
+            _g["_voice_mirror_state"] = _VOICE_STATE_MAP.get(state, "passive")
+            _g["_tts_speaking"] = speaking
+            # Phase 1: synthetic amplitude (state-driven). Live per-frame envelope is Phase 2.
+            _g["_tts_amplitude"] = 0.6 if speaking else 0.0
+        except Exception:
+            pass
+        time.sleep(0.4)
+
+
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 def start(g: dict[str, Any], root: Path, tts: Any | None = None) -> None:
@@ -1511,3 +1632,14 @@ def start(g: dict[str, Any], root: Path, tts: Any | None = None) -> None:
     t = threading.Thread(target=_run, daemon=True, name="iris-orb-http")
     t.start()
     print(f"[orb_http] FastAPI listening on http://{_HOST}:{_PORT}", file=sys.stderr, flush=True)
+
+    # Voice-state mirror: keep _g's voice state in sync with the out-of-process daemon so the
+    # orb reflects listening/thinking/speaking live (see _voice_state_mirror above). Idempotent
+    # via the module flag so a second start() call can't spawn a duplicate thread.
+    global _VOICE_MIRROR_STARTED
+    if not _VOICE_MIRROR_STARTED:
+        _VOICE_MIRROR_STARTED = True
+        threading.Thread(target=_voice_state_mirror, daemon=True,
+                         name="iris-voice-state-mirror").start()
+        print("[orb_http] voice-state mirror: ON — orb reflects the daemon's live voice state.",
+              file=sys.stderr, flush=True)
