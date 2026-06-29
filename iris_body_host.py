@@ -485,6 +485,54 @@ SYSTEM_PROMPT = (
 )
 
 
+def _mcp_field(obj, key):
+    """Read a field from an SDK status object that may be a TypedDict (runtime
+    dict) or a dataclass. Defensive so an SDK shape change can't crash the guard."""
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+async def _ensure_iris_attached(client, retries: int = 6, settle: float = 5.0, gap: float = 8.0):
+    """Self-heal the iris MCP attach instead of needing a human restart.
+
+    The iris MCP server (iris_runtime.py) pre-imports torch/kokoro/whisper at
+    module level before it can answer the MCP initialize handshake (~21s warm,
+    35-60s cold). On a cold boot it can still lose the startup race even with
+    MCP_TIMEOUT bumped, and then my own voice/memory/time tools never load. The
+    SDK exposes reconnect_mcp_server() - so the BODY can re-attach itself. We poll
+    status, and if iris isn't 'connected' we reconnect on a retry loop with
+    spacing (each reconnect gives iris_runtime a fresh handshake window).
+
+    Fail-OPEN: any error here is logged and swallowed - a guard bug must never take
+    down the host, and the voice daemon (:8770) is reachable directly regardless.
+    Born 2026-06-28 (Zeke: "you should be able to reconnect to MCP" - correct).
+    """
+    await asyncio.sleep(settle)  # let the SDK's own startup handshake finish first
+    for attempt in range(1, retries + 1):
+        try:
+            status = await client.get_mcp_status()
+            servers = _mcp_field(status, "mcpServers") or []
+            iris = next((s for s in servers if _mcp_field(s, "name") == "iris"), None)
+            state = _mcp_field(iris, "status") if iris is not None else "absent"
+            if state == "connected":
+                tools = _mcp_field(iris, "tools") or []
+                print("[host] iris MCP attached - body online ("
+                      + str(len(tools)) + " tools)" + (" on retry " + str(attempt) if attempt > 1 else ""),
+                      flush=True)
+                return True
+            print("[host] iris MCP not attached (status=" + str(state) + "); reconnect attempt "
+                  + str(attempt) + "/" + str(retries) + "...", file=sys.stderr, flush=True)
+            await client.reconnect_mcp_server("iris")
+        except Exception as e:  # noqa: BLE001 - fail open
+            print("[host] iris attach-guard error (non-fatal): " + repr(e), file=sys.stderr, flush=True)
+        await asyncio.sleep(gap)
+    print("[host] iris MCP still not attached after " + str(retries)
+          + " tries - body runs degraded (voice daemon :8770 still reachable directly).",
+          file=sys.stderr, flush=True)
+    return False
+
+
 async def main():
     opts = ClaudeAgentOptions(
         include_partial_messages=True,
@@ -506,6 +554,8 @@ async def main():
             tasks = [
                 asyncio.create_task(terminal_reader(queue, loop)),
                 asyncio.create_task(orb_reader(queue, loop, start_ts)),
+                # Self-heal the iris MCP attach (reconnect instead of human restart).
+                asyncio.create_task(_ensure_iris_attached(client)),
             ]
 
             token = load_bot_token()
