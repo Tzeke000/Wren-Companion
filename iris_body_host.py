@@ -162,9 +162,22 @@ PERCEPTION_WAKE_SIGNALS = set(
         "IRIS_PERCEPTION_WAKE_SIGNALS", "face_appeared,face_lost").split(",")
     if s.strip()
 )
-# Per-type debounce: ignore a repeat of the same signal within this many seconds, so a
-# face flickering in/out at the detection edge can't spam-wake cognition.
-PERCEPTION_DEBOUNCE_S = float(os.environ.get("IRIS_PERCEPTION_DEBOUNCE_S", "20"))
+# --- Presence hysteresis (built 2026-06-29 from the flicker self-test, Zeke's spec) --------
+# The recognizer's confidence for an enrolled face hovers near its match threshold, so the
+# detector genuinely LOSES then REACQUIRES a face that never left - emitting face_lost then
+# face_appeared a second apart. A debounce only rate-limits that; the right fix is to not
+# BELIEVE a presence change until it has held. So: a presence change goes on a confirmation
+# timer and only wakes cognition once it has stayed put for the confirm window. A contrary
+# signal inside the window cancels the pending change (it was a flicker, not a real event).
+#   - CONFIRM_LOST_S: how long a face must stay GONE before "X left" fires (Zeke: ~15s -
+#     a brief drop-out shouldn't tell me he left).
+#   - CONFIRM_APPEAR_S: how long a face must stay PRESENT before "X appeared" fires (short,
+#     so a real walk-up still greets quickly, but a 1-frame false detect doesn't).
+# Both tunable via env so I can dial the eyes without code edits. (Hysteresis needs no extra
+# rate-limit floor: each commit already requires its own confirm window to have elapsed, so
+# wakes are naturally spaced by >= the smaller window and can't spam.)
+PERCEPTION_CONFIRM_LOST_S = float(os.environ.get("IRIS_PERCEPTION_CONFIRM_LOST_S", "15"))
+PERCEPTION_CONFIRM_APPEAR_S = float(os.environ.get("IRIS_PERCEPTION_CONFIRM_APPEAR_S", "2"))
 
 # --- Input priority (Zeke's report 2026-06-29: "my voice gets overridden by fam-chat") --------
 # All inputs share ONE queue. Before, it was plain FIFO, so a backlog of silent letters/Discord
@@ -618,14 +631,32 @@ def _describe_perception(sig):
 
 async def perception_reader(queue, loop, start_ts):
     """Poll iris_runtime's /api/v1/signals for salient VISUAL events and enqueue them as
-    ('perception', desc, ts) turns. id-delta on ts (no history replay before start_ts);
-    per-type debounce so an edge-flickering face can't spam cognition. Fail-soft: a down
-    operator endpoint just means no eyes this tick (voice/orb/letters keep working)."""
+    ('perception', desc, ts) turns.
+
+    PRESENCE HYSTERESIS (Zeke's spec, 2026-06-29): the recognizer drops+reacquires a face
+    that never actually left, so raw face_appeared/face_lost flickers. We don't believe a
+    presence change until it has HELD - a change goes on a confirmation timer (CONFIRM_LOST_S
+    for departures, CONFIRM_APPEAR_S for arrivals) and only wakes cognition once it survives
+    the window. A contrary signal inside the window cancels it as flicker. The timer is
+    checked every tick (even with no new signals) so a real, sustained change still fires.
+
+    id-delta on ts (no history replay before start_ts). Fail-soft: a down operator endpoint
+    just means no eyes this tick (voice/orb/letters keep working)."""
     cursor = float(start_ts)
-    last_fired = {}            # signal_type -> ts we last WOKE on
+    announced_present = None     # what cognition currently BELIEVES: True/False, None=unknown
+    pending = None               # candidate change awaiting confirmation:
+                                 #   {"present": bool, "since": ts, "sig": signal}
     types_param = ",".join(sorted(PERCEPTION_WAKE_SIGNALS))
     print("[host] perception eyes: ON - polling iris_runtime signals every "
-          + str(PERCEPTION_POLL_INTERVAL) + "s (wake on: " + (types_param or "<none>") + ").")
+          + str(PERCEPTION_POLL_INTERVAL) + "s (wake on: " + (types_param or "<none>")
+          + "; hysteresis lost=" + str(PERCEPTION_CONFIRM_LOST_S) + "s appear="
+          + str(PERCEPTION_CONFIRM_APPEAR_S) + "s).")
+
+    async def _commit(sig, present, ts):
+        nonlocal announced_present
+        announced_present = present
+        await _enqueue(queue, ("perception", _describe_perception(sig), ts))
+
     while True:
         await asyncio.sleep(PERCEPTION_POLL_INTERVAL)
         try:
@@ -641,10 +672,29 @@ async def perception_reader(queue, loop, start_ts):
             stype = sig.get("type") or ""
             if stype not in PERCEPTION_WAKE_SIGNALS:
                 continue
-            if ts <= last_fired.get(stype, 0.0) + PERCEPTION_DEBOUNCE_S:
-                continue               # debounce: too soon after the last wake on this type
-            last_fired[stype] = ts
-            await _enqueue(queue, ("perception", _describe_perception(sig), ts))
+            present = (stype == "face_appeared")   # the presence this signal asserts
+            if announced_present is None:
+                # First observation - commit immediately so a fresh wake greets right away.
+                await _commit(sig, present, ts)
+                pending = None
+            elif present == announced_present:
+                # Signal agrees with what I already believe -> any opposite pending change
+                # was a flicker that just reverted. Cancel it.
+                pending = None
+            else:
+                # Disagrees with belief -> a candidate change. Start the timer (or keep the
+                # earliest 'since' if we're already timing this same direction).
+                if pending is None or pending["present"] != present:
+                    pending = {"present": present, "since": ts, "sig": sig}
+        # Confirmation check - runs every tick, even with no new signals, so a sustained
+        # change fires once its window elapses. time.time() shares the signals' clock epoch
+        # (same machine), so elapsed-since-'since' is meaningful when the stream goes quiet.
+        if pending is not None:
+            confirm_s = (PERCEPTION_CONFIRM_APPEAR_S if pending["present"]
+                         else PERCEPTION_CONFIRM_LOST_S)
+            if time.time() - pending["since"] >= confirm_s:
+                await _commit(pending["sig"], pending["present"], pending["since"])
+                pending = None
 
 
 async def run_turn(client, speak_out=True, source=None):
