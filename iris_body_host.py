@@ -552,6 +552,15 @@ async def _wait_until_quiet(loop, settle_grace=0.8, cap_s=180.0):
         await asyncio.sleep(0.2)
 
 
+def _blog(channel: str, event: str, detail=None) -> None:
+    """Timestamped body-log entry (fail-open). Zeke: 'everything logged with date and time.'"""
+    try:
+        from brain import iris_body_log
+        iris_body_log.log_event(channel, event, detail)
+    except Exception:
+        pass
+
+
 async def voice_reader(queue, loop, mic_gate):
     """Warm the rich call once, then loop the daemon's blocking listen and enqueue each
     real utterance as ('voice', transcript, None). The 'voice' source auto-speaks my reply.
@@ -579,6 +588,7 @@ async def voice_reader(queue, loop, mic_gate):
             await asyncio.sleep(2.0)
             continue
         if text and mic_gate.is_set():   # gate 2: drop if a turn spoke during this listen
+            _blog("ears", text)
             await _enqueue(queue, ("voice", text, None))
 
 
@@ -655,7 +665,9 @@ async def perception_reader(queue, loop, start_ts):
     async def _commit(sig, present, ts):
         nonlocal announced_present
         announced_present = present
-        await _enqueue(queue, ("perception", _describe_perception(sig), ts))
+        desc = _describe_perception(sig)
+        _blog("eyes", desc, {"present": present, "ts": ts})
+        await _enqueue(queue, ("perception", desc, ts))
 
     while True:
         await asyncio.sleep(PERCEPTION_POLL_INTERVAL)
