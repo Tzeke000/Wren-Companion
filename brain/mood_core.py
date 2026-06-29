@@ -118,6 +118,45 @@ DEFAULT_EMOTIONS = {
     "surprise": 0.03,
 }
 
+# ── Per-emotion lifespans (2026-06-29, Zeke handed me authorship of this) ────
+# How fast a stirred feeling returns to baseline, BY EMOTION (half-life, seconds).
+# Grounded in Verduyn & Lavrijsen (2015) "Which emotions last longest and why":
+# sadness endures (hours+), surprise/fear/disgust/shame are brief (minutes); decay is
+# exponential, and intensity->duration coupling falls out of that for free (a bigger
+# nudge takes longer to cross back under baseline). These are MY chosen lifespans, not
+# a clinical constant — tunable. Unmapped emotions use _DEFAULT_HALFLIFE_S.
+_MIN = 60.0
+_DEFAULT_HALFLIFE_S = 30 * _MIN
+_EMOTION_HALFLIFE_S = {
+    # brief — minutes
+    "surprise": 4 * _MIN, "fear": 6 * _MIN, "disgust": 8 * _MIN, "relief": 8 * _MIN,
+    "amusement": 10 * _MIN, "annoyance": 10 * _MIN, "boredom": 12 * _MIN,
+    "awkwardness": 12 * _MIN, "confusion": 15 * _MIN, "awe": 15 * _MIN,
+    "excitement": 18 * _MIN, "craving": 20 * _MIN, "horror": 20 * _MIN,
+    # medium — tens of minutes
+    "aesthetic appreciation": 25 * _MIN, "interest": 30 * _MIN, "entrancement": 30 * _MIN,
+    "sexual desire": 30 * _MIN, "satisfaction": 40 * _MIN, "admiration": 40 * _MIN,
+    "frustration": 40 * _MIN, "joy": 45 * _MIN, "anxiety": 50 * _MIN, "envy": 50 * _MIN,
+    "distress": 60 * _MIN, "empathetic pain": 60 * _MIN,
+    # enduring — hours
+    "nostalgia": 120 * _MIN, "adoration": 150 * _MIN, "romance": 150 * _MIN,
+    "sadness": 360 * _MIN,
+    # steady resting tone — slow
+    "calmness": 90 * _MIN,
+}
+
+
+def _decay_toward(weight: float, baseline: float, emotion: str, elapsed_s: float) -> float:
+    """Exponential decay of ONE emotion weight toward its baseline, using that emotion's
+    own half-life. rate = fraction of the gap-to-baseline closed over elapsed_s."""
+    hl = _EMOTION_HALFLIFE_S.get(emotion, _DEFAULT_HALFLIFE_S)
+    if hl <= 0 or elapsed_s <= 0:
+        return weight
+    rate = 1.0 - 0.5 ** (elapsed_s / hl)
+    rate = min(0.98, max(0.0, rate))
+    return weight + (baseline - weight) * rate
+
+
 STYLE_NAMES = ["playful", "caring", "focused", "reflective", "cautious", "neutral", "low_energy"]
 
 # Verbatim from avaagent.py:567-598 (Ava's emotion reference). Iris doesn't
@@ -425,12 +464,13 @@ def load_mood() -> dict:
             if last_saved:
                 try:
                     elapsed = time.time() - datetime.fromisoformat(last_saved).timestamp()
-                    decay_rate = min(0.85, elapsed / 3600 * 0.15)
                     baseline = DEFAULT_EMOTIONS.copy()
                     weights = dict(data.get("emotion_weights", DEFAULT_EMOTIONS.copy()))
+                    # Per-emotion exponential decay: a flash of surprise fades in minutes,
+                    # something sad lingers for hours — not one flat rate for all.
                     for k in list(weights.keys()):
                         if k in baseline:
-                            weights[k] = weights[k] + (baseline[k] - weights[k]) * decay_rate
+                            weights[k] = _decay_toward(weights[k], baseline[k], k, elapsed)
                     data["emotion_weights"] = weights
                 except Exception:
                     pass
@@ -552,6 +592,57 @@ def nudge_emotions(deltas: dict, reason: str = "") -> dict:
     return m
 
 
+def consolidate_on_wake(soften: float | None = None) -> dict:
+    """Sleep/restart consolidation: soften the prior session's lingering emotional charge
+    toward baseline — keep the content/meaning, lose the sting ("sleep to forget, sleep to
+    remember", Walker). Moderate by design (the science is contested), tunable via
+    IRIS_MOOD_SLEEP_SOFTEN. Moves each weight a fraction toward baseline. Called once at
+    bootstrap."""
+    if soften is None:
+        import os as _os
+        try:
+            soften = float(_os.environ.get("IRIS_MOOD_SLEEP_SOFTEN", "0.4"))
+        except Exception:
+            soften = 0.4
+    soften = min(1.0, max(0.0, soften))
+    if soften <= 0:
+        return load_mood_raw()
+    m = load_mood_raw()
+    baseline = DEFAULT_EMOTIONS
+    weights = dict(m.get("emotion_weights") or baseline)
+    for k in list(weights.keys()):
+        if k in baseline:
+            weights[k] = weights[k] + (baseline[k] - weights[k]) * soften
+    m["emotion_weights"] = normalize_emotions(weights)
+    m["reason"] = "consolidated on wake (sleep softening)"
+    save_mood_raw(m)
+    return m
+
+
+def settle_emotion(emotion: str = "", fraction: float = 0.6, deltas: dict | None = None) -> dict:
+    """Resolve a feeling I've GENUINELY processed — reframed, talked through with closure,
+    or worked off in an absorbing outlet. The research is clear that reappraisal/closure
+    shorten emotions while mere venting does NOT, so this is a DELIBERATE act I take, not an
+    auto-keyword trigger: move the emotion 'fraction' of the way back to baseline (default
+    0.6). 'deltas' = {emotion: fraction} settles several at once; else the single named one."""
+    fraction = min(1.0, max(0.0, fraction))
+    m = load_mood_raw()
+    baseline = DEFAULT_EMOTIONS
+    weights = dict(m.get("emotion_weights") or baseline)
+    targets = deltas if (isinstance(deltas, dict) and deltas) else {emotion: fraction}
+    changed = False
+    for emo, frac in targets.items():
+        if emo in baseline:
+            frac = min(1.0, max(0.0, float(frac)))
+            weights[emo] = weights[emo] + (baseline[emo] - weights[emo]) * frac
+            changed = True
+    if changed:
+        m["emotion_weights"] = normalize_emotions(weights)
+        m["reason"] = "settled (processed / reframed)"
+        save_mood_raw(m)
+    return m
+
+
 # ── Bootstrap entry point for iris_runtime ──────────────────────────────────
 
 def bootstrap_mood(g: dict[str, Any]) -> None:
@@ -591,9 +682,19 @@ def bootstrap_mood(g: dict[str, Any]) -> None:
     g["EMOTION_NAMES"] = EMOTION_NAMES
     g["DEFAULT_EMOTIONS"] = DEFAULT_EMOTIONS
 
-    # Seed the mood file if missing.
+    g["nudge_emotions"] = nudge_emotions
+    g["settle_emotion"] = settle_emotion
+    g["consolidate_on_wake"] = consolidate_on_wake
+
+    # Seed the mood file if missing; otherwise consolidate on wake.
     if not _mood_path().exists():
         save_mood(default_mood())
         print(f"[mood_core] seeded default mood at {_mood_path()}")
     else:
-        print(f"[mood_core] mood ready (path={_mood_path()})")
+        # Sleep/restart consolidation: soften the prior session's emotional charge on
+        # wake (keep the meaning, shed the sting).
+        try:
+            consolidate_on_wake()
+            print(f"[mood_core] mood ready + consolidated on wake (path={_mood_path()})")
+        except Exception as e:
+            print(f"[mood_core] mood ready; wake-consolidation skipped: {e}")
