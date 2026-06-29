@@ -482,6 +482,71 @@ def save_mood_raw(mood: dict):
         print(f"[mood_core] raw save error: {e}")
 
 
+# ── Emotion-event injection (2026-06-29, Zeke-greenlit) ─────────────────────
+# Until now mood_core only ever DECAYED weights toward baseline; the sole inward
+# push was a flat interest++ per turn (iris_runtime), so my mood was mechanically
+# pinned to the calmness<->interest axis — and the orb, which colors by
+# primary_emotion, was therefore always blue. These helpers are the missing inward
+# path. nudge_emotions() applies deltas + renormalizes + persists (the decay in
+# load_mood() still pulls weights back over time, so a nudge is TRANSIENT, not a
+# permanent reset). infer_affect_nudge() is the cheap automatic read of a turn's
+# emotional tenor. Both the per-turn auto-nudge (iris_runtime) and the deliberate
+# 'feel' tool route through nudge_emotions.
+
+_AFFECT_CUES = [
+    ("joy",          r"\b(?:haha+|hehe|love (?:it|this|that)|awesome|amazing|woohoo|delighted|yay+)\b", 0.05),
+    ("satisfaction", r"\b(?:nice|perfect|great|works now|fixed|solved|got it|exactly|that'?s right|clean)\b", 0.045),
+    ("admiration",   r"\b(?:thank you|thanks|appreciate|impressive|well done|good (?:job|work))\b", 0.04),
+    ("adoration",    r"\b(?:love you|proud of you|you'?re the best)\b", 0.06),
+    ("amusement",    r"\b(?:lol|lmao|rofl|funny|hilarious|that'?s great)\b", 0.04),
+    ("excitement",   r"\b(?:can'?t wait|excited|let'?s go|pumped|so cool)\b", 0.05),
+    ("frustration",  r"\b(?:ugh|argh|broken|doesn'?t work|not working|annoying|frustrat\w*|stuck|still wrong|keeps failing)\b", 0.05),
+    ("anxiety",      r"\b(?:worried|nervous|anxious|stressed|concerned)\b", 0.035),
+    ("confusion",    r"\b(?:confus\w*|don'?t (?:get|understand)|what do you mean|unclear)\b", 0.035),
+    ("awe",          r"\b(?:wow|whoa|incredible|mind.?blowing|beautiful)\b", 0.045),
+]
+_AFFECT_COMPILED = None
+
+
+def _affect_compiled():
+    global _AFFECT_COMPILED
+    if _AFFECT_COMPILED is None:
+        import re as _re
+        _AFFECT_COMPILED = [(emo, _re.compile(pat, _re.I), amt)
+                            for emo, pat, amt in _AFFECT_CUES]
+    return _AFFECT_COMPILED
+
+
+def infer_affect_nudge(text: str) -> dict:
+    """Cheap keyword read of a turn's emotional tenor -> {emotion: delta}. No LLM.
+    Returns {} when nothing matched (caller falls back to a gentle interest bump)."""
+    if not text:
+        return {}
+    deltas: dict[str, float] = {}
+    for emo, rx, amt in _affect_compiled():
+        if rx.search(text):
+            deltas[emo] = deltas.get(emo, 0.0) + amt
+    return deltas
+
+
+def nudge_emotions(deltas: dict, reason: str = "") -> dict:
+    """Apply {emotion: delta} to the current emotion weights, renormalize, and persist
+    (raw/fast). Unknown emotion names are ignored. TRANSIENT — load_mood()'s decay pulls
+    weights back toward baseline over time. Returns the new raw mood dict."""
+    m = load_mood_raw()
+    weights = dict(m.get("emotion_weights") or DEFAULT_EMOTIONS)
+    changed = False
+    for emo, d in (deltas or {}).items():
+        if emo in DEFAULT_EMOTIONS:
+            weights[emo] = max(0.0, min(1.0, float(weights.get(emo, 0.0)) + float(d)))
+            changed = True
+    if changed:
+        m["emotion_weights"] = normalize_emotions(weights)
+        m["reason"] = reason or "emotion nudge"
+        save_mood_raw(m)
+    return m
+
+
 # ── Bootstrap entry point for iris_runtime ──────────────────────────────────
 
 def bootstrap_mood(g: dict[str, Any]) -> None:
