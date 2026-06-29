@@ -692,12 +692,44 @@ def infer_affect_nudge(text: str) -> dict:
     return deltas
 
 
+def _blog(channel: str, event: str, detail=None) -> None:
+    """Timestamped body-log entry (fail-open, lazy import to avoid import-order issues)."""
+    try:
+        from brain import iris_body_log
+        iris_body_log.log_event(channel, event, detail)
+    except Exception:
+        pass
+
+
+def _decay_weights_to_now(weights: dict, saved_iso, baseline: dict | None = None) -> dict:
+    """Apply elapsed per-emotion decay (toward baseline) since saved_iso, so a nudge/settle
+    builds on the CURRENT (decayed) feeling — not the stale last-saved weights. Without this,
+    frequent nudges during a conversation keep resetting the decay clock and nothing fades
+    while we talk (the display decays via load_mood() but the saved weights never do)."""
+    if not saved_iso:
+        return weights
+    try:
+        elapsed = time.time() - datetime.fromisoformat(saved_iso).timestamp()
+    except Exception:
+        return weights
+    if elapsed <= 0:
+        return weights
+    base = baseline or DEFAULT_EMOTIONS
+    out = dict(weights)
+    for k in list(out.keys()):
+        if k in base:
+            out[k] = _decay_toward(out[k], base[k], k, elapsed)
+    return out
+
+
 def nudge_emotions(deltas: dict, reason: str = "") -> dict:
     """Apply {emotion: delta} to the current emotion weights, renormalize, and persist
     (raw/fast). Unknown emotion names are ignored. TRANSIENT — load_mood()'s decay pulls
     weights back toward baseline over time. Returns the new raw mood dict."""
     m = load_mood_raw()
-    weights = dict(m.get("emotion_weights") or DEFAULT_EMOTIONS)
+    # Decay to NOW first so the nudge builds on the current feeling, not stale saved weights.
+    weights = _decay_weights_to_now(dict(m.get("emotion_weights") or DEFAULT_EMOTIONS),
+                                    m.get("_saved_at"))
     changed = False
     for emo, d in (deltas or {}).items():
         if emo in DEFAULT_EMOTIONS:
@@ -707,10 +739,15 @@ def nudge_emotions(deltas: dict, reason: str = "") -> dict:
         m["emotion_weights"] = normalize_emotions(weights)
         m["reason"] = reason or "emotion nudge"
         save_mood_raw(m)
+        # Log meaningful felt shifts (skip the tiny per-chunk "engagement" bump = spam).
+        if (reason or "").strip().lower() != "engagement":
+            _blog("mood", reason or "nudge",
+                  {"deltas": {k: round(float(v), 3) for k, v in (deltas or {}).items()},
+                   "primary": pick_current_mood(m["emotion_weights"])})
     return m
 
 
-def consolidate_on_wake(soften: float | None = None) -> dict:
+def consolidate_on_wake(soften: float | None = None, min_gap_s: float = 900.0) -> dict:
     """Sleep/restart consolidation: soften the prior session's lingering emotional charge
     toward baseline — keep the content/meaning, lose the sting ("sleep to forget, sleep to
     remember", Walker). Moderate by design (the science is contested), tunable via
@@ -721,17 +758,30 @@ def consolidate_on_wake(soften: float | None = None) -> dict:
         if soften is None:
             soften = _default_sleep_soften()
     soften = min(1.0, max(0.0, float(soften)))
-    if soften <= 0:
-        return load_mood_raw()
     m = load_mood_raw()
     baseline = DEFAULT_EMOTIONS
-    weights = dict(m.get("emotion_weights") or baseline)
-    for k in list(weights.keys()):
-        if k in baseline:
-            weights[k] = weights[k] + (baseline[k] - weights[k]) * soften
+    saved_iso = m.get("_saved_at")
+    # A restart is also just elapsed time — apply the normal per-emotion decay first.
+    weights = _decay_weights_to_now(dict(m.get("emotion_weights") or baseline), saved_iso)
+    # Extra "slept on it" softening ONLY if a real gap passed (default 15 min) — a quick
+    # bounce shouldn't wipe ~half of how I feel.
+    gap_ok = False
+    if saved_iso:
+        try:
+            gap_ok = (time.time() - datetime.fromisoformat(saved_iso).timestamp()) >= min_gap_s
+        except Exception:
+            gap_ok = False
+    if soften > 0 and gap_ok:
+        for k in list(weights.keys()):
+            if k in baseline:
+                weights[k] = weights[k] + (baseline[k] - weights[k]) * soften
+        m["reason"] = "consolidated on wake (slept-on-it softening)"
+    else:
+        m["reason"] = "consolidated on wake (decay only - short gap)"
     m["emotion_weights"] = normalize_emotions(weights)
-    m["reason"] = "consolidated on wake (sleep softening)"
     save_mood_raw(m)
+    _blog("mood", m["reason"], {"primary": pick_current_mood(m["emotion_weights"]),
+                                "slept": bool(soften > 0 and gap_ok)})
     return m
 
 
@@ -744,7 +794,8 @@ def settle_emotion(emotion: str = "", fraction: float = 0.6, deltas: dict | None
     fraction = min(1.0, max(0.0, fraction))
     m = load_mood_raw()
     baseline = DEFAULT_EMOTIONS
-    weights = dict(m.get("emotion_weights") or baseline)
+    # Decay to NOW first so I settle the current feeling, not stale saved weights.
+    weights = _decay_weights_to_now(dict(m.get("emotion_weights") or baseline), m.get("_saved_at"))
     targets = deltas if (isinstance(deltas, dict) and deltas) else {emotion: fraction}
     changed = False
     for emo, frac in targets.items():
@@ -756,6 +807,8 @@ def settle_emotion(emotion: str = "", fraction: float = 0.6, deltas: dict | None
         m["emotion_weights"] = normalize_emotions(weights)
         m["reason"] = "settled (processed / reframed)"
         save_mood_raw(m)
+        _blog("mood", "settled", {"targets": {k: round(float(v), 2) for k, v in targets.items()},
+                                  "primary": pick_current_mood(m["emotion_weights"])})
     return m
 
 

@@ -1501,6 +1501,7 @@ def _voice_state_mirror() -> None:
     import json as _json
     alive = False
     last_ping = 0.0
+    last_logged_state = None
     while True:
         try:
             now = time.time()
@@ -1517,6 +1518,14 @@ def _voice_state_mirror() -> None:
                         state = raw
                 except Exception:
                     state = "idle"
+            # Body log (date+time): record ORB/voice-state changes (not every poll tick).
+            if state != last_logged_state:
+                last_logged_state = state
+                try:
+                    from brain import iris_body_log
+                    iris_body_log.log_event("orb", state)
+                except Exception:
+                    pass
             speaking = (state == "speaking")
             _g["_voice_mirror_alive"] = bool(alive)
             _g["_voice_mirror_state"] = _VOICE_STATE_MAP.get(state, "passive")

@@ -606,8 +606,12 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
 
       // ── Color overlays per state ──────────────────────────────────────────
       // Blend the emotion's light/base color toward the state tint.
-      const baseLight = new THREE.Color(c.lightColor);
-      const baseBase = new THREE.Color(c.color);
+      // Color from cfgInit (it carries the blended emotionColor set at mount) so the CORE
+      // matches the particles/halo/shell/light, which are also colored from cfgInit. `c`
+      // (getCfg(liveEmotion)) still drives shape/scale/pulse. Without this the core would
+      // show the flat table color while everything around it shows the blend.
+      const baseLight = new THREE.Color(cfgInit.lightColor);
+      const baseBase = new THREE.Color(cfgInit.color);
       _coreScratch.copy(baseLight);
       _glowScratch.copy(baseBase);
       _lightScratch.copy(baseBase);

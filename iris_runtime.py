@@ -1348,6 +1348,12 @@ def voice_say_chunk(text: str, emotion: str = "neutral", intensity: float = 0.5)
         )
     except Exception:
         pass
+    # Body log (Zeke: everything logged with date+time): record what my MOUTH said.
+    try:
+        from brain import iris_body_log
+        iris_body_log.log_event("mouth", text)
+    except Exception:
+        pass
     # Per-chunk theory-of-mind tracking. Each chunk may introduce new topics;
     # cheap regex match, no LLM.
     try:
