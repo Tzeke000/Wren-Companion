@@ -159,7 +159,7 @@ const STATE_TINT = {
   pointing: new THREE.Color("#ffeb3b"),  // bright yellow — Iris is targeting a desktop element (cu_click preview)
 };
 
-function OrbCanvasInner({ emotion, state, size = 320, shapeOverride, amplitude = 0, energy = 0.5, recenterTrigger, cubeMorphEnabled = true, sleepProgress = 0, sleepRemainingSeconds = 0, wakeProgress = 0 }: OrbProps) {
+function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverride, amplitude = 0, energy = 0.5, recenterTrigger, cubeMorphEnabled = true, sleepProgress = 0, sleepRemainingSeconds = 0, wakeProgress = 0 }: OrbProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const disposeRef = useRef<()=>void>(()=>{});
 
@@ -168,6 +168,12 @@ function OrbCanvasInner({ emotion, state, size = 320, shapeOverride, amplitude =
   const stateRef = useRef<OrbState>(state);
   const amplitudeRef = useRef<number>(amplitude);
   const emotionRef = useRef<string>(emotion);
+  // Emotion COLOR (App blends primary+secondary for a mix). Read via ref so a mood-color
+  // shift recolors the core LIVE without remounting the scene (a rebuild on every drift
+  // would strobe). NB: the core/inner-glow/connection lines follow this live; the particle
+  // field, halo, and point-light are colored at mount, so they follow only when the emotion
+  // NAME changes (the scene rebuild). Core is the dominant element, so the blend reads.
+  const emotionColorRef = useRef<string>(emotionColor);
   const shapeOverrideRef = useRef<string | undefined>(shapeOverride);
   const energyRef = useRef<number>(energy);
   // listening/attentive cube morph: target 1.0 when listening, 0.0 otherwise.
@@ -186,6 +192,7 @@ function OrbCanvasInner({ emotion, state, size = 320, shapeOverride, amplitude =
   stateRef.current = state;
   amplitudeRef.current = amplitude;
   emotionRef.current = emotion;
+  emotionColorRef.current = emotionColor;
   shapeOverrideRef.current = shapeOverride;
   energyRef.current = energy;
   recenterTriggerRef.current = recenterTrigger;
@@ -592,8 +599,15 @@ function OrbCanvasInner({ emotion, state, size = 320, shapeOverride, amplitude =
 
       // ── Color overlays per state ──────────────────────────────────────────
       // Blend the emotion's light/base color toward the state tint.
-      const baseLight = new THREE.Color(c.lightColor);
-      const baseBase = new THREE.Color(c.color);
+      // Core color: prefer the live emotionColor prop (App blends primary+secondary into a
+      // mix) so the orb actually reflects a blended feeling, not just the top emotion's flat
+      // hue. Falls back to the emotion-table color when no prop. lightColor is derived by
+      // lifting the base toward white. THREE.Color parses both "#rrggbb" and "rgb(...)".
+      const _ec = emotionColorRef.current;
+      const baseBase = _ec ? new THREE.Color(_ec) : new THREE.Color(c.color);
+      const baseLight = _ec
+        ? baseBase.clone().lerp(new THREE.Color("#ffffff"), 0.42)
+        : new THREE.Color(c.lightColor);
       _coreScratch.copy(baseLight);
       _glowScratch.copy(baseBase);
       _lightScratch.copy(baseBase);
