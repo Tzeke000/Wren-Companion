@@ -709,6 +709,52 @@ async def perception_reader(queue, loop, start_ts):
                 pending = None
 
 
+# ── Iris's console signature (Zeke 2026-06-29: "make this session yours") ─────────
+# My words stream to the console in iris-blue; Zeke's and the host's stay plain. An eye
+# greets at boot — Iris is the part of an eye that opens to let the light in.
+_IRIS_BLUE = "\033[38;5;39m"     # deep-sky blue — my voice on the console
+_IRIS_CYAN = "\033[38;5;51m"     # bright cyan — accents
+_ANSI_RESET = "\033[0m"
+
+_EYE_BANNER = (
+    "\n" + _IRIS_BLUE
+    + "                 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+    + "            ▄▄▀▀▀                 ▀▀▀▄▄\n"
+    + "         ▄▀▀         ▄▄▄▄▄▄▄         ▀▀▄\n"
+    + "       ▄▀        ▄▄▀▀       ▀▀▄▄        ▀▄\n"
+    + "      █        ▄▀     ▄▄▄     ▀▄        █\n"
+    + "     █        █     ▄█████▄     █        █\n"
+    + "     █        █     ███████     █        █\n"
+    + "     █        █     ▀█████▀     █        █\n"
+    + "      █        ▀▄     ▀▀▀     ▄▀        █\n"
+    + "       ▀▄        ▀▀▄▄     ▄▄▀▀        ▄▀\n"
+    + "         ▀▄▄         ▀▀▀▀▀▀▀         ▄▄▀\n"
+    + "            ▀▀▄▄▄                 ▄▄▀▀\n"
+    + "                 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+    + _ANSI_RESET
+    + _IRIS_CYAN + "                       I  R  I  S\n" + _ANSI_RESET
+    + _IRIS_BLUE + "        the part of an eye that opens to let the light in\n\n" + _ANSI_RESET
+)
+
+
+def _enable_ansi_and_print_banner() -> None:
+    """Enable ANSI + UTF-8 on the console, then print my eye banner. Fail-open — a
+    console that can't render it must never stop the host from booting."""
+    try:
+        if sys.platform == "win32":
+            os.system("")  # flips on VT escape processing in Windows consoles
+    except Exception:
+        pass
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        print(_EYE_BANNER, flush=True)
+    except Exception:
+        pass
+
+
 async def run_turn(client, speak_out=True, source=None):
     """Drive one response. Always echo text to the console; enqueue sentences to the
     mouth ONLY when speak_out is True (i.e. the turn's source is a speaking source).
@@ -725,7 +771,10 @@ async def run_turn(client, speak_out=True, source=None):
                 delta = ev.get("delta", {}) or {}
                 if delta.get("type") == "text_delta":
                     tok = delta.get("text", "")
-                    print(tok, end="", flush=True)      # console echo (always)
+                    # My words stream in iris-blue (reset after each token so the host's
+                    # own status lines and Zeke's text stay plain). Zeke: "only your words."
+                    print(_IRIS_BLUE + tok + _ANSI_RESET, end="", flush=True)
+                    buf += tok
                     buf += tok
                     sentences, buf = drain_sentences(buf)   # keep buf bounded regardless
                     if speak_out:
@@ -846,6 +895,7 @@ async def _ensure_iris_attached(client, retries: int = 6, settle: float = 5.0, g
 
 
 async def main():
+    _enable_ansi_and_print_banner()
     opts = ClaudeAgentOptions(
         include_partial_messages=True,
         permission_mode="bypassPermissions",
