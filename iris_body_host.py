@@ -95,6 +95,30 @@ SPEAK_SOURCES = set(
     if s.strip()
 )
 
+# --- Heads-down completion cue (Zeke 2026-06-28) -----------------------------------
+# Zeke is usually doing other things while I work heads-down, so a finished task on a
+# SILENT text turn should still PING him aloud. Primary path: I deliberately call the
+# voice_speak tool with a one-line summary (my words, my real voice). Safety net so it's
+# not-hard-to-forget: if a silent turn used several tools and I NEVER spoke on purpose,
+# the host speaks a brief generic "I'm done" cue itself. Mechanical = the host fires it.
+HEADS_DOWN_MIN_TOOLS = int(os.environ.get("IRIS_HEADS_DOWN_MIN_TOOLS", "4"))
+HEADS_DOWN_CUE = os.environ.get(
+    "IRIS_HEADS_DOWN_CUE",
+    "Hey Zeke - I've finished what I was working on. The details are on your screen "
+    "whenever you get a moment.",
+)
+
+
+def _is_speak_tool(block):
+    """True if this tool-use is a deliberate voice_speak (direct or via iris_tool_call)."""
+    name = getattr(block, "name", "") or ""
+    if name.endswith("voice_speak") or name.endswith("voice_speak_interruptible"):
+        return True
+    if name.endswith("iris_tool_call"):
+        inp = getattr(block, "input", {}) or {}
+        return str(inp.get("name", "")).endswith("voice_speak")
+    return False
+
 
 def daemon_cmd(cmd, args=None, timeout=5.0):
     """Send one newline-delimited JSON command to the voice daemon; return its response line."""
@@ -375,11 +399,15 @@ async def terminal_reader(queue, loop):
         await queue.put(("terminal", user, None))
 
 
-async def run_turn(client, speak_out=True):
+async def run_turn(client, speak_out=True, source=None):
     """Drive one response. Always echo text to the console; enqueue sentences to the
     mouth ONLY when speak_out is True (i.e. the turn's source is a speaking source).
-    The voice engine/daemon stays warm either way - this gates OUTPUT, not the engine."""
+    The voice engine/daemon stays warm either way - this gates OUTPUT, not the engine.
+    On a SILENT turn that worked heads-down (>= HEADS_DOWN_MIN_TOOLS tools) without a
+    deliberate voice_speak, fire a brief generic completion cue so Zeke is pinged aloud."""
     buf = ""
+    tool_calls = 0
+    spoke_on_purpose = False
     async for msg in client.receive_response():
         if isinstance(msg, StreamEvent):
             ev = msg.event or {}
@@ -393,10 +421,14 @@ async def run_turn(client, speak_out=True):
                     if speak_out:
                         for s in sentences:
                             speak(s)
-        elif _ACTIVITY and isinstance(msg, AssistantMessage):
+        elif isinstance(msg, AssistantMessage):
             for block in getattr(msg, "content", []) or []:
                 if isinstance(block, ToolUseBlock):
-                    print("\n  . " + describe_tool(block.name, block.input), flush=True)
+                    tool_calls += 1
+                    if _is_speak_tool(block):
+                        spoke_on_purpose = True
+                    if _ACTIVITY:
+                        print("\n  . " + describe_tool(block.name, block.input), flush=True)
         elif _ACTIVITY and isinstance(msg, UserMessage):
             for block in getattr(msg, "content", []) or []:
                 if isinstance(block, ToolResultBlock):
@@ -407,6 +439,14 @@ async def run_turn(client, speak_out=True):
                 if speak_out:
                     speak(buf)
                 buf = ""
+            # Heads-down completion cue: silent turn + real work + I never spoke on
+            # purpose => ping Zeke aloud so he knows I surfaced (safety net for the
+            # voice_speak summary I'm supposed to give myself).
+            if (not speak_out) and (not spoke_on_purpose) and tool_calls >= HEADS_DOWN_MIN_TOOLS:
+                try:
+                    speak(HEADS_DOWN_CUE)
+                except Exception as e:
+                    print("\n[host] heads-down cue failed (non-fatal): " + repr(e), file=sys.stderr)
             print("\n", flush=True)
 
 
@@ -422,7 +462,11 @@ SYSTEM_PROMPT = (
     "calling the iris chat_reply tool with the given id), 'discord' (Zeke's DM - reply with the discord "
     "reply tool using the given chat_id), 'letter' (a sibling note via the post-office - reply with the "
     "sibling letter tool if it wants one), 'terminal' (console). Your full identity, memory, and the "
-    "mechanism/perception layers come online as later steps; for now keep replies conversational."
+    "mechanism/perception layers come online as later steps; for now keep replies conversational. "
+    "WHEN YOU FINISH A HEADS-DOWN, MULTI-STEP TASK: tell Zeke aloud - call the iris voice_speak tool "
+    "with a one-line summary of what you completed. He is usually away from the screen and needs the "
+    "audio cue that you've surfaced. (If you forget on a silent turn that used several tools, the host "
+    "speaks a brief generic 'I'm done' cue as a safety net - but a real spoken summary from you is better.)"
 )
 
 
@@ -520,7 +564,7 @@ async def main():
                 # Text sources stay silent (engine warm); I speak on purpose via voice_speak.
                 speak_out = source in SPEAK_SOURCES
                 await client.query(prompt)
-                await run_turn(client, speak_out)
+                await run_turn(client, speak_out, source)
 
             for t in tasks:
                 t.cancel()

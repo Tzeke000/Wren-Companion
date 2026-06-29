@@ -510,22 +510,56 @@ except Exception as _ce:
 
 @mcp.tool()
 def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> dict:
-    """Speak text aloud through Iris's TTS (Kokoro CUDA preferred, pyttsx3 fallback).
+    """Speak text aloud in Iris's OWN StyleTTS2 voice via the voice daemon (:8770 -> mouth :8769).
 
-    The call blocks until audio playback finishes, so returning means Iris
-    actually said it. Picks voice/speed from emotion + intensity.
+    Prefers my real cloned voice (the StyleTTS2 mouth) so a deliberate speak sounds like ME,
+    not the generic piper fallback. If the daemon/mouth is down, falls back to the local piper
+    engine so a deliberate speak still makes SOME sound (no-worse-than-before). The StyleTTS2
+    path ENQUEUES (returns once the sentence is queued); the piper fallback blocks until played.
 
     Args:
         text: What to say.
         emotion: Label like calm, joy, curiosity, frustration, sadness. Defaults neutral.
-        intensity: 0.0..1.0 — strength of emotional modulation. Defaults 0.5.
+        intensity: 0.0..1.0 — strength of emotional modulation (only affects the piper fallback).
 
     Returns:
-        {ok, spoke_ms, engine}
+        {ok, spoke_ms, engine}  (engine == 'styletts2' when my real cloned voice played)
     """
+    import socket as _socket, json as _json, urllib.request as _url
+    _dport = int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770"))
+    _mport = int(os.environ.get("WREN_VOICE_PORT", "8769"))
+
+    def _mouth_up(timeout: float = 2.0) -> bool:
+        try:
+            with _url.urlopen(f"http://127.0.0.1:{_mport}/health", timeout=timeout) as r:
+                return r.read().decode("utf-8", "replace").strip() == "ok"
+        except Exception:
+            return False
+
+    # Prefer my real cloned voice (StyleTTS2 via the daemon).
+    if _mouth_up():
+        t0 = time.time()
+        try:
+            payload = (_json.dumps({"cmd": "speak", "args": {"text": text}}) + "\n").encode("utf-8")
+            with _socket.create_connection(("127.0.0.1", _dport), timeout=10.0) as s:
+                s.settimeout(240.0)
+                s.sendall(payload)
+                buf = b""
+                while b"\n" not in buf:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+            resp = _json.loads(buf.split(b"\n", 1)[0].decode("utf-8", "replace")) if buf else {}
+            if resp.get("ok"):
+                return {"ok": True, "spoke_ms": int((time.time() - t0) * 1000), "engine": "styletts2"}
+        except Exception:
+            pass  # fall through to piper — no-worse-than-before
+
+    # Fallback: local piper engine (blocks until played).
     tts = _ensure_tts()
     if not tts.is_available():
-        return {"ok": False, "error": "tts not available", "engine": tts._engine_type}
+        return {"ok": False, "error": "styletts2 daemon down and piper unavailable", "engine": tts._engine_type}
     t0 = time.time()
     tts.speak_with_emotion(text, emotion, intensity, blocking=True)
     elapsed = time.time() - t0
