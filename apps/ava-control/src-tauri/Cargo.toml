@@ -9,6 +9,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# Single-instance guard: a relaunch focuses the existing window instead of
+# stacking a new process. Without it the app piled up 9 orphan instances over
+# 4 days (2026-06-29 diagnosis). Must be registered as the FIRST plugin.
+tauri-plugin-single-instance = "2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
