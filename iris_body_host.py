@@ -166,6 +166,33 @@ PERCEPTION_WAKE_SIGNALS = set(
 # face flickering in/out at the detection edge can't spam-wake cognition.
 PERCEPTION_DEBOUNCE_S = float(os.environ.get("IRIS_PERCEPTION_DEBOUNCE_S", "20"))
 
+# --- Input priority (Zeke's report 2026-06-29: "my voice gets overridden by fam-chat") --------
+# All inputs share ONE queue. Before, it was plain FIFO, so a backlog of silent letters/Discord
+# could sit AHEAD of Zeke's live voice - and worse, the mic was shut for the WHOLE duration of
+# every turn including silent ones, so speaking while I "read" a letter got his voice locked out
+# or dropped as self-echo. Fix part 1: a priority queue so the live human in the room jumps the
+# line. Lower number = handled first. quit is absolute; voice + terminal (live human) outrank the
+# orb (typed, live) which outranks async channels (Discord, perception, letters).
+_SOURCE_PRIORITY = {
+    "quit": 0,
+    "voice": 1, "terminal": 1,
+    "orb": 2,
+    "discord": 3,
+    "perception": 4,
+    "letter": 5,
+}
+_enqueue_seq = [0]   # monotonic tiebreaker => stable FIFO *within* a priority band
+
+
+async def _enqueue(queue, item):
+    """Put one (source, text, msg_id[, sender]) item on the priority queue, tagged by source
+    priority + a monotonic sequence. The seq guarantees the inner tuple is never compared
+    (so heterogeneous items can't raise 'unorderable types') and preserves arrival order
+    within the same priority band."""
+    prio = _SOURCE_PRIORITY.get(item[0], 5)
+    _enqueue_seq[0] += 1
+    await queue.put((prio, _enqueue_seq[0], item))
+
 
 def _is_speak_tool(block):
     """True if this tool-use is a deliberate voice_speak (direct or via iris_tool_call)."""
@@ -333,7 +360,7 @@ async def discord_poller(token, queue, loop, baseline_id):
                 continue
             content = (m.get("content") or "").strip()
             if content:
-                await queue.put(("discord", content, m["id"]))
+                await _enqueue(queue, ("discord", content, m["id"]))
 
 
 # ----------------------------------------------------------------- Post-office inbound (letter-drop poll)
@@ -400,7 +427,7 @@ async def letters_poller(secret, queue, loop, baseline_id):
             subj = (L.get("subject") or "").strip()
             content = ("[" + subj + "] " + body) if subj else body
             if content:
-                await queue.put(("letter", content, lid, frm))
+                await _enqueue(queue, ("letter", content, lid, frm))
 
 
 # ----------------------------------------------------------------- Orb inbound (the body app = my input surface)
@@ -438,7 +465,7 @@ async def orb_reader(queue, loop, start_ts):
         seen.add(rid)
         text = (req.get("user_text") or "").strip()
         if text:
-            await queue.put(("orb", text, rid))
+            await _enqueue(queue, ("orb", text, rid))
 
 
 async def terminal_reader(queue, loop):
@@ -447,14 +474,14 @@ async def terminal_reader(queue, loop):
         try:
             user = await loop.run_in_executor(None, input, "you> ")
         except (EOFError, KeyboardInterrupt):
-            await queue.put(("quit", "", None))
+            await _enqueue(queue, ("quit", "", None))
             return
         if user.strip().lower() in ("quit", "exit"):
-            await queue.put(("quit", "", None))
+            await _enqueue(queue, ("quit", "", None))
             return
         if not user.strip():
             continue
-        await queue.put(("terminal", user, None))
+        await _enqueue(queue, ("terminal", user, None))
 
 
 # ----------------------------------------------------------------- Voice inbound (the EARS)
@@ -539,7 +566,7 @@ async def voice_reader(queue, loop, mic_gate):
             await asyncio.sleep(2.0)
             continue
         if text and mic_gate.is_set():   # gate 2: drop if a turn spoke during this listen
-            await queue.put(("voice", text, None))
+            await _enqueue(queue, ("voice", text, None))
 
 
 # ----------------------------------------------------------------- Perception inbound (the EYES)
@@ -617,7 +644,7 @@ async def perception_reader(queue, loop, start_ts):
             if ts <= last_fired.get(stype, 0.0) + PERCEPTION_DEBOUNCE_S:
                 continue               # debounce: too soon after the last wake on this type
             last_fired[stype] = ts
-            await queue.put(("perception", _describe_perception(sig), ts))
+            await _enqueue(queue, ("perception", _describe_perception(sig), ts))
 
 
 async def run_turn(client, speak_out=True, source=None):
@@ -773,7 +800,10 @@ async def main():
     try:
         async with ClaudeSDKClient(options=opts) as client:
             loop = asyncio.get_running_loop()
-            queue = asyncio.Queue()
+            # PriorityQueue (not plain FIFO): Zeke's live voice jumps ahead of a backlog of
+            # async letters/Discord instead of waiting behind them. Items are
+            # (priority, seq, (source, ...)) via _enqueue; get() returns lowest-priority first.
+            queue = asyncio.PriorityQueue()
             # mic_gate OPEN (set) = ears may listen; CLEARED = a turn is in progress and I may
             # be speaking, so the voice_reader holds the mic shut (no self-listen feedback).
             mic_gate = asyncio.Event()
@@ -844,7 +874,7 @@ async def main():
             print("[host] (type here, or 'quit' to exit.)\n", flush=True)
 
             while True:
-                item = await queue.get()
+                _prio, _seq, item = await queue.get()
                 source, text, msg_id = item[0], item[1], item[2]
                 sender = item[3] if len(item) > 3 else None
                 if source == "quit":
@@ -904,15 +934,23 @@ async def main():
                 # Mechanical speak gate: the SOURCE decides whether my reply is voiced.
                 # Text sources stay silent (engine warm); I speak on purpose via voice_speak.
                 speak_out = source in SPEAK_SOURCES
-                # Close the ears for the duration of this turn (I may speak), then reopen once
-                # the mouth has drained - prevents the reader capturing my own voice.
-                mic_gate.clear()
+                # Ears stay OPEN during SILENT turns (Zeke fix 2026-06-29): a fam-chat letter
+                # or Discord message makes no sound, so shutting the mic for its whole duration
+                # was locking out / dropping Zeke's live voice. Now we only close the ears for a
+                # turn that actually SPEAKS (a voice turn), then reopen once the mouth drains -
+                # that's the self-listen guard, and it only applies when there's real output to
+                # echo. (Residual: a silent turn that DELIBERATELY calls voice_speak relies on the
+                # daemon's drain-gate alone; rare, and the path-agnostic voiceprint check is the
+                # bulletproof fix, tracked with the barge-in build.)
+                if speak_out:
+                    mic_gate.clear()
                 try:
                     await client.query(prompt)
                     await run_turn(client, speak_out, source)
                 finally:
-                    await _wait_until_quiet(loop)
-                    mic_gate.set()
+                    if speak_out:
+                        await _wait_until_quiet(loop)
+                        mic_gate.set()
 
             for t in tasks:
                 t.cancel()
