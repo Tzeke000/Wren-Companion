@@ -277,6 +277,23 @@ const EMOTION_VISUALS: Record<string, EmotionVisual> = {
   realization: { color: "#f5c518", shape: "burst", pulse: "excited" },
   scared: { color: "#44337a", shape: "contracted_tremor", pulse: "confused" },
   proud: { color: "#6b46c1", shape: "rising", pulse: "thinking" },
+  // Emotions mood_core can produce that were MISSING here (so they fell back to
+  // calmness-blue — including satisfaction/admiration/amusement, which my affect-nudges
+  // produce often). Colors mirror OrbCanvas's internal table for consistency; multi-word
+  // keys match the exact lowercase names mood_core emits.
+  satisfaction: { color: "#48bb78", shape: "circle", pulse: "speaking" },
+  admiration: { color: "#5a67d8", shape: "circle", pulse: "thinking" },
+  amusement: { color: "#f6ad55", shape: "rings", pulse: "excited" },
+  annoyance: { color: "#dd6b20", shape: "jagged", pulse: "deep" },
+  distress: { color: "#2c7a7b", shape: "flicker", pulse: "confused" },
+  horror: { color: "#742a2a", shape: "flicker", pulse: "confused" },
+  "aesthetic appreciation": { color: "#9f7aea", shape: "awe_pop", pulse: "thinking" },
+  "empathetic pain": { color: "#6b6b9a", shape: "teardrop", pulse: "bored" },
+  "sexual desire": { color: "#b83280", shape: "heart", pulse: "speaking" },
+  craving: { color: "#c2548a", shape: "rings", pulse: "thinking" },
+  entrancement: { color: "#8a6fd0", shape: "spiral", pulse: "thinking" },
+  awkwardness: { color: "#c98a5a", shape: "flicker", pulse: "confused" },
+  romance: { color: "#ed64a6", shape: "heart", pulse: "speaking" },
 };
 
 function asRecord(v: unknown): Record<string, unknown> | undefined {
@@ -1551,8 +1568,12 @@ export default function App() {
   const secEmotionName = String(secondaryEmotions[0]?.emotion ?? "").toLowerCase();
   const secVisual = secEmotionName ? EMOTION_VISUALS[secEmotionName] : undefined;
   const secIntensity = Number(secondaryEmotions[0]?.intensity ?? 0);
-  const orbBaseColor = secVisual && secIntensity > 0
-    ? mixHex(orbVisual.color, secVisual.color, Math.min(0.45, secIntensity))
+  // Quantize the blend to 0.15 steps so the orb recolors in discrete jumps, not on every
+  // tiny mood drift — the orb rebuilds when this color changes, so a continuously drifting
+  // blend would strobe. Steps: 0 / 0.15 / 0.30 / 0.45 (capped, primary always dominates).
+  const blendT = Math.round(Math.min(0.45, secIntensity) / 0.15) * 0.15;
+  const orbBaseColor = secVisual && blendT > 0
+    ? mixHex(orbVisual.color, secVisual.color, blendT)
     : orbVisual.color;
   // Connectivity-aware orb color: dims and cools when offline
   const connOffline = !connOnline && online; // backend up but no internet

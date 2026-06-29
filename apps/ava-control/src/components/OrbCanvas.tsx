@@ -168,12 +168,6 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
   const stateRef = useRef<OrbState>(state);
   const amplitudeRef = useRef<number>(amplitude);
   const emotionRef = useRef<string>(emotion);
-  // Emotion COLOR (App blends primary+secondary for a mix). Read via ref so a mood-color
-  // shift recolors the core LIVE without remounting the scene (a rebuild on every drift
-  // would strobe). NB: the core/inner-glow/connection lines follow this live; the particle
-  // field, halo, and point-light are colored at mount, so they follow only when the emotion
-  // NAME changes (the scene rebuild). Core is the dominant element, so the blend reads.
-  const emotionColorRef = useRef<string>(emotionColor);
   const shapeOverrideRef = useRef<string | undefined>(shapeOverride);
   const energyRef = useRef<number>(energy);
   // listening/attentive cube morph: target 1.0 when listening, 0.0 otherwise.
@@ -192,7 +186,6 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
   stateRef.current = state;
   amplitudeRef.current = amplitude;
   emotionRef.current = emotion;
-  emotionColorRef.current = emotionColor;
   shapeOverrideRef.current = shapeOverride;
   energyRef.current = energy;
   recenterTriggerRef.current = recenterTrigger;
@@ -206,6 +199,20 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     disposeRef.current();
     const container = mountRef.current;
     const cfgInit = { ...getCfg(emotion), ...(shapeOverride ? { shape: shapeOverride } : {}) };
+    // Emotion COLOR: when the prop is given, drive the WHOLE orb (core, particles, halo,
+    // shell, point-light — all colored from cfgInit below) off the blended color App sends
+    // (primary+secondary mix), so a blended feeling shows consistently rather than only the
+    // top emotion's flat hue. Shape/motion still come from the emotion string (getCfg).
+    // light/dark are derived by lifting toward white / sinking toward black. THREE.Color
+    // parses both "#rrggbb" and "rgb(...)". The blended color is quantized upstream (App), so
+    // this rebuilds only on a meaningful shift — the same kind of rebuild emotion-name changes
+    // already trigger — not on every tiny mood drift.
+    if (emotionColor) {
+      const ecBase = new THREE.Color(emotionColor);
+      cfgInit.color = `#${ecBase.getHexString()}`;
+      cfgInit.lightColor = `#${ecBase.clone().lerp(new THREE.Color("#ffffff"), 0.42).getHexString()}`;
+      cfgInit.darkColor = `#${ecBase.clone().lerp(new THREE.Color("#000000"), 0.55).getHexString()}`;
+    }
 
     const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
     renderer.setSize(size,size);
@@ -599,15 +606,8 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
 
       // ── Color overlays per state ──────────────────────────────────────────
       // Blend the emotion's light/base color toward the state tint.
-      // Core color: prefer the live emotionColor prop (App blends primary+secondary into a
-      // mix) so the orb actually reflects a blended feeling, not just the top emotion's flat
-      // hue. Falls back to the emotion-table color when no prop. lightColor is derived by
-      // lifting the base toward white. THREE.Color parses both "#rrggbb" and "rgb(...)".
-      const _ec = emotionColorRef.current;
-      const baseBase = _ec ? new THREE.Color(_ec) : new THREE.Color(c.color);
-      const baseLight = _ec
-        ? baseBase.clone().lerp(new THREE.Color("#ffffff"), 0.42)
-        : new THREE.Color(c.lightColor);
+      const baseLight = new THREE.Color(c.lightColor);
+      const baseBase = new THREE.Color(c.color);
       _coreScratch.copy(baseLight);
       _glowScratch.copy(baseBase);
       _lightScratch.copy(baseBase);
@@ -755,7 +755,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     return () => disposeRef.current();
     // Mount per emotion/size — state and amplitude are read via refs so they
     // update live without remounting the scene.
-  }, [emotion, size]);
+  }, [emotion, emotionColor, size]);
 
   // Format remaining-seconds for the sleep timer label.
   const showTimer = state === "sleeping" || state === "waking";
