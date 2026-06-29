@@ -132,7 +132,15 @@ HEADS_DOWN_CUE = os.environ.get(
 # voice_next_input (that synchronous MCP call wedged the whole runtime 2026-06-29 - see
 # handoff_2026-06-29_runtime_wedge). This is the bridge that gives the body ears under v2.
 EARS_ON = os.environ.get("IRIS_EARS", "on").strip().lower() not in ("0", "off", "false", "no", "")
-VOICE_LISTEN_TIMEOUT_S = float(os.environ.get("IRIS_VOICE_LISTEN_TIMEOUT_S", "45"))
+# NO felt clock on Zeke (fix 2026-06-29, his report: "it's like you're putting a timer on me
+# to speak"). VOICE_LISTEN_TIMEOUT_S is the wait-for-speech-to-START window the daemon honors;
+# make it long so a clean no-speech marker (silent re-poll) is the only thing that ever fires on
+# idle - not a scary socket "failed timeout". VOICE_MAX_UTTERANCE_S is the hard cap on ONE
+# utterance; the old 20s default truncated his longer thoughts (a 24.5s turn was getting cut),
+# so raise it. Smart-turn endpointing still decides when he's actually DONE within these bounds -
+# these are only the outer backstops, not a turn timer.
+VOICE_LISTEN_TIMEOUT_S = float(os.environ.get("IRIS_VOICE_LISTEN_TIMEOUT_S", "300"))
+VOICE_MAX_UTTERANCE_S = float(os.environ.get("IRIS_VOICE_MAX_UTTERANCE_S", "60"))
 
 
 def _is_speak_tool(block):
@@ -434,8 +442,17 @@ def _daemon_listen_once():
     (ctx.speaking==False) before capturing, so it won't transcribe my own TTS tail."""
     raw = daemon_cmd(
         "listen",
-        {"timeout_seconds": VOICE_LISTEN_TIMEOUT_S},
-        timeout=VOICE_LISTEN_TIMEOUT_S + 20.0,   # socket must outlive the listen's own timeout
+        {
+            "timeout_seconds": VOICE_LISTEN_TIMEOUT_S,
+            "max_utterance_seconds": VOICE_MAX_UTTERANCE_S,
+        },
+        # Socket must outlive the WHOLE listen: the wait-for-speech window PLUS a full
+        # max-length utterance PLUS the daemon's grace re-opens. The old +20 margin only
+        # covered the wait window, so a long turn (speech that ran past the cap) timed the
+        # socket out mid-capture and surfaced as "voice listen failed: timeout" - exactly
+        # Zeke's symptom. Give it the full envelope plus headroom so the host never abandons
+        # a listen the daemon is still working.
+        timeout=VOICE_LISTEN_TIMEOUT_S + VOICE_MAX_UTTERANCE_S + 120.0,
     )
     try:
         resp = json.loads(raw)
