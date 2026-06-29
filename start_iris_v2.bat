@@ -38,16 +38,14 @@ if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
     exit /b 2
 )
 
-REM --- Kill any STALE voice processes holding the mouth/daemon ports BEFORE the
-REM --- watchdog launches, so an orphaned old watchdog can never keep ownership and
-REM --- respawn voice. Now that we're elevated this also clears an elevated orphan.
-REM --- Spares post-office (5877 = Wren's lifeline) and operator API (5876).
-for %%P in (8769 8770) do (
-    for /f "tokens=5" %%I in ('netstat -ano ^| findstr ":%%P " ^| findstr LISTENING') do (
-        echo [start_iris_v2.bat] killing stale voice PID %%I on port %%P
-        taskkill /F /PID %%I >nul 2>&1
-    )
-)
+REM --- Kill the STALE voice stack BEFORE the watchdog launches, so an orphaned old
+REM --- watchdog can never keep the singleton mutex (which makes our fresh watchdog
+REM --- no-op) and keep owning/respawning voice. We match by SCRIPT NAME (watchdog +
+REM --- daemon + StyleTTS2 mouth), not by port, so it also clears a stuck-loading mouth
+REM --- and the mutex-holding watchdog itself. Now elevated, this reaches an elevated
+REM --- orphan too. Scoped to the 3 voice scripts: spares post-office, operator API,
+REM --- and the body host (different script names).
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voice_watchdog|wren_voice_daemon|wren_styletts_server' } | ForEach-Object { Write-Host ('[start_iris_v2.bat] killing stale voice PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
 REM Voice stack (StyleTTS2 mouth :8769 + voice daemon :8770) via the watchdog,
 REM same as start_iris.bat. The watchdog has a named-mutex singleton guard, so a
