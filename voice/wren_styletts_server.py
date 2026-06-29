@@ -120,9 +120,12 @@ except ImportError as e:
 
 # ── Shared voice-state overlay (no-op if helper absent) ──────────────────────────
 try:
-    from wren_voice_status import set_state  # type: ignore
+    from wren_voice_status import set_state, set_amplitude  # type: ignore
 except Exception:
     def set_state(*_a, **_k):  # type: ignore
+        pass
+
+    def set_amplitude(*_a, **_k):  # type: ignore
         pass
 
 # ── OS-default output machinery (mirrors wren_cosyvoice_server.py verbatim) ──────
@@ -516,22 +519,59 @@ def _next_filler():
 
 # ── Speak path ────────────────────────────────────────────────────────────────────
 
+# ── Live playback envelope for the orb's audio visualization (2026-06-29) ─────────
+# The mouth is the only process that touches the actual audio samples, so the per-block
+# peak level is computed HERE and published (throttled) to scratch/voice_amplitude.json;
+# orb_http's voice mirror reads it so the orb pulses to my REAL voice instead of a
+# synthetic on/off. Writing in small (~50ms) blocks also makes the loop MORE responsive
+# to _STOP than the old 2s chunks. Strictly additive + fully wrapped: amplitude emission
+# can never break or slow playback.
+_AMP_BLOCK = max(256, int(SAMPLE_RATE * 0.05))   # ~50ms envelope resolution
+_AMP_GAIN  = float(os.environ.get("IRIS_VOICE_AMP_GAIN", "1.6"))
+
+
+def _emit_amp(block) -> None:
+    """Best-effort: publish the block's peak level (0-1) for the orb. Never raises."""
+    try:
+        if block is None or not getattr(block, "size", 0):
+            return
+        peak = float(np.max(np.abs(block)))
+        set_amplitude(min(1.0, peak * _AMP_GAIN))
+    except Exception:
+        pass
+
+
+def _write_stream(stream, arr, stop_aware: bool = True) -> bool:
+    """Write arr to the output stream in small blocks, publishing the live amplitude
+    envelope per block. Returns False if _STOP fired or the write errored (callers
+    treat that as 'stop'); True if the whole array was written."""
+    if arr is None or not getattr(arr, "size", 0):
+        return True
+    arr = arr.astype(np.float32, copy=False)
+    n = len(arr)
+    i = 0
+    while i < n:
+        if stop_aware and _STOP.is_set():
+            return False
+        blk = arr[i : i + _AMP_BLOCK]
+        _emit_amp(blk)
+        try:
+            stream.write(blk)
+        except Exception:
+            return False
+        i += _AMP_BLOCK
+    return True
+
+
 def _play(arr: np.ndarray, pad_sec: float = 0.35) -> None:
-    """Write a float32 array to the persistent output stream in stop-aware chunks."""
+    """Write a float32 array to the persistent output stream in stop-aware blocks,
+    publishing the live amplitude envelope as it plays."""
     if pad_sec > 0:
         arr = np.concatenate([arr, np.zeros(int(SAMPLE_RATE * pad_sec), dtype=np.float32)])
     dev_idx = _resolve_output_device()
     stream  = _get_output_stream(dev_idx)
-    chunk   = SAMPLE_RATE * 2   # 2s chunks keeps the write loop responsive to _STOP
-    i = 0
-    while i < len(arr):
-        if _STOP.is_set():
-            break
-        try:
-            stream.write(arr[i : i + chunk].astype(np.float32, copy=False))
-        except Exception:
-            break
-        i += chunk
+    _write_stream(stream, arr)
+    set_amplitude(0.0, force=True)   # settle the orb the instant playback ends
 
 
 def speak_progressive(text: str) -> dict:
@@ -569,9 +609,7 @@ def speak_progressive(text: str) -> dict:
         nonlocal first_audio
         if a is None or not getattr(a, "size", 0):
             return True
-        try:
-            stream.write(a.astype(np.float32, copy=False))
-        except Exception:
+        if not _write_stream(stream, a):
             return False
         if first_audio < 0:
             first_audio = time.perf_counter() - t0
@@ -622,6 +660,7 @@ def speak_progressive(text: str) -> dict:
         print(f"[styletts] reply in {total_s:.2f}s first-audio {first_audio:.2f}s "
               f"fillers={fillers} chunks={len(chunks)}", flush=True)
         set_state("idle")
+        set_amplitude(0.0, force=True)   # settle the orb the instant playback ends
 
     return {"chars": len(text),
             "first_audio_s": round(first_audio, 2) if first_audio > 0 else None,

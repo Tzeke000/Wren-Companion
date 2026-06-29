@@ -1451,6 +1451,7 @@ async def ws(socket: WebSocket) -> None:
 # truth; this only mirrors. FAIL-OPEN: any error leaves the orb on its prior (emotion) state,
 # never crashes iris_runtime.
 _VOICE_STATUS_FILE = Path(r"D:\Wren-Companion\scratch\voice_status.json")
+_VOICE_AMP_FILE = Path(r"D:\Wren-Companion\scratch\voice_amplitude.json")
 _VOICE_DAEMON_ADDR = ("127.0.0.1", int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770")))
 # Daemon vocabulary (wren_voice_status.STATES) -> orb voice_loop.state vocabulary (App.tsx).
 _VOICE_STATE_MAP = {
@@ -1477,6 +1478,20 @@ def _voice_daemon_alive(timeout: float = 2.0) -> bool:
         return b"pong" in buf
     except Exception:
         return False
+
+
+def _read_voice_amplitude(max_age: float = 0.3) -> float:
+    """Live playback envelope (0-1) published by the mouth; 0.0 if missing or stale
+    (staleness = the mouth isn't currently playing). Cheap file read, fail-open."""
+    import json as _json
+    try:
+        with open(_VOICE_AMP_FILE, encoding="utf-8") as f:
+            d = _json.load(f)
+        if time.time() - float(d.get("ts", 0.0)) <= max_age:
+            return max(0.0, min(1.0, float(d.get("amp", 0.0))))
+    except Exception:
+        pass
+    return 0.0
 
 
 def _voice_state_mirror() -> None:
@@ -1506,11 +1521,20 @@ def _voice_state_mirror() -> None:
             _g["_voice_mirror_alive"] = bool(alive)
             _g["_voice_mirror_state"] = _VOICE_STATE_MAP.get(state, "passive")
             _g["_tts_speaking"] = speaking
-            # Phase 1: synthetic amplitude (state-driven). Live per-frame envelope is Phase 2.
-            _g["_tts_amplitude"] = 0.6 if speaking else 0.0
+            # Phase 2 (2026-06-29): live per-frame envelope from the mouth
+            # (scratch/voice_amplitude.json, written by wren_styletts_server during
+            # playback) so the orb pulses to my REAL voice. Fall back to a synthetic
+            # level only if the amplitude file is missing/stale (e.g. the mouth-side
+            # build isn't deployed yet) so this degrades gracefully.
+            if speaking:
+                amp = _read_voice_amplitude()
+                _g["_tts_amplitude"] = amp if amp > 0.0 else 0.6
+            else:
+                _g["_tts_amplitude"] = 0.0
         except Exception:
             pass
-        time.sleep(0.4)
+        # Poll fast while speaking (track the envelope), lazy otherwise (cheap).
+        time.sleep(0.06 if _g.get("_tts_speaking") else 0.4)
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
