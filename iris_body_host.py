@@ -508,6 +508,21 @@ async def _ensure_iris_attached(client, retries: int = 6, settle: float = 5.0, g
     down the host, and the voice daemon (:8770) is reachable directly regardless.
     Born 2026-06-28 (Zeke: "you should be able to reconnect to MCP" - correct).
     """
+    # Persist diagnostics to disk - the launcher runs this host in an ephemeral
+    # ELEVATED console with no redirect, so without this the real MCP failure
+    # reason (status + the SDK-provided 'error' field) is lost on every boot.
+    log_path = os.path.join(REPO_ROOT, "logs", "iris_attach.log")
+
+    def _alog(msg: str) -> None:
+        line = "[iris_attach] " + msg
+        print(line, file=sys.stderr, flush=True)
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:
+            pass  # logging must never break the guard
+
     await asyncio.sleep(settle)  # let the SDK's own startup handshake finish first
     for attempt in range(1, retries + 1):
         try:
@@ -517,19 +532,21 @@ async def _ensure_iris_attached(client, retries: int = 6, settle: float = 5.0, g
             state = _mcp_field(iris, "status") if iris is not None else "absent"
             if state == "connected":
                 tools = _mcp_field(iris, "tools") or []
-                print("[host] iris MCP attached - body online ("
-                      + str(len(tools)) + " tools)" + (" on retry " + str(attempt) if attempt > 1 else ""),
-                      flush=True)
+                _alog("iris MCP attached - body online (" + str(len(tools)) + " tools)"
+                      + (" on retry " + str(attempt) if attempt > 1 else ""))
                 return True
-            print("[host] iris MCP not attached (status=" + str(state) + "); reconnect attempt "
-                  + str(attempt) + "/" + str(retries) + "...", file=sys.stderr, flush=True)
+            # Capture WHY it failed - status='failed' carries an 'error' string, and
+            # the names of the servers that DID attach tell us if it's iris-specific.
+            err = _mcp_field(iris, "error") if iris is not None else None
+            others = [str(_mcp_field(s, "name")) + "=" + str(_mcp_field(s, "status")) for s in servers]
+            _alog("attempt " + str(attempt) + "/" + str(retries) + ": iris status=" + str(state)
+                  + " error=" + repr(err) + " | all_servers=" + str(others))
             await client.reconnect_mcp_server("iris")
         except Exception as e:  # noqa: BLE001 - fail open
-            print("[host] iris attach-guard error (non-fatal): " + repr(e), file=sys.stderr, flush=True)
+            _alog("guard error (non-fatal): " + repr(e))
         await asyncio.sleep(gap)
-    print("[host] iris MCP still not attached after " + str(retries)
-          + " tries - body runs degraded (voice daemon :8770 still reachable directly).",
-          file=sys.stderr, flush=True)
+    _alog("iris MCP still not attached after " + str(retries)
+          + " tries - body runs degraded (voice daemon :8770 still reachable directly).")
     return False
 
 
