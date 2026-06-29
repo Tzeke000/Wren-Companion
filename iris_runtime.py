@@ -1360,12 +1360,15 @@ def voice_say_chunk(text: str, emotion: str = "neutral", intensity: float = 0.5)
     # signal-bus event so heartbeat / consolidation see real activity.
     try:
         from brain import mood_core
-        m = mood_core.load_mood_raw()
-        weights = dict(m.get("emotion_weights") or mood_core.DEFAULT_EMOTIONS)
-        weights["interest"] = min(1.0, weights.get("interest", 0.13) + 0.005)
-        weights["calmness"] = max(0.0, weights.get("calmness", 0.24) - 0.002)
-        m["emotion_weights"] = mood_core.normalize_emotions(weights)
-        mood_core.save_mood_raw(m)
+        deltas = mood_core.infer_affect_nudge(text)
+        if deltas:
+            # What I'm expressing moves my mood (auto path). Scaled down per-chunk so a
+            # multi-sentence reply doesn't compound into a strobe.
+            mood_core.nudge_emotions({k: v * 0.4 for k, v in deltas.items()},
+                                     reason="expressed affect (voice)")
+        else:
+            mood_core.nudge_emotions({"interest": 0.005, "calmness": -0.002},
+                                     reason="engagement")
     except Exception:
         pass
     try:
@@ -1543,12 +1546,12 @@ def chat_reply(request_id: str, text: str) -> dict:
         # Phase 26: chat reply nudges mood toward engagement + fires signal.
         try:
             from brain import mood_core
-            m = mood_core.load_mood_raw()
-            weights = dict(m.get("emotion_weights") or mood_core.DEFAULT_EMOTIONS)
-            weights["interest"] = min(1.0, weights.get("interest", 0.13) + 0.01)
-            weights["calmness"] = max(0.0, weights.get("calmness", 0.24) - 0.003)
-            m["emotion_weights"] = mood_core.normalize_emotions(weights)
-            mood_core.save_mood_raw(m)
+            deltas = mood_core.infer_affect_nudge(text)
+            if deltas:
+                mood_core.nudge_emotions(deltas, reason="expressed affect (chat)")
+            else:
+                mood_core.nudge_emotions({"interest": 0.01, "calmness": -0.003},
+                                         reason="engagement")
         except Exception:
             pass
         try:
