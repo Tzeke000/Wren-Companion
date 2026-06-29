@@ -376,6 +376,19 @@ async def discord_poller(token, queue, loop, baseline_id):
         except Exception as e:
             print("\n[host] discord poll failed (non-fatal): " + repr(e), file=sys.stderr)
             continue
+        # Discord returns a DICT on errors (429 rate-limit, auth slip) instead of a message
+        # LIST. Without this guard, `sorted(msgs, key=...x["id"])` raises on the dict keys
+        # OUTSIDE the try above and silently kills this poller for the whole session — Zeke's
+        # Discord reach gone with no trace. (Wren sweep finding #4, 2026-06-29.) Log it (not
+        # silent) and, if it's a rate-limit, honor retry_after so we back off, not hammer.
+        if not isinstance(msgs, list):
+            print("\n[host] discord poll: non-list body (rate-limit/error?): "
+                  + repr(msgs)[:200], file=sys.stderr)
+            if isinstance(msgs, dict):
+                ra = msgs.get("retry_after")
+                if isinstance(ra, (int, float)) and ra > 0:
+                    await asyncio.sleep(min(ra, 60))
+            continue
         for m in sorted(msgs, key=lambda x: int(x["id"])):  # oldest-first = natural order
             last = m["id"]  # advance regardless, so a skipped message isn't re-seen
             author = m.get("author", {}) or {}
@@ -535,9 +548,17 @@ def _daemon_listen_once():
     )
     try:
         resp = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        # A non-JSON daemon reply is an anomaly (truncated/garbled response), NOT a normal
+        # no-speech — log it instead of swallowing silently, so a bad daemon response leaves
+        # a trace rather than a vanished turn. (Wren sweep finding #5, 2026-06-29.) repr
+        # bounded so a huge body can't flood the log.
+        print("[host] voice listen: non-JSON daemon reply (dropped): "
+              + repr(raw)[:200] + " err=" + repr(e), file=sys.stderr)
         return None
     if not resp.get("ok"):
+        print("[host] voice listen: daemon returned ok=false (dropped): "
+              + repr(resp)[:200], file=sys.stderr)
         return None
     result = resp.get("result")
     if not isinstance(result, str):
