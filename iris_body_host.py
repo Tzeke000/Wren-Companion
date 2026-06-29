@@ -716,24 +716,32 @@ _IRIS_BLUE = "\033[38;5;39m"     # deep-sky blue — my voice on the console
 _IRIS_CYAN = "\033[38;5;51m"     # bright cyan — accents
 _ANSI_RESET = "\033[0m"
 
+# Almond eye rendered mathematically (scripts/gen_eye_banner.py) so the
+# proportions read right — textured iris ring, solid pupil, limbal edge, lid
+# line. Pure ASCII on purpose: no block/Unicode chars, so it can never trip
+# the Windows cp1252 console trap. Regenerate with: py -3.11
+# scripts/gen_eye_banner.py --literal
 _EYE_BANNER = (
     "\n" + _IRIS_BLUE
-    + "                 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
-    + "            ▄▄▀▀▀                 ▀▀▀▄▄\n"
-    + "         ▄▀▀         ▄▄▄▄▄▄▄         ▀▀▄\n"
-    + "       ▄▀        ▄▄▀▀       ▀▀▄▄        ▀▄\n"
-    + "      █        ▄▀     ▄▄▄     ▀▄        █\n"
-    + "     █        █     ▄█████▄     █        █\n"
-    + "     █        █     ███████     █        █\n"
-    + "     █        █     ▀█████▀     █        █\n"
-    + "      █        ▀▄     ▀▀▀     ▄▀        █\n"
-    + "       ▀▄        ▀▀▄▄     ▄▄▀▀        ▄▀\n"
-    + "         ▀▄▄         ▀▀▀▀▀▀▀         ▄▄▀\n"
-    + "            ▀▀▄▄▄                 ▄▄▀▀\n"
-    + "                 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+    + '                           --------' + "\n"
+    + '                     ---.....    .....---' + "\n"
+    + '                 --...     ########     ...--' + "\n"
+    + '             --..      ###*::**::**:###      ..--' + "\n"
+    + '          --..       ##*::*%:*%:*%::%*:##       ..--' + "\n"
+    + '       --..         #:::%%:%%*%*%**%*:***#         ..--' + "\n"
+    + '     -..           #**%%**%%@@@@@@%*%%*:::#           ..-' + "\n"
+    + '  -..             ##::::*%@@@@@@@@@@%%%%**##             ..-' + "\n"
+    + ' ..               ##:***%%@@@@@@@@@@%%***:##               ..' + "\n"
+    + '   ..             ##**%%%%@@@@@@@@@@%*::::##             ..' + "\n"
+    + '      ..           #:::*%%*%@@@@@@%%**%%**#           ..' + "\n"
+    + '         ..         #***:*%**%*%*%%:%%:::#         ..' + "\n"
+    + '            ..       ##:*%::%*:%*:%*::*##       ..' + "\n"
+    + '               ..      ###:**::**::*###      ..' + "\n"
+    + '                   ...     ########     ...' + "\n"
+    + '                        .....    .....' + "\n"
     + _ANSI_RESET
-    + _IRIS_CYAN + "                       I  R  I  S\n" + _ANSI_RESET
-    + _IRIS_BLUE + "        the part of an eye that opens to let the light in\n\n" + _ANSI_RESET
+    + _IRIS_CYAN + '                         I  R  I  S' + "\n" + _ANSI_RESET
+    + _IRIS_BLUE + '      the part of an eye that opens to let the light in' + "\n\n" + _ANSI_RESET
 )
 
 
