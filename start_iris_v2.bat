@@ -38,14 +38,29 @@ if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
     exit /b 2
 )
 
-REM --- Kill the STALE voice stack BEFORE the watchdog launches, so an orphaned old
-REM --- watchdog can never keep the singleton mutex (which makes our fresh watchdog
-REM --- no-op) and keep owning/respawning voice. We match by SCRIPT NAME (watchdog +
-REM --- daemon + StyleTTS2 mouth), not by port, so it also clears a stuck-loading mouth
-REM --- and the mutex-holding watchdog itself. Now elevated, this reaches an elevated
-REM --- orphan too. Scoped to the 3 voice scripts: spares post-office, operator API,
-REM --- and the body host (different script names).
-powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voice_watchdog|wren_voice_daemon|wren_styletts_server' } | ForEach-Object { Write-Host ('[start_iris_v2.bat] killing stale voice PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+REM --- Kill the WHOLE stale stack BEFORE relaunch, so nothing old holds a port, a
+REM --- device, the watchdog's singleton mutex, OR iris_runtime's single-instance
+REM --- pidfile. The pidfile one is load-bearing: if a stale iris_runtime survives a
+REM --- restart, the fresh MCP-child iris_runtime that claude.exe spawns EXITS on its
+REM --- single-instance guard -> my voice/memory/time TOOLS never attach (the boot bug
+REM --- Zeke diagnosed 2026-06-28: "the .bat doesn't kill old process then start its
+REM --- own"). Match by SCRIPT NAME across everything I need clean: voice stack
+REM --- (watchdog + daemon + StyleTTS2 mouth), iris_runtime itself, AND any prior
+REM --- iris_body_host (no double-cognition). Now elevated, this reaches an elevated
+REM --- orphan too. SPARES sibling_postoffice (Wren's lifeline) + anything else by name.
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voice_watchdog|wren_voice_daemon|wren_styletts_server|iris_runtime|iris_body_host' } | ForEach-Object { Write-Host ('[start_iris_v2.bat] killing stale PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+
+REM --- Clear iris_runtime's stale single-instance pidfile so the fresh MCP-child binds
+REM --- clean (a dead-PID file is self-cleaned, but a leftover from a hard kill is not).
+if exist "D:\Wren-Companion\state\iris.pid" del /q "D:\Wren-Companion\state\iris.pid" >nul 2>&1
+
+REM --- Backstop: free the ports in case a WORKER survived the name-kill (Wren's
+REM --- parent/worker scar: a kill that misses the port-holder leaves a zombie on the
+REM --- port and the fresh bind fails). Port-free is the real gate, the name-kill is best-effort.
+powershell -NoProfile -Command "foreach ($p in 5876,8769,8770) { Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }"
+
+REM --- Brief settle so the OS releases ports + camera/mic before relaunch.
+timeout /t 2 /nobreak >nul
 
 REM Voice stack (StyleTTS2 mouth :8769 + voice daemon :8770) via the watchdog,
 REM same as start_iris.bat. The watchdog has a named-mutex singleton guard, so a
