@@ -53,6 +53,21 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+# --- MCP server startup/tool timeouts (load-bearing for body attach) ----------
+# The iris MCP server (iris_runtime.py) pre-imports torch/kokoro/faster_whisper/
+# insightface at module level BEFORE it can answer the MCP initialize handshake
+# (those imports must be main-thread to avoid an _imp-lock deadlock - see the
+# comment block in iris_runtime.py ~line 82). Measured cost: ~21s warm, 35-60s
+# cold. Claude Code's default MCP startup timeout (~30s) loses that race on a
+# cold boot, so claude.exe disables the iris server and my BODY never attaches
+# (cloak/discord start fast and survive - that asymmetry was the tell).
+# Give the spawn generous headroom. setdefault => an explicit override wins.
+# MCP_TOOL_TIMEOUT is bumped too: iris tools like ambient_snapshot honestly take
+# ~2min, and the default tool timeout would abort them mid-run.
+# Diagnosed + fixed 2026-06-28 (Zeke: "your body should be attached at startup").
+os.environ.setdefault("MCP_TIMEOUT", "120000")        # 120s server startup
+os.environ.setdefault("MCP_TOOL_TIMEOUT", "180000")   # 180s per-tool call
+
 try:
     from claude_agent_sdk import (
         ClaudeSDKClient,
