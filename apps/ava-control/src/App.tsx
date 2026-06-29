@@ -143,6 +143,24 @@ function hexToRgbTriplet(hex: string): string {
   return `${(n >> 16) & 255} ${(n >> 8) & 255} ${n & 255}`;
 }
 
+function mixHex(a: string, b: string, t: number): string {
+  // Linear blend of two #rrggbb colors; t=0 -> a, t=1 -> b. Used to tint the orb
+  // toward a secondary emotion so a MIX of feelings (e.g. calm + curious) shows as a
+  // blend instead of only the top emotion's color.
+  const f = Math.max(0, Math.min(1, t));
+  const pa = a.replace("#", "").trim();
+  const pb = b.replace("#", "").trim();
+  const na = Number.parseInt(pa.slice(0, 6), 16);
+  const nb = Number.parseInt(pb.slice(0, 6), 16);
+  if (!Number.isFinite(na) || !Number.isFinite(nb)) return a;
+  const lerp = (x: number, y: number) =>
+    Math.max(0, Math.min(255, Math.round(x + (y - x) * f)));
+  const r = lerp((na >> 16) & 255, (nb >> 16) & 255);
+  const g = lerp((na >> 8) & 255, (nb >> 8) & 255);
+  const bl = lerp(na & 255, nb & 255);
+  return `#${((1 << 24) | (r << 16) | (g << 8) | bl).toString(16).slice(1)}`;
+}
+
 function shadeHex(hex: string, factor: number): string {
   const clean = hex.replace("#", "").trim();
   const full = clean.length === 3 ? clean.split("").map((c) => `${c}${c}`).join("") : clean;
@@ -1523,20 +1541,30 @@ export default function App() {
   const currentInnerThought = String(innerLifeBlock?.current_thought ?? "").trim();
   const primaryEmotion = String(mood?.primary_emotion ?? "calmness").toLowerCase();
   const orbVisual = EMOTION_VISUALS[primaryEmotion] ?? EMOTION_VISUALS.calmness;
+  const secondaryEmotions = Array.isArray(mood?.secondary_emotions)
+    ? (mood?.secondary_emotions as Array<Record<string, unknown>>)
+    : [];
+  // Mix: tint the orb's base color toward the strongest secondary emotion, weighted by its
+  // intensity (capped at 0.45 so the primary still dominates). This is how a BLEND of
+  // feelings — calm + curious, frustrated + amused — actually shows on the orb instead of
+  // only the top emotion's flat color.
+  const secEmotionName = String(secondaryEmotions[0]?.emotion ?? "").toLowerCase();
+  const secVisual = secEmotionName ? EMOTION_VISUALS[secEmotionName] : undefined;
+  const secIntensity = Number(secondaryEmotions[0]?.intensity ?? 0);
+  const orbBaseColor = secVisual && secIntensity > 0
+    ? mixHex(orbVisual.color, secVisual.color, Math.min(0.45, secIntensity))
+    : orbVisual.color;
   // Connectivity-aware orb color: dims and cools when offline
   const connOffline = !connOnline && online; // backend up but no internet
   const effectiveOrbColor = backendShutdownDetected
     ? "#6b7280"
     : connOffline
-      ? shadeHex(orbVisual.color, 0.72)  // 10% dimmer when internet offline
-      : orbVisual.color;
+      ? shadeHex(orbBaseColor, 0.72)  // 10% dimmer when internet offline
+      : orbBaseColor;
   const styleGlow = Number(style?.orb_glow_intensity ?? 0.8);
   const orbMidColor = shadeHex(effectiveOrbColor, 1.08);
   const orbDarkColor = shadeHex(effectiveOrbColor, 0.52);
   const orbDeepColor = shadeHex(effectiveOrbColor, 0.32);
-  const secondaryEmotions = Array.isArray(mood?.secondary_emotions)
-    ? (mood?.secondary_emotions as Array<Record<string, unknown>>)
-    : [];
   const primaryIntensity = Number(mood?.primary_intensity ?? 0);
   const lastAssistantMessage = [...chatHist]
     .reverse()
@@ -2496,7 +2524,18 @@ export default function App() {
                         wakeProgress={wakeProgress}
                       />
                     </div>
-                    <div className="chat-orb-label">{primaryEmotion}</div>
+                    <div className="chat-orb-label">
+                      {primaryEmotion}
+                      {secondaryEmotions.length > 0 && (
+                        <span style={{ opacity: 0.6, fontSize: "0.85em" }}>
+                          {" + "}
+                          {secondaryEmotions
+                            .map((e) => String(e.emotion ?? ""))
+                            .filter(Boolean)
+                            .join(", ")}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <Section title="Awareness">
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
