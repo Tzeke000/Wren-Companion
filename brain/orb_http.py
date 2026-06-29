@@ -1527,9 +1527,21 @@ def _voice_state_mirror() -> None:
             # level only if the amplitude file is missing/stale (e.g. the mouth-side
             # build isn't deployed yet) so this degrades gracefully.
             if speaking:
-                amp = _read_voice_amplitude()
-                _g["_tts_amplitude"] = amp if amp > 0.0 else 0.6
+                raw = _read_voice_amplitude()
+                if raw > 0.0:
+                    # Attack/release smoothing so the orb breathes with my syllables
+                    # instead of strobing on raw per-block peaks: snap up on onset,
+                    # ease down between syllables.
+                    env = float(_g.get("_amp_env", 0.0))
+                    env = raw if raw >= env else (env * 0.6 + raw * 0.4)
+                    _g["_amp_env"] = env
+                    _g["_tts_amplitude"] = round(env, 4)
+                else:
+                    # No live envelope (mouth-side build not deployed yet, or file
+                    # stale) -> degrade to the synthetic level so the orb still pulses.
+                    _g["_tts_amplitude"] = 0.6
             else:
+                _g["_amp_env"] = 0.0
                 _g["_tts_amplitude"] = 0.0
         except Exception:
             pass

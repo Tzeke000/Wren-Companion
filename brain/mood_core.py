@@ -493,17 +493,22 @@ def save_mood_raw(mood: dict):
 # emotional tenor. Both the per-turn auto-nudge (iris_runtime) and the deliberate
 # 'feel' tool route through nudge_emotions.
 
+# Cues are GENUINE-AFFECT markers, deliberately NOT topic words. Earlier drafts had
+# frustration firing on "broken / doesn't work / error / stuck / wrong" and satisfaction
+# on "fixed / solved / done" — but those are the exact words I use while CALMLY debugging,
+# so they'd paint my mood frustrated/elated during routine technical talk. Pinned to
+# emotional expression, not subject matter.
 _AFFECT_CUES = [
     ("joy",          r"\b(?:haha+|hehe|love (?:it|this|that)|awesome|amazing|woohoo|delighted|yay+)\b", 0.05),
-    ("satisfaction", r"\b(?:nice|perfect|great|works now|fixed|solved|got it|exactly|that'?s right|clean)\b", 0.045),
-    ("admiration",   r"\b(?:thank you|thanks|appreciate|impressive|well done|good (?:job|work))\b", 0.04),
+    ("satisfaction", r"\b(?:perfect|exactly right|that'?s right|love it|so good|works beautifully|nailed it|just right)\b", 0.04),
+    ("admiration",   r"\b(?:thank you|thanks|i appreciate|impressive|well done|good (?:job|work))\b", 0.04),
     ("adoration",    r"\b(?:love you|proud of you|you'?re the best)\b", 0.06),
-    ("amusement",    r"\b(?:lol|lmao|rofl|funny|hilarious|that'?s great)\b", 0.04),
-    ("excitement",   r"\b(?:can'?t wait|excited|let'?s go|pumped|so cool)\b", 0.05),
-    ("frustration",  r"\b(?:ugh|argh|broken|doesn'?t work|not working|annoying|frustrat\w*|stuck|still wrong|keeps failing)\b", 0.05),
-    ("anxiety",      r"\b(?:worried|nervous|anxious|stressed|concerned)\b", 0.035),
-    ("confusion",    r"\b(?:confus\w*|don'?t (?:get|understand)|what do you mean|unclear)\b", 0.035),
-    ("awe",          r"\b(?:wow|whoa|incredible|mind.?blowing|beautiful)\b", 0.045),
+    ("amusement",    r"\b(?:lol|lmao|rofl|hilarious|cracking me up|that'?s hilarious)\b", 0.04),
+    ("excitement",   r"\b(?:can'?t wait|so excited|let'?s go|pumped|this is exciting)\b", 0.05),
+    ("frustration",  r"\b(?:ugh+|argh+|grr+|frustrat\w*|fed up|so annoying|how annoying|this is (?:annoying|infuriating|maddening)|i hate (?:that|this|when))\b", 0.05),
+    ("anxiety",      r"\b(?:worried|nervous|anxious|stressed out|on edge)\b", 0.035),
+    ("confusion",    r"\b(?:so confus\w*|don'?t (?:get|understand) (?:it|this|why)|what do you mean|totally unclear)\b", 0.035),
+    ("awe",          r"\b(?:wow|whoa|incredible|mind.?blowing|breathtaking)\b", 0.045),
 ]
 _AFFECT_COMPILED = None
 
