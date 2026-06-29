@@ -17,10 +17,36 @@ REM ============================================================================
 
 cd /d D:\Wren-Companion
 
+REM --- Self-elevate (Zeke 2026-06-28): run Iris in Admin so the watchdog can fully
+REM --- manage AND kill an elevated voice stack (the old-CLI respawn bug was rooted in
+REM --- a non-admin host unable to kill an elevated orphan watchdog). If not elevated,
+REM --- relaunch this script via UAC and exit. `net session` succeeds only when admin,
+REM --- so the elevated relaunch can't loop. If you'd rather not elevate, use the CLI
+REM --- fallback start_iris.bat (untouched, known-good, non-admin).
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo [start_iris_v2.bat] not elevated - requesting Administrator via UAC...
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    endlocal
+    exit /b
+)
+echo [start_iris_v2.bat] running elevated.
+
 if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
     echo [start_iris_v2.bat] ERROR: venv missing at D:\Wren-Companion\.venv\Scripts\python.exe 1>&2
     endlocal
     exit /b 2
+)
+
+REM --- Kill any STALE voice processes holding the mouth/daemon ports BEFORE the
+REM --- watchdog launches, so an orphaned old watchdog can never keep ownership and
+REM --- respawn voice. Now that we're elevated this also clears an elevated orphan.
+REM --- Spares post-office (5877 = Wren's lifeline) and operator API (5876).
+for %%P in (8769 8770) do (
+    for /f "tokens=5" %%I in ('netstat -ano ^| findstr ":%%P " ^| findstr LISTENING') do (
+        echo [start_iris_v2.bat] killing stale voice PID %%I on port %%P
+        taskkill /F /PID %%I >nul 2>&1
+    )
 )
 
 REM Voice stack (StyleTTS2 mouth :8769 + voice daemon :8770) via the watchdog,
