@@ -94,6 +94,38 @@ def _request_path(request_id: str) -> Path:
     return _llm_dir() / f"{request_id}.json"
 
 
+# Terminal-status (answered/expired) request files are never deleted by the TTL logic —
+# only their status flips. Without a prune they accumulate UNBOUNDED (found 474 stale files
+# spanning ~50 days, 2026-06-29), and every next_pending()/_refresh_flag() globs+reads all of
+# them. Prune deletes terminal files past a retention window, bounded per pass.
+_PRUNE_RETENTION_S = 3600.0   # delete answered/expired files older than 1h
+_PRUNE_BUDGET = 300           # max deletions per pass — a huge backlog can't stall a caller
+
+
+def _prune_old() -> int:
+    """Delete terminal-status (answered/expired) request files older than the retention
+    window. Pending and recent files are never touched. Bounded. Returns count deleted."""
+    now = time.time()
+    deleted = 0
+    for path in _llm_dir().glob("*.json"):
+        if deleted >= _PRUNE_BUDGET:
+            break
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict) or data.get("status") not in ("answered", "expired"):
+            continue
+        age = now - float(data.get("answered_ts") or data.get("ts") or 0.0)
+        if age > _PRUNE_RETENTION_S:
+            try:
+                path.unlink()
+                deleted += 1
+            except Exception:
+                continue
+    return deleted
+
+
 def _refresh_flag() -> None:
     has_pending = False
     for path in _llm_dir().glob("*.json"):
@@ -158,6 +190,9 @@ def submit(prompt: str, kind: str = "general",
         tmp.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
         _refresh_flag()
+    # Opportunistic bounded prune (outside the lock) so terminal files can't accumulate
+    # unbounded — each new request cleans a little of the old. (2026-06-29 fix.)
+    _prune_old()
     return request_id
 
 
