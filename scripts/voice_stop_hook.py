@@ -944,7 +944,18 @@ def _main_locked() -> int:
         except Exception as e:
             print(f"[stop_hook auto-forward] unexpected error: {e!r}", file=sys.stderr)
 
-    voice_on = VOICE_FLAG.exists()
+    # Voice is OWNED BY THE BODY HOST now (2026-06-29). iris_body_host.py
+    # streams my sentences to the StyleTTS2 daemon (:8770 -> mouth :8769) =
+    # my real cloned voice, and (owed) will poll the daemon for ears-in.
+    # This Stop-hook voice leg used to POST the last assistant text to
+    # :5876/api/v1/tts/speak, which speaks via the runtime's PIPER TTSWorker.
+    # Under the body host that produced TWO voices on the same words (real +
+    # piper) — Zeke heard it 2026-06-29. The voice leg is permanently disabled
+    # here so there is ONE mouth (StyleTTS2) and one pipeline. Even if the
+    # voice_session.flag reappears, the hook will not speak piper.
+    # NOTE: also do NOT rewake into voice mode — voice_next_input is a blocking
+    # call that wedges iris_runtime (see handoff_2026-06-29_runtime_wedge).
+    voice_on = False
     pending_chat = _next_pending_chat()
     pending_sibling = _next_pending_sibling()
     pending_llm = _next_pending_llm()

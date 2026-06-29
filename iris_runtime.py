@@ -4191,8 +4191,20 @@ def _eager_init_engines() -> None:
     try:
         tts = _ensure_tts()
         _ensure_stt()
-        _ensure_wake()
-        print("[iris_runtime] all engines online — listening", file=sys.stderr, flush=True)
+        # Mic ownership (v2, 2026-06-29): under the Agent-SDK body host the voice DAEMON
+        # (:8770) owns the microphone — its cmd_listen IS the ears, bridged by the host's
+        # voice_reader. iris_runtime must NOT also open the mic: two InputStreams on one
+        # device contend and captures come back "unclear/empty" (diagnosed live with Zeke
+        # 2026-06-29 — he spoke clearly and the daemon got nothing because the wake-word
+        # listener held the mic). So the wake-word listener + autonomous body_capture are
+        # gated OFF by default. Set IRIS_RUNTIME_OWNS_MIC=1 ONLY for the legacy CLI flow
+        # where iris_runtime is the sole voice path (voice_next_input).
+        _runtime_owns_mic = os.environ.get("IRIS_RUNTIME_OWNS_MIC", "0").strip().lower() in ("1", "on", "true", "yes")
+        if _runtime_owns_mic:
+            _ensure_wake()
+            print("[iris_runtime] all engines online — listening (runtime owns mic)", file=sys.stderr, flush=True)
+        else:
+            print("[iris_runtime] mic released to voice daemon (IRIS_RUNTIME_OWNS_MIC=0) — wake-word listener NOT started", file=sys.stderr, flush=True)
 
         # Phase 1 vision — InsightFace + per-frame capture thread. Failures are
         # non-fatal: the orb camera tab falls back to raw cv2 frames without
@@ -4392,7 +4404,11 @@ def _eager_init_engines() -> None:
         # would just sit idle on _channel_attached/_wake_word_ts polls.
         try:
             from brain import iris_body_capture
-            if _stt is not None and _wake is not None:
+            if not _runtime_owns_mic:
+                # v2: the voice daemon owns the mic; the autonomous wake-and-capture loop
+                # would contend for it. Skip it — the host's voice_reader is the ears now.
+                print("[iris_runtime] body_capture not started — mic owned by voice daemon (v2)", file=sys.stderr, flush=True)
+            elif _stt is not None and _wake is not None:
                 iris_body_capture.start(
                     g=_g,
                     root=ROOT,

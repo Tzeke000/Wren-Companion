@@ -123,6 +123,17 @@ HEADS_DOWN_CUE = os.environ.get(
     "whenever you get a moment.",
 )
 
+# --- Ears-in (the EARS, built 2026-06-29) ------------------------------------------
+# The voice daemon (:8770) owns the rich recognition pipeline Wren built: whisper ears,
+# smart-turn endpointing (detects Zeke's pauses), and prosody (words-per-minute +
+# emphasis marking). Its cmd_listen BLOCKS until Zeke finishes a turn, then returns an
+# ENRICHED transcript. The host-side voice_reader below runs that blocking listen in an
+# executor so it never freezes the event loop, and never calls iris_runtime's
+# voice_next_input (that synchronous MCP call wedged the whole runtime 2026-06-29 - see
+# handoff_2026-06-29_runtime_wedge). This is the bridge that gives the body ears under v2.
+EARS_ON = os.environ.get("IRIS_EARS", "on").strip().lower() not in ("0", "off", "false", "no", "")
+VOICE_LISTEN_TIMEOUT_S = float(os.environ.get("IRIS_VOICE_LISTEN_TIMEOUT_S", "45"))
+
 
 def _is_speak_tool(block):
     """True if this tool-use is a deliberate voice_speak (direct or via iris_tool_call)."""
@@ -414,6 +425,82 @@ async def terminal_reader(queue, loop):
         await queue.put(("terminal", user, None))
 
 
+# ----------------------------------------------------------------- Voice inbound (the EARS)
+def _daemon_listen_once():
+    """Blocking: ask the daemon for the next enriched utterance. Returns the transcript
+    string, or None if no speech / error / unclear marker (caller just re-polls).
+
+    Runs in an executor (never on the event loop). cmd_listen waits for the mouth to drain
+    (ctx.speaking==False) before capturing, so it won't transcribe my own TTS tail."""
+    raw = daemon_cmd(
+        "listen",
+        {"timeout_seconds": VOICE_LISTEN_TIMEOUT_S},
+        timeout=VOICE_LISTEN_TIMEOUT_S + 20.0,   # socket must outlive the listen's own timeout
+    )
+    try:
+        resp = json.loads(raw)
+    except Exception:
+        return None
+    if not resp.get("ok"):
+        return None
+    result = resp.get("result")
+    if not isinstance(result, str):
+        return None
+    result = result.strip()
+    # The daemon's no-speech / capture-error / unclear markers all start with
+    # "[voice_listen]". Real transcripts never do — so this cleanly skips non-utterances.
+    if not result or result.startswith("[voice_listen]"):
+        return None
+    return result
+
+
+async def _wait_until_quiet(loop, settle_grace=0.8, cap_s=180.0):
+    """After a turn, wait for the mouth to finish playing before reopening the ears.
+    Polls the daemon's overlay state (state=speaking while playing). The settle_grace lets
+    a just-enqueued reply flip the state to speaking before we poll. cap_s is a wedged-mouth
+    backstop so a stuck mouth can't keep the ears shut forever."""
+    await asyncio.sleep(settle_grace)
+    deadline = time.time() + cap_s
+    while time.time() < deadline:
+        try:
+            st = await loop.run_in_executor(None, lambda: daemon_cmd("status", timeout=3))
+        except Exception:
+            return
+        if "state=speaking" not in st:
+            return
+        await asyncio.sleep(0.2)
+
+
+async def voice_reader(queue, loop, mic_gate):
+    """Warm the rich call once, then loop the daemon's blocking listen and enqueue each
+    real utterance as ('voice', transcript, None). The 'voice' source auto-speaks my reply.
+
+    Self-listen safety (two gates):
+      1. mic_gate is CLEARED whenever I'm processing a turn (thinking + speaking). The reader
+         waits on it before opening the mic, so it never starts a listen while I speak.
+      2. If the gate got cleared DURING a listen (a cross-channel turn spoke while the mic was
+         idle-open), the captured audio is likely my own voice - so we DROP it rather than
+         echo myself back as input. Safe-side failure: drop, never feed back."""
+    # Warm the rich in-call pipeline (prosody/smart-turn/fillers). It speaks a short
+    # confirmation when ready, so Zeke hears the ears come online. Non-fatal: if it fails,
+    # listen still works out-of-call (plain transcript, just no prosody enrichment).
+    try:
+        await loop.run_in_executor(None, lambda: daemon_cmd("call_start", {}, timeout=120.0))
+    except Exception as e:
+        print("\n[host] voice call_start failed (non-fatal, ears still on): " + repr(e), file=sys.stderr)
+    print("[host] voice ears: ON - listening via the daemon's rich pipeline (prosody + smart-turn).")
+    while True:
+        await mic_gate.wait()            # gate 1: don't open the mic while I'm in a turn
+        try:
+            text = await loop.run_in_executor(None, _daemon_listen_once)
+        except Exception as e:
+            print("\n[host] voice listen failed (non-fatal): " + repr(e), file=sys.stderr)
+            await asyncio.sleep(2.0)
+            continue
+        if text and mic_gate.is_set():   # gate 2: drop if a turn spoke during this listen
+            await queue.put(("voice", text, None))
+
+
 async def run_turn(client, speak_out=True, source=None):
     """Drive one response. Always echo text to the console; enqueue sentences to the
     mouth ONLY when speak_out is True (i.e. the turn's source is a speaking source).
@@ -568,12 +655,34 @@ async def main():
         async with ClaudeSDKClient(options=opts) as client:
             loop = asyncio.get_running_loop()
             queue = asyncio.Queue()
+            # mic_gate OPEN (set) = ears may listen; CLEARED = a turn is in progress and I may
+            # be speaking, so the voice_reader holds the mic shut (no self-listen feedback).
+            mic_gate = asyncio.Event()
+            mic_gate.set()
             tasks = [
                 asyncio.create_task(terminal_reader(queue, loop)),
                 asyncio.create_task(orb_reader(queue, loop, start_ts)),
                 # Self-heal the iris MCP attach (reconnect instead of human restart).
                 asyncio.create_task(_ensure_iris_attached(client)),
             ]
+
+            # Ears-in: the voice_reader bridges the daemon's rich listen to my event queue.
+            # Gated on EARS_ON and the daemon actually answering, so a down daemon just means
+            # no ears (everything else still works) rather than a crash loop.
+            if EARS_ON:
+                daemon_up = False
+                try:
+                    daemon_up = "pong" in await loop.run_in_executor(
+                        None, lambda: daemon_cmd("ping", timeout=3))
+                except Exception as e:
+                    print("[host] voice ears: OFF - daemon ping failed: " + repr(e), file=sys.stderr)
+                if daemon_up:
+                    tasks.append(asyncio.create_task(voice_reader(queue, loop, mic_gate)))
+                else:
+                    print("[host] voice ears: OFF - daemon not answering on :"
+                          + str(DAEMON_ADDR[1]) + ".", file=sys.stderr)
+            else:
+                print("[host] voice ears: OFF - IRIS_EARS disabled.", file=sys.stderr)
 
             token = load_bot_token()
             if token:
@@ -639,14 +748,32 @@ async def main():
                         + "your reply is NOT spoken aloud unless you deliberately call voice_speak.]"
                         + "\n\n" + text
                     )
+                elif source == "voice":
+                    print("\n[voice <- Zeke] " + text, flush=True)
+                    prompt = (
+                        "[Zeke is speaking to you OUT LOUD - this is a live VOICE turn. The text below is "
+                        + "the daemon's enriched transcript: his words, possibly with emphasis/pacing marks "
+                        + "from the prosody layer (CAPS or markers = stressed words, pauses noted). Your "
+                        + "reply WILL be spoken aloud in your real voice, so answer naturally and "
+                        + "CONVERSATIONALLY - short, like real speech, not a written report. Lead with the "
+                        + "answer; the latency tax is real, so don't think out loud before you speak.]"
+                        + "\n\n" + text
+                    )
                 else:
                     prompt = text
 
                 # Mechanical speak gate: the SOURCE decides whether my reply is voiced.
                 # Text sources stay silent (engine warm); I speak on purpose via voice_speak.
                 speak_out = source in SPEAK_SOURCES
-                await client.query(prompt)
-                await run_turn(client, speak_out, source)
+                # Close the ears for the duration of this turn (I may speak), then reopen once
+                # the mouth has drained - prevents the reader capturing my own voice.
+                mic_gate.clear()
+                try:
+                    await client.query(prompt)
+                    await run_turn(client, speak_out, source)
+                finally:
+                    await _wait_until_quiet(loop)
+                    mic_gate.set()
 
             for t in tasks:
                 t.cancel()
