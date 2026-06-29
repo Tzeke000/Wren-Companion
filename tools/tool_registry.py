@@ -68,15 +68,21 @@ def _try_load_file(path: Path) -> tuple[bool, str]:
 
     before = set(_REGISTRY.keys())
     try:
-        if mod_name in sys.modules:
-            importlib.reload(sys.modules[mod_name])
-        else:
-            spec = importlib.util.spec_from_file_location(mod_name, path)
-            if spec is None or spec.loader is None:
-                return False, f"no spec for {path}"
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules[mod_name] = mod
-            spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+        # Always (re)load fresh from the file. We deliberately do NOT use importlib.reload():
+        # tool modules are loaded by file path under dotted names like 'tools.system.foo'
+        # whose parent package ('tools.system') is never inserted into sys.modules, and
+        # importlib.reload() requires the parent to be present -> it raised
+        # "parent 'tools.system' not in sys.modules" on every reload of a nested tool
+        # (the long-standing hot-reload bug). A fresh spec_from_file_location + exec_module
+        # has no such requirement, and since each tool registers itself via register_tool()
+        # at import time, re-exec cleanly re-registers the new handler (overwriting the old
+        # registry entry).
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        if spec is None or spec.loader is None:
+            return False, f"no spec for {path}"
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     except Exception as ex:
         return False, f"import error: {ex!r}"
 
