@@ -141,6 +141,16 @@ EARS_ON = os.environ.get("IRIS_EARS", "on").strip().lower() not in ("0", "off", 
 # these are only the outer backstops, not a turn timer.
 VOICE_LISTEN_TIMEOUT_S = float(os.environ.get("IRIS_VOICE_LISTEN_TIMEOUT_S", "300"))
 VOICE_MAX_UTTERANCE_S = float(os.environ.get("IRIS_VOICE_MAX_UTTERANCE_S", "300"))
+# The daemon's cmd_listen drain-gate (Step 1) blocks up to this long waiting for my own
+# TTS playback to finish (ctx.speaking==False) BEFORE it opens the mic — wren_voice_core.py
+# cmd_listen, the `while ctx.speaking ... < 180.0` cap. The host socket timeout below MUST
+# include it: drain + wait-for-speech + utterance + grace/transcribe. If the caller-side
+# timeout is LESS than the daemon's worst-case, the host preempts a daemon that's still
+# legitimately working and drops Zeke's turn into a dead-mic hole. Wren hit exactly this
+# (host 90s < daemon drain 180s); her letter flagged my 300s windows WIDEN the exposure.
+# I can't cut the drain (no voiceprint self-listen gate yet — cutting it reopens self-echo),
+# so my safe lever is to keep the host timeout comfortably ABOVE the daemon worst-case.
+DAEMON_DRAIN_CAP_S = float(os.environ.get("IRIS_DAEMON_DRAIN_CAP_S", "180"))
 
 # --- Perception (the EYES, built 2026-06-29) ---------------------------------------
 # iris_runtime's always-on camera loop fires VISUAL signals (face_appeared / face_lost /
@@ -510,13 +520,18 @@ def _daemon_listen_once():
             "timeout_seconds": VOICE_LISTEN_TIMEOUT_S,
             "max_utterance_seconds": VOICE_MAX_UTTERANCE_S,
         },
-        # Socket must outlive the WHOLE listen: the wait-for-speech window PLUS a full
-        # max-length utterance PLUS the daemon's grace re-opens. The old +20 margin only
-        # covered the wait window, so a long turn (speech that ran past the cap) timed the
-        # socket out mid-capture and surfaced as "voice listen failed: timeout" - exactly
-        # Zeke's symptom. Give it the full envelope plus headroom so the host never abandons
-        # a listen the daemon is still working.
-        timeout=VOICE_LISTEN_TIMEOUT_S + VOICE_MAX_UTTERANCE_S + 120.0,
+        # Socket must outlive the daemon's WHOLE worst-case listen, by construction:
+        #   drain-gate (DAEMON_DRAIN_CAP_S, waits for my TTS to finish before opening the mic)
+        #   + wait-for-speech (VOICE_LISTEN_TIMEOUT_S)
+        #   + a full max-length utterance (VOICE_MAX_UTTERANCE_S)
+        #   + grace re-opens / transcription (the +120 slack).
+        # The old margin (+120 over just the two windows) OMITTED the up-to-180s drain cap,
+        # so worst-case daemon ~780s could outrun the host's 720s and get preempted mid-capture
+        # ("voice listen failed: timeout" — Zeke's symptom, Wren's host/daemon-mismatch bug).
+        # Including the drain cap makes the host strictly more patient than the daemon. (Wren
+        # letter 06112e6a: my 300s windows widen this axis; raising the caller timeout is my
+        # primary fix since I can't cut the drain without the voiceprint gate.)
+        timeout=DAEMON_DRAIN_CAP_S + VOICE_LISTEN_TIMEOUT_S + VOICE_MAX_UTTERANCE_S + 120.0,
     )
     try:
         resp = json.loads(raw)
