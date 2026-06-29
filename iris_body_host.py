@@ -819,7 +819,6 @@ async def run_turn(client, speak_out=True, source=None):
                     # own status lines and Zeke's text stay plain). Zeke: "only your words."
                     print(_IRIS_BLUE + tok + _ANSI_RESET, end="", flush=True)
                     buf += tok
-                    buf += tok
                     sentences, buf = drain_sentences(buf)   # keep buf bounded regardless
                     if speak_out:
                         for s in sentences:

@@ -25,7 +25,7 @@ try:
 except ImportError:  # allow import in a numpy-less context; analyze() needs it
     np = None  # type: ignore
 
-STATE_FILE = Path(r"D:\Wren\scratch\voice_pace.json")
+STATE_FILE = Path(r"D:\Wren-Companion\scratch\voice_pace.json")  # was D:\Wren\ — wrong machine path; siblings all use D:\Wren-Companion\scratch\
 FRAME_S = 0.1          # analysis frame
 VOICE_PEAK = 0.012     # frame peak >= this = voiced (matches the capture's CONTINUE_PEAK)
 PAUSE_GAP_S = 0.45     # a within-utterance silence this long = a "notable pause"
