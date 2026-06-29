@@ -527,11 +527,16 @@ def _next_filler():
 # to _STOP than the old 2s chunks. Strictly additive + fully wrapped: amplitude emission
 # can never break or slow playback.
 _AMP_BLOCK = max(256, int(SAMPLE_RATE * 0.05))   # ~50ms envelope resolution
-_AMP_GAIN  = float(os.environ.get("IRIS_VOICE_AMP_GAIN", "1.6"))
+# Gain 1.0: synth output is already near full-scale, so a higher gain just pegs the
+# peak at 1.0 every loud block (flat "always max" pulse, no dynamic range). 1.0 keeps
+# quiet syllables visibly lower than loud ones; orb_http applies attack/release
+# smoothing on the read side so the orb breathes instead of strobing.
+_AMP_GAIN  = float(os.environ.get("IRIS_VOICE_AMP_GAIN", "1.0"))
 
 
 def _emit_amp(block) -> None:
-    """Best-effort: publish the block's peak level (0-1) for the orb. Never raises."""
+    """Best-effort: publish the block's peak level (0-1) for the orb. Never raises.
+    Raw (unsmoothed) on purpose — the consumer (orb_http mirror) does the smoothing."""
     try:
         if block is None or not getattr(block, "size", 0):
             return
