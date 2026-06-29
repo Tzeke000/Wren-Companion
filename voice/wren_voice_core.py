@@ -1098,7 +1098,16 @@ def cmd_speak_interruptible(ctx, args: dict) -> str:
         model = ctx.vad_model
     if model is None:
         # VAD not warm — don't hold barge-in behind a cold load; just speak normally.
-        return _post_speak(ctx, text)
+        # Set ctx.speaking around the blocking speak (mirrors cmd_speak) so the NEXT
+        # listen's drain-gate (`while ctx.speaking`) waits out my playback + tail instead
+        # of opening the mic onto my own voice. _post_speak is a direct blocking POST — it
+        # does NOT go through the worker that normally resets the flag — so reset it here.
+        # (Wren sweep finding #3, 2026-06-29.)
+        ctx.speaking = True
+        try:
+            return _post_speak(ctx, text)
+        finally:
+            ctx.speaking = False
 
     speak_result: dict = {}
 
