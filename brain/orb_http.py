@@ -152,6 +152,60 @@ def _brain_graph_snapshot_block() -> dict:
     return out
 
 
+def _sleep_block() -> dict:
+    """Real sleep/wake state for the orb's SLEEPING/WAKING visuals (built 2026-07-06;
+    was a hardcoded {"state": "awake"} stub so those modes never rendered).
+
+    Honest mapping to states this body actually has:
+      - sleeping: the body-pause flag exists (autonomous behaviors halted — the
+        closest real analogue to sleep; set/cleared by voice_body_pause/resume).
+      - waking: boot warm-up. The body takes minutes, not seconds (~5min for all
+        subsystems) — while process uptime < WAKE_ESTIMATE the orb shows waking
+        with real progress off the time substrate's uptime.
+      - awake: everything else."""
+    WAKE_ESTIMATE_S = 300.0
+    try:
+        from brain.iris_paths import paths
+        if paths.body_pause_flag.exists():
+            return {"state": "sleeping", "progress": 0.0,
+                    "remaining_seconds": 0, "wake_started_ts": 0.0,
+                    "wake_estimate_s": WAKE_ESTIMATE_S}
+    except Exception:
+        pass
+    try:
+        from brain import iris_time
+        ts = iris_time.get_state()
+        uptime = float(ts.get("current_process_uptime_s") or 0.0)
+        started = float(ts.get("process_started_ts") or 0.0)
+        if 0.0 < uptime < WAKE_ESTIMATE_S:
+            return {"state": "waking",
+                    "progress": round(uptime / WAKE_ESTIMATE_S, 3),
+                    "remaining_seconds": int(WAKE_ESTIMATE_S - uptime),
+                    "wake_started_ts": started,
+                    "wake_estimate_s": WAKE_ESTIMATE_S}
+    except Exception:
+        pass
+    return {"state": "awake", "progress": 1.0, "remaining_seconds": 0,
+            "wake_started_ts": 0.0, "wake_estimate_s": WAKE_ESTIMATE_S}
+
+
+def _onboarding_snapshot_block() -> dict:
+    """Live onboarding status for the snapshot (was a hardcoded inactive stub).
+    App.tsx reads active/stage/stage_index/stage_count to render flow progress."""
+    try:
+        from brain.person_onboarding import get_onboarding_status
+        st = get_onboarding_status(_g)
+        return {
+            "active": bool(st.get("active")),
+            "step": st.get("stage"),          # legacy key the old stub promised
+            "stage": st.get("stage"),
+            "stage_index": int(st.get("stage_index") or 0),
+            "stage_count": int(st.get("stage_count") or 0),
+        }
+    except Exception:
+        return {"active": False, "step": None}
+
+
 def _time_block_inline() -> dict:
     """Time substrate state for snapshot. Defined at module level so the
     main snapshot can include it without forward-reference."""
@@ -382,7 +436,11 @@ def snapshot() -> dict:
             "available_count": 40,  # number of MCP tools registered
             "voice_session_active": (_root / ".tmp" / "voice_session.flag").exists(),
         },
-        "workbench": {
+        # Workbench (2026-07-06, built on Zeke's 'build those things'): real proposals
+        # from the background refresher thread (_workbench_refresher) — the builder runs
+        # selftests, far too heavy for a per-second poll, so the snapshot reads the
+        # cached block. Empty shape until the first refresh lands (no-worse-than-before).
+        "workbench": _g.get("_workbench_block") or {
             "workbench_has_proposal": False,
             "workbench_top_proposal_title": "",
             "workbench_summary": "",
@@ -414,10 +472,10 @@ def snapshot() -> dict:
             "text": str(_g.get("_speech_full_reply") or ""),   # legacy shape compat
             "ts": float(_g.get("_speech_ts") or 0.0),
         },
-        "onboarding": {"active": False, "step": None},
+        "onboarding": _onboarding_snapshot_block(),
         "time": _time_block_inline(),
         "subsystem_health": {
-            "sleep": {"state": "awake"},
+            "sleep": _sleep_block(),
             "insightface": {
                 "available": bool(getattr(insight, "available", False)),
                 "provider": str(getattr(insight, "_provider", "")) if insight else "",
@@ -1062,19 +1120,78 @@ async def profile_refresh(person_id: str) -> dict:
     return out
 
 
+# Emil bridge (wired 2026-07-06, Zeke: 'build those things'): endpoints now call
+# the REAL brain/emil_bridge module instead of hardcoded stubs — the tab reports
+# true reachability. Two honesty guards:
+#   1. config/emil_config.json is set enabled=false until a real Emil service
+#      exists on this machine (flip it + set host/port to go live, no code change).
+#   2. _emil_identity_ok(): the bridge's ping calls any /health and accepts any
+#      200 — but 127.0.0.1:5877 is the sibling POST-OFFICE on this box, so a bare
+#      status check would report Emil "online" off the wrong service. We require
+#      the health payload to actually identify as Emil.
+def _emil_bridge():
+    from brain.emil_bridge import EmilBridge
+    br = _g.get("_emil_bridge")
+    if br is None:
+        br = EmilBridge(_root)
+        _g["_emil_bridge"] = br
+    return br
+
+
+def _emil_identity_ok(br) -> bool:
+    """True only if the configured endpoint's /health identifies as Emil."""
+    try:
+        import urllib.request as _req
+        with _req.urlopen(br._base_url() + "/api/v1/health", timeout=br._timeout()) as r:
+            body = json.loads(r.read().decode("utf-8", "replace"))
+        service = str(body.get("service") or "").lower()
+        return "emil" in service
+    except Exception:
+        return False
+
+
 @app.get("/api/v1/emil/status")
 def emil_status() -> dict:
-    return {"ok": True, "online": False}
+    try:
+        br = _emil_bridge()
+        res = br.ping_emil()
+        online = bool(res.get("online")) and _emil_identity_ok(br)
+        out = {"ok": True, "online": online,
+               "last_contact": float(res.get("last_contact") or 0.0)}
+        if res.get("reason"):
+            out["reason"] = res["reason"]
+        elif res.get("online") and not online:
+            out["reason"] = "endpoint answered but does not identify as Emil (port collision?)"
+        return out
+    except Exception as e:
+        return {"ok": False, "online": False, "error": str(e)}
 
 
 @app.post("/api/v1/emil/ping")
 async def emil_ping() -> dict:
-    return {"ok": True, "reachable": False}
+    try:
+        br = _emil_bridge()
+        res = br.ping_emil()
+        reachable = bool(res.get("online")) and _emil_identity_ok(br)
+        return {"ok": True, "reachable": reachable}
+    except Exception as e:
+        return {"ok": False, "reachable": False, "error": str(e)}
 
 
 @app.post("/api/v1/emil/send")
-async def emil_send() -> dict:
-    return {"ok": True, "delivered": False}
+async def emil_send(payload: dict = Body(default={})) -> dict:
+    try:
+        br = _emil_bridge()
+        if not _emil_identity_ok(br):
+            return {"ok": False, "delivered": False,
+                    "reason": "Emil not reachable (or endpoint isn't Emil)"}
+        res = br.send_to_emil(str(payload.get("message") or ""),
+                              context=str(payload.get("context") or ""))
+        return {"ok": bool(res.get("ok")), "delivered": bool(res.get("ok")),
+                "reply": str(res.get("reply") or ""),
+                "reason": str(res.get("reason") or res.get("error") or "")}
+    except Exception as e:
+        return {"ok": False, "delivered": False, "error": str(e)}
 
 
 @app.get("/api/v1/ui/tab")
@@ -1293,34 +1410,117 @@ async def clap_calibrate(payload: dict = Body(default={})) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# Onboarding (built 2026-07-06, Zeke: 'build those things'): the 13-stage
+# person_onboarding flow existed since Phase 79 but these endpoints were no-op
+# stubs, so the app's Start Onboarding button did nothing. Pattern ported from
+# operator_server (the old avaagent-era server that actually wired it).
 @app.post("/api/v1/onboarding/start")
-async def onboarding_start() -> dict:
-    return {"ok": True, "active": False}
+async def onboarding_start(payload: dict = Body(default={})) -> dict:
+    try:
+        import uuid as _uuid
+        from brain.person_onboarding import start_onboarding, get_onboarding_status
+        person_id = str(payload.get("person_id") or f"person_{_uuid.uuid4().hex[:8]}")
+        name_hint = str(payload.get("name") or "").strip() or None
+        flow = start_onboarding(person_id, _root, name_hint=name_hint)
+        _g["_onboarding_flow"] = flow
+        _g["_onboarding_stage"] = flow.stage
+        reply, stage, done = flow.run_step("", _g)   # greeting fires immediately
+        return {"ok": True, "reply": reply, "stage": stage, "done": done,
+                "status": get_onboarding_status(_g)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/api/v1/onboarding/step")
-async def onboarding_step() -> dict:
-    return {"ok": True, "next": None}
+async def onboarding_step(payload: dict = Body(default={})) -> dict:
+    try:
+        from brain.person_onboarding import run_onboarding_step, get_onboarding_status
+        user_input = str(payload.get("input") or "").strip()
+        result = run_onboarding_step(user_input, _g)
+        if result is None:
+            return {"ok": False, "message": "No active onboarding flow",
+                    "status": get_onboarding_status(_g)}
+        reply, stage, done = result
+        return {"ok": True, "reply": reply, "stage": stage, "done": done,
+                "status": get_onboarding_status(_g)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# Fine-tune tab (wired 2026-07-06, Zeke: 'build those things'): endpoints now drive
+# the REAL brain/finetune_pipeline machinery (ported from operator_server) instead of
+# perpetual-idle stubs. Everything reports honestly: prepare runs a real dataset
+# build + validation; start refuses with real issues when prerequisites (ollama etc.)
+# aren't present on this box — no fake trainer. All local, zero-spend.
+def _finetune_mgr():
+    mgr = _g.get("_finetune_manager")
+    if mgr is None:
+        from brain.finetune_pipeline import FineTuneManager
+        mgr = FineTuneManager(_root)
+        _g["_finetune_manager"] = mgr
+    return mgr
 
 
 @app.get("/api/v1/finetune/status")
 def finetune_status() -> dict:
-    return {"ok": True, "status": "idle"}
+    try:
+        st = _finetune_mgr()._read_status()
+        _g["_finetune_status"] = st
+        return st
+    except Exception as e:
+        return {"status": "idle", "error": str(e)[:180]}
 
 
 @app.get("/api/v1/finetune/log")
 def finetune_log() -> dict:
-    return {"ok": True, "lines": []}
+    try:
+        return {"ok": True, "lines": _finetune_mgr().read_log_tail(50)}
+    except Exception as e:
+        return {"ok": False, "lines": [], "error": str(e)[:180]}
 
 
 @app.post("/api/v1/finetune/prepare")
 async def finetune_prepare() -> dict:
-    return {"ok": True, "ready": False, "validation": {}, "checks": {}}
+    try:
+        mgr = _finetune_mgr()
+        count = int(mgr.dataset_builder.build_dataset(person_id="zeke", min_turns=50))
+        vr = mgr.dataset_builder.validate_dataset()
+        pre = mgr.check_prerequisites()
+        _g["_finetune_status"] = mgr._write_status({
+            "status": "idle" if vr.get("valid") else "preparing",
+            "dataset_count": int(vr.get("count", 0)),
+            "dataset_last_built_at": time.time(),
+        })
+        return {"ok": bool(vr.get("valid", False)), "examples_built": count,
+                "validation": vr, "checks": pre.get("checks", {}),
+                "issues": pre.get("issues", []), "ready": bool(pre.get("ready", False))}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:220]}
 
 
 @app.post("/api/v1/finetune/start")
 async def finetune_start() -> dict:
-    return {"ok": True, "ready": False, "issues": [], "checks": {}}
+    try:
+        mgr = _finetune_mgr()
+        pre = mgr.check_prerequisites()
+        if not pre.get("ready", False):
+            return {"ok": False, "message": "Prerequisites failed",
+                    "issues": pre.get("issues", []), "checks": pre.get("checks", {})}
+
+        def _run_bg() -> None:
+            try:
+                ok = bool(mgr.run_finetune())
+                _g["_finetune_status"] = mgr._read_status()
+                if not ok:
+                    print("[finetune] run failed", file=sys.stderr, flush=True)
+            except Exception as e:
+                mgr._write_status({"status": "failed", "completed_at": time.time(),
+                                   "error": str(e)[:220]})
+
+        threading.Thread(target=_run_bg, daemon=True, name="iris-finetune-manual").start()
+        return {"ok": True, "message": "Fine-tune started in background"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:220]}
 
 
 @app.get("/api/v1/widget/position")
@@ -1379,7 +1579,7 @@ def debug_full() -> dict:
         "ok": True,
         "ts": time.time(),
         "subsystem_health": {
-            "sleep": {"state": "awake"},
+            "sleep": _sleep_block(),
             "tts": {"ready": bool(_g.get("_kokoro_ready") or _tts_ref is not None)},
             "stt": {"ready": bool(_g.get("_stt_ready"))},
             "wake": {"ready": _g.get("_wake_word_detector") is not None},
@@ -1499,6 +1699,40 @@ _VOICE_STATE_MAP = {
     "listening": "listening", "thinking": "thinking", "speaking": "speaking",
 }
 _VOICE_MIRROR_STARTED = False
+
+
+def _workbench_refresher() -> None:
+    """Refresh snap.workbench's cached block every ~5 min (2026-07-06 build).
+
+    The proposal builder runs recurring selftests — real diagnostics, seconds of
+    work — so it must NEVER run inline in the snapshot poll. This thread builds
+    the block in the background; snapshot() serves the last-known result. Any
+    failure leaves the previous block in place (or the empty shape). First run
+    waits 90s so it never competes with boot's engine warm-up."""
+    time.sleep(90.0)
+    while True:
+        try:
+            from brain import selftests, workbench
+            try:
+                sf_result = selftests.run_recurring_selftests(
+                    _g.get("camera_manager"), _g, "stable")
+            except Exception:
+                sf_result = None
+            wb = workbench.build_workbench_proposals(
+                selftests=sf_result, acquisition_freshness="stable",
+                proactive_trigger=None)
+            top = getattr(wb, "top_proposal", None)
+            _g["_workbench_block"] = {
+                "workbench_has_proposal": bool(getattr(wb, "has_proposal", False)),
+                "workbench_top_proposal_title": str(getattr(top, "title", "") or ""),
+                "workbench_summary": str(getattr(wb, "summary", "") or ""),
+                "workbench_execution_ready": bool(getattr(top, "execution_ready", False)),
+                "workbench_meta": dict(getattr(wb, "meta", None) or {}),
+            }
+        except Exception as e:
+            print(f"[orb_http] workbench refresh failed (non-fatal): {e!r}",
+                  file=sys.stderr, flush=True)
+        time.sleep(300.0)
 
 
 def _voice_daemon_alive(timeout: float = 2.0) -> bool:
@@ -1766,4 +2000,9 @@ def start(g: dict[str, Any], root: Path, tts: Any | None = None) -> None:
         threading.Thread(target=_voice_state_mirror, daemon=True,
                          name="iris-voice-state-mirror").start()
         print("[orb_http] voice-state mirror: ON — orb reflects the daemon's live voice state.",
+              file=sys.stderr, flush=True)
+        # Workbench refresher rides the same idempotence flag: one start() = one of each.
+        threading.Thread(target=_workbench_refresher, daemon=True,
+                         name="iris-workbench-refresher").start()
+        print("[orb_http] workbench refresher: ON — snap.workbench serves real proposals (5min cadence).",
               file=sys.stderr, flush=True)

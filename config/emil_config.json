@@ -1,7 +1,8 @@
 {
-  "enabled": true,
+  "_note": "2026-07-06 Iris: disabled + port moved off 5877 (that is the sibling POST-OFFICE on this machine; the old config made any wired ping report Emil 'online' off the wrong service). No Emil service exists on this box. To go live: point host/port at a real Emil, set enabled=true - the orb tab endpoints are fully wired and need no code change. They also require /health to identify as Emil, not just answer 200.",
+  "enabled": false,
   "host": "127.0.0.1",
-  "port": 5877,
+  "port": 5878,
   "timeout_seconds": 3.0,
   "auto_ping_interval_seconds": 60.0
 }
