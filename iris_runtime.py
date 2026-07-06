@@ -552,6 +552,7 @@ def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> 
                     buf += chunk
             resp = _json.loads(buf.split(b"\n", 1)[0].decode("utf-8", "replace")) if buf else {}
             if resp.get("ok"):
+                _voice_speak_log_transcript(text)
                 return {"ok": True, "spoke_ms": int((time.time() - t0) * 1000), "engine": "styletts2"}
         except Exception:
             pass  # fall through to piper — no-worse-than-before
@@ -563,7 +564,23 @@ def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> 
     t0 = time.time()
     tts.speak_with_emotion(text, emotion, intensity, blocking=True)
     elapsed = time.time() - t0
+    _voice_speak_log_transcript(text)
     return {"ok": True, "spoke_ms": int(elapsed * 1000), "engine": tts._engine_type}
+
+
+def _voice_speak_log_transcript(text: str) -> None:
+    """Log a deliberate voice_speak to the shared transcript (state/transcript.jsonl).
+
+    The old voice loop's say-path (voice_say_chunk) appended every spoken chunk, so the
+    orb's chat-history stayed live. The daemon-preferring voice_speak path never did —
+    the app's history froze at the old loop's last line (2026-05-18, Zeke caught it
+    2026-07-06). Fail-soft: a logging error must never block the mouth."""
+    try:
+        from brain import iris_transcript
+        iris_transcript.append(role="assistant", content=str(text or ""),
+                               source="iris", modality="voice")
+    except Exception:
+        pass
 
 
 @mcp.tool()
