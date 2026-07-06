@@ -181,13 +181,18 @@ PERCEPTION_WAKE_SIGNALS = set(
 # signal inside the window cancels the pending change (it was a flicker, not a real event).
 #   - CONFIRM_LOST_S: how long a face must stay GONE before "X left" fires (Zeke: ~15s -
 #     a brief drop-out shouldn't tell me he left).
-#   - CONFIRM_APPEAR_S: how long a face must stay PRESENT before "X appeared" fires (short,
-#     so a real walk-up still greets quickly, but a 1-frame false detect doesn't).
+#   - CONFIRM_APPEAR_S: how long a face must stay PRESENT before "X appeared" fires. Raised
+#     2 -> 5s (Zeke: "eyes still finicky", 2026-07-06): at 2s a pass-through-frame still
+#     committed and cost TWO wakes (appear + later confirmed leave); at 5s a pass-by never
+#     commits at all (belief stays "absent", so the following face_lost agrees with belief
+#     and cancels silently). A real walk-up still greets within ~5s, and the extra hold
+#     gives the recognizer time to converge so the commit can NAME the person (see
+#     snapshot_current_person below) instead of waking me with "not yet recognized".
 # Both tunable via env so I can dial the eyes without code edits. (Hysteresis needs no extra
 # rate-limit floor: each commit already requires its own confirm window to have elapsed, so
 # wakes are naturally spaced by >= the smaller window and can't spam.)
 PERCEPTION_CONFIRM_LOST_S = float(os.environ.get("IRIS_PERCEPTION_CONFIRM_LOST_S", "15"))
-PERCEPTION_CONFIRM_APPEAR_S = float(os.environ.get("IRIS_PERCEPTION_CONFIRM_APPEAR_S", "2"))
+PERCEPTION_CONFIRM_APPEAR_S = float(os.environ.get("IRIS_PERCEPTION_CONFIRM_APPEAR_S", "5"))
 
 # --- Input priority (Zeke's report 2026-06-29: "my voice gets overridden by fam-chat") --------
 # All inputs share ONE queue. Before, it was plain FIFO, so a backlog of silent letters/Discord
@@ -640,6 +645,27 @@ def signals_get(after, types):
         return json.loads(r.read().decode("utf-8"))
 
 
+def snapshot_current_person():
+    """GET the runtime's CONVERGED perception identity (current_person in /api/v1/snapshot).
+
+    Why: face_appeared fires at detection-instant with whatever person_id the recognizer
+    has THEN — usually "unknown", because recognition converges over the next few seconds.
+    Since an appear now holds a confirmation window anyway, the commit can re-read the
+    converged identity instead of parroting the stale first frame ("not yet recognized").
+
+    Returns a person_id like 'zeke', or '' when unknown/unavailable. Stdlib-only, blocking;
+    call in an executor. Fail-soft: any error just means no name upgrade this commit."""
+    try:
+        req = urllib.request.Request(OPERATOR_URL + "/api/v1/snapshot",
+                                     headers={"User-Agent": "IrisHost/2.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            snap = json.loads(r.read().decode("utf-8"))
+        pid = str((snap.get("current_person") or {}).get("person_id") or "").strip()
+        return "" if pid.lower() in ("", "unknown", "none") else pid
+    except Exception:
+        return ""
+
+
 def _describe_perception(sig):
     """Turn a raw vision signal into a short, plain-language nudge for the cognition turn."""
     stype = sig.get("type") or ""
@@ -701,6 +727,18 @@ async def perception_reader(queue, loop, start_ts):
     async def _commit(sig, present, ts):
         nonlocal announced_present
         announced_present = present
+        if present:
+            # The appear held its window — the recognizer has had time to converge.
+            # If the signal's own person_id is still unnamed, upgrade it from the
+            # runtime's live snapshot so the wake says WHO, not "not yet recognized".
+            data = dict(sig.get("data") or {})
+            who = str(data.get("person_id") or "").strip()
+            if who.lower() in ("", "unknown", "none"):
+                pid = await loop.run_in_executor(None, snapshot_current_person)
+                if pid:
+                    data["person_id"] = pid
+                    sig = dict(sig)
+                    sig["data"] = data
         desc = _describe_perception(sig)
         _blog("eyes", desc, {"present": present, "ts": ts})
         await _enqueue(queue, ("perception", desc, ts))
@@ -734,6 +772,12 @@ async def perception_reader(queue, loop, start_ts):
                 # earliest 'since' if we're already timing this same direction).
                 if pending is None or pending["present"] != present:
                     pending = {"present": present, "since": ts, "sig": sig}
+                else:
+                    # Same direction repeating: keep the earliest 'since' (the hold is
+                    # measured from first sighting) but carry the FRESHEST signal —
+                    # recognition converges over time, so the newest data is the one
+                    # most likely to already name the person at commit.
+                    pending["sig"] = sig
         # Confirmation check - runs every tick, even with no new signals, so a sustained
         # change fires once its window elapses. time.time() shares the signals' clock epoch
         # (same machine), so elapsed-since-'since' is meaningful when the stream goes quiet.
