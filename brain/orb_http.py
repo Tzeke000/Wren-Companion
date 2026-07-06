@@ -283,7 +283,10 @@ def snapshot() -> dict:
         "inner_life": _inner_life_block(),
         "tts": {
             "tts_speaking": bool(_g.get("_tts_speaking")),
-            "engine": getattr(_tts_ref, "_engine_type", None),
+            # My real mouth is the out-of-process StyleTTS2 daemon; _tts_ref is only
+            # the in-process fallback engine. Report what actually speaks (2026-07-06).
+            "engine": ("styletts2" if _g.get("_voice_mirror_alive")
+                       else getattr(_tts_ref, "_engine_type", None)),
             "amplitude": float(_g.get("_tts_amplitude") or 0.0),
         },
         "voice": {
@@ -385,7 +388,18 @@ def snapshot() -> dict:
             "pointing_coords": _g.get("_widget_pointing_coords"),
             "pointing_until_ts": float(_g.get("_widget_pointing_until") or 0.0),
         },
-        "speech": {"text": "", "ts": 0.0},
+        # Speech caption (2026-07-06): App.tsx reads speaking/spoken_so_far/full_reply
+        # — the OLD stub {text, ts} never matched, so the home page always fell back to
+        # chat-history's last assistant line (frozen at 2026-05-18 = the stale text Zeke
+        # caught). Fed by the voice-state mirror below from the mouth's status detail.
+        "speech": {
+            "speaking": bool(_g.get("_tts_speaking")),
+            "current_word": "",
+            "spoken_so_far": str(_g.get("_speech_spoken_so_far") or ""),
+            "full_reply": str(_g.get("_speech_full_reply") or ""),
+            "text": str(_g.get("_speech_full_reply") or ""),   # legacy shape compat
+            "ts": float(_g.get("_speech_ts") or 0.0),
+        },
         "onboarding": {"active": False, "step": None},
         "time": _time_block_inline(),
         "subsystem_health": {
@@ -1502,6 +1516,15 @@ def _voice_state_mirror() -> None:
     alive = False
     last_ping = 0.0
     last_logged_state = None
+    # Speech-caption accumulator (2026-07-06, Zeke: home page showed a stale reply).
+    # The mouth now publishes the utterance text as the status-file `detail` while
+    # speaking; we accumulate per-sentence details into one caption (the host streams
+    # replies sentence-by-sentence, so each POST is a fresh detail). The mouth flips
+    # idle briefly BETWEEN sentence chunks, so only a sustained (>2.5s) non-speaking
+    # stretch starts a NEW caption — the finished one persists as full_reply.
+    speech_acc = ""
+    last_detail_seen = ""
+    not_speaking_since = 0.0
     while True:
         try:
             now = time.time()
@@ -1509,13 +1532,22 @@ def _voice_state_mirror() -> None:
                 alive = _voice_daemon_alive()
                 last_ping = now
             state = "idle"
+            detail = ""
             if alive:
                 try:
                     with open(_VOICE_STATUS_FILE, encoding="utf-8") as f:
                         d = _json.load(f)
                     raw = str(d.get("state") or "idle")
+                    # Stale flip-cue guard (2026-07-06): on_drain parks the file at
+                    # 'thinking'/'processing' after every speak and nothing ever sets
+                    # idle outside a call — so the orb pulsed "thinking" forever. The
+                    # daemon only writes on transitions, so a 'thinking' older than
+                    # 45s is a finished turn, not active thought.
+                    if raw == "thinking" and (now - float(d.get("ts") or 0.0)) > 45.0:
+                        raw = "idle"
                     if raw in ("idle", "listening", "thinking", "speaking", "muted"):
                         state = raw
+                    detail = str(d.get("detail") or "")
                 except Exception:
                     state = "idle"
             # Body log (date+time): record ORB/voice-state changes (not every poll tick).
@@ -1527,6 +1559,27 @@ def _voice_state_mirror() -> None:
                 except Exception:
                     pass
             speaking = (state == "speaking")
+            # Speech caption: accumulate what the mouth says (detail = utterance text).
+            if speaking:
+                not_speaking_since = 0.0
+                if detail and detail != last_detail_seen:
+                    if not speech_acc:
+                        speech_acc = detail
+                    else:
+                        speech_acc = (speech_acc + " " + detail)[-2000:]
+                    last_detail_seen = detail
+                    _g["_speech_full_reply"] = speech_acc
+                    _g["_speech_ts"] = now
+                _g["_speech_spoken_so_far"] = speech_acc
+            else:
+                if not_speaking_since == 0.0:
+                    not_speaking_since = now
+                elif now - not_speaking_since > 2.5 and speech_acc:
+                    # Reply finished (sustained quiet): keep it as full_reply, arm a
+                    # fresh caption for the next one.
+                    speech_acc = ""
+                    last_detail_seen = ""
+                    _g["_speech_spoken_so_far"] = ""
             _g["_voice_mirror_alive"] = bool(alive)
             _g["_voice_mirror_state"] = _VOICE_STATE_MAP.get(state, "passive")
             _g["_tts_speaking"] = speaking

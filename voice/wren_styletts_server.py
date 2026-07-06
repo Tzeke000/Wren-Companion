@@ -606,7 +606,9 @@ def speak_progressive(text: str) -> dict:
 
     threading.Thread(target=_produce, daemon=True, name="styletts-prog-synth").start()
 
-    set_state("speaking")
+    # detail = the utterance text (truncated): the orb's speech-caption reads it via
+    # the voice-state mirror (orb_http), so the app shows WHAT is being said, live.
+    set_state("speaking", text[:400])
     first_audio = -1.0
     fillers = 0
 
@@ -676,7 +678,7 @@ def speak_plain(text: str) -> dict:
     """Synthesize the whole text at once (no chunking). Fallback path."""
     _STOP.clear()
     t0 = time.perf_counter()
-    set_state("speaking")
+    set_state("speaking", text[:400])
     try:
         arr = _synth(text, _ref_s)
         arr = np.clip(arr.astype(np.float32, copy=False), -1.0, 1.0)

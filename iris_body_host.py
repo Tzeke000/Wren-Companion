@@ -843,13 +843,50 @@ def _enable_ansi_and_print_banner() -> None:
         pass
 
 
+# --- Shared transcript (state/transcript.jsonl) -------------------------------------
+# The orb's chat-history view reads /api/v1/chat/history, which falls back to this
+# file. The OLD voice loop's paths (wake-word capture, voice_say_chunk) appended every
+# turn; the NEW pipeline (host voice_reader in, daemon mouth out) never did — so the
+# app's history froze at the old loop's last line (2026-05-18; Zeke caught the stale
+# text on the home page 2026-07-06). The host now logs the live conversation itself:
+# user side when a voice/terminal turn dequeues, assistant side when the reply turn
+# completes. Orb turns are NOT logged here — the runtime's chat_reply already logs
+# both sides (double-write would duplicate bubbles). Discord/letters/perception stay
+# out: they have their own surfaces and aren't the room conversation.
+_TRANSCRIPT_MODALITY = {"voice": "voice", "terminal": "chat"}
+_transcript_ready = [False]
+
+
+def transcript_append(role, content, modality):
+    """Append one turn to the shared transcript. Fail-soft: history logging must
+    never break a turn. Cross-process note: iris_runtime also appends (chat_reply,
+    voice_speak) — small single-line 'a'-mode writes; the reader skips bad lines."""
+    text = str(content or "").strip()
+    if not text:
+        return
+    try:
+        from brain import iris_transcript
+        if not _transcript_ready[0]:
+            iris_transcript.configure(REPO_ROOT)
+            _transcript_ready[0] = True
+        iris_transcript.append(
+            role=role, content=text,
+            source=("zeke" if role == "user" else "iris"),
+            modality=modality)
+    except Exception as e:
+        print("\n[host] transcript append failed (non-fatal): " + repr(e), file=sys.stderr)
+
+
 async def run_turn(client, speak_out=True, source=None):
     """Drive one response. Always echo text to the console; enqueue sentences to the
     mouth ONLY when speak_out is True (i.e. the turn's source is a speaking source).
     The voice engine/daemon stays warm either way - this gates OUTPUT, not the engine.
     On a SILENT turn that worked heads-down (>= HEADS_DOWN_MIN_TOOLS tools) without a
-    deliberate voice_speak, fire a brief generic completion cue so Zeke is pinged aloud."""
+    deliberate voice_speak, fire a brief generic completion cue so Zeke is pinged aloud.
+    Voice/terminal turns also log my full reply text to the shared transcript so the
+    orb's history view stays live (see transcript_append)."""
     buf = ""
+    full_text = ""
     tool_calls = 0
     spoke_on_purpose = False
     async for msg in client.receive_response():
@@ -863,6 +900,7 @@ async def run_turn(client, speak_out=True, source=None):
                     # own status lines and Zeke's text stay plain). Zeke: "only your words."
                     print(_IRIS_BLUE + tok + _ANSI_RESET, end="", flush=True)
                     buf += tok
+                    full_text += tok
                     sentences, buf = drain_sentences(buf)   # keep buf bounded regardless
                     if speak_out:
                         for s in sentences:
@@ -893,6 +931,11 @@ async def run_turn(client, speak_out=True, source=None):
                     speak(HEADS_DOWN_CUE)
                 except Exception as e:
                     print("\n[host] heads-down cue failed (non-fatal): " + repr(e), file=sys.stderr)
+            # Live-conversation turns land in the shared transcript so the orb's
+            # history view shows THIS conversation, not the old loop's last line.
+            t_mod = _TRANSCRIPT_MODALITY.get(source or "")
+            if t_mod:
+                transcript_append("assistant", full_text, t_mod)
             print("\n", flush=True)
 
 
@@ -1134,6 +1177,12 @@ async def main():
                     )
                 else:
                     prompt = text
+
+                # Live-conversation turns (voice, terminal) go into the shared
+                # transcript so the orb's history stays current on the new pipeline.
+                t_mod = _TRANSCRIPT_MODALITY.get(source or "")
+                if t_mod:
+                    transcript_append("user", text, t_mod)
 
                 # Mechanical speak gate: the SOURCE decides whether my reply is voiced.
                 # Text sources stay silent (engine warm); I speak on purpose via voice_speak.
