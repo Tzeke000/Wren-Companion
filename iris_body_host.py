@@ -172,6 +172,17 @@ PERCEPTION_WAKE_SIGNALS = set(
         "IRIS_PERCEPTION_WAKE_SIGNALS", "face_appeared,face_lost").split(",")
     if s.strip()
 )
+# Which signal types get LEDGERED (superset of wake signals; pre-relaunch audit
+# 2026-07-06). Zeke's directive was "every single time the eyes see someone or
+# anything LIKE THAT" — expression/attention changes are 'like that' but were never
+# fetched, so they never reached the eyes_raw ledger. Now the poller fetches the
+# ledger set and logs all of it; only the wake set can start the hysteresis path.
+PERCEPTION_LEDGER_SIGNALS = set(
+    s.strip() for s in os.environ.get(
+        "IRIS_PERCEPTION_LEDGER_SIGNALS",
+        "face_appeared,face_lost,expression_changed,attention_changed").split(",")
+    if s.strip()
+) | PERCEPTION_WAKE_SIGNALS
 # --- Presence hysteresis (built 2026-06-29 from the flicker self-test, Zeke's spec) --------
 # The recognizer's confidence for an enrolled face hovers near its match threshold, so the
 # detector genuinely LOSES then REACQUIRES a face that never left - emitting face_lost then
@@ -736,7 +747,7 @@ async def perception_reader(queue, loop, start_ts):
                                  #   {"present": bool, "since": ts, "sig": signal}
     last_wake_person = ""        # who the last WAKE-worthy arrival resolved to (wake economy)
     gone_since = None            # ts of the last confirmed departure (for the min-gone gate)
-    types_param = ",".join(sorted(PERCEPTION_WAKE_SIGNALS))
+    types_param = ",".join(sorted(PERCEPTION_LEDGER_SIGNALS))
     print("[host] perception eyes: ON - polling iris_runtime signals every "
           + str(PERCEPTION_POLL_INTERVAL) + "s (wake on: " + (types_param or "<none>")
           + "; hysteresis lost=" + str(PERCEPTION_CONFIRM_LOST_S) + "s appear="
@@ -766,12 +777,18 @@ async def perception_reader(queue, loop, start_ts):
         # (above/below); waking cognition is the expensive part and needs a reason.
         if present:
             gone_s = (ts - gone_since) if gone_since is not None else None
+            # Identity comparison treats an UNRESOLVED face as its own identity
+            # ("unknown"): zeke→unknown WAKES (could be a stranger — Wren's voice
+            # book caught a real one 2026-07-06; erring quiet there is the wrong
+            # kind of cheap), unknown→unknown stays suppressed unless the gone-gap
+            # says it's a real return.
+            who = person or "unknown"
             wake = (first_obs
-                    or (person and person != last_wake_person)
+                    or who != last_wake_person
                     or (gone_s is not None and gone_s >= PERCEPTION_REWAKE_MIN_GONE_S))
             reason = ("" if wake else
-                      f"same-person return after {int(gone_s)}s (< {int(PERCEPTION_REWAKE_MIN_GONE_S)}s)"
-                      if gone_s is not None else "same-person re-commit, no gone-gap")
+                      f"same-person ({who}) return after {int(gone_s)}s (< {int(PERCEPTION_REWAKE_MIN_GONE_S)}s)"
+                      if gone_s is not None else f"same-person ({who}) re-commit, no gone-gap")
             gone_since = None
         else:
             gone_since = ts
@@ -781,8 +798,8 @@ async def perception_reader(queue, loop, start_ts):
         _blog("eyes", desc, {"present": present, "ts": ts, "wake": bool(wake),
                              **({"suppressed": reason} if not wake else {})})
         if wake:
-            if present and person:
-                last_wake_person = person
+            if present:
+                last_wake_person = person or "unknown"
             await _enqueue(queue, ("perception", desc, ts))
 
     while True:
