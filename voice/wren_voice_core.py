@@ -1193,6 +1193,14 @@ def cmd_call_start(ctx, args: dict) -> dict:
 
     Returns dict: mouth, whisper, smartturn, prosody, sensevoice, all_ready, spoken.
     """
+    # EARS-ON-BOOT (Iris port of Wren's shape, letter afa06739ae53, built 2026-07-06):
+    # silent=True warms + flips call_warm + logs exactly the same, but SUPPRESSES the
+    # spoken announce/confirm so a boot-time warm doesn't talk to an empty room.
+    # mouth_deadline_s widens the /health poll for the boot race (mouth server may
+    # still be starting when the daemon comes up).
+    silent = bool(args.get("silent"))
+    mouth_deadline_s = float(args.get("mouth_deadline_s") or 75.0)
+
     status: dict = {
         "mouth": False,
         "whisper": False,
@@ -1207,16 +1215,21 @@ def cmd_call_start(ctx, args: dict) -> dict:
     # 37f3267): a fresh call must not inherit a pending bridge.
     _cancel_stall_bridge(ctx)
 
-    # ── Step 1: announce early ────────────────────────────────────────────────
-    try:
-        _post_speak(ctx, "hey, give me a second — starting the call")
-        status["spoken"] = "hey, give me a second — starting the call"
-    except Exception as e:
-        print(f"[call_start] mouth announce failed: {e!r}", file=sys.stderr)
+    # ── Step 1: announce early (skipped when silent) ──────────────────────────
+    if not silent:
+        try:
+            _post_speak(ctx, "hey, give me a second — starting the call")
+            status["spoken"] = "hey, give me a second — starting the call"
+        except Exception as e:
+            print(f"[call_start] mouth announce failed: {e!r}", file=sys.stderr)
+    else:
+        print("[call_start] silent warm (ears-on-boot) — no announce", file=sys.stderr)
 
     # ── Step 2a: warm MOUTH ───────────────────────────────────────────────────
     def _warm_mouth():
-        deadline = time.time() + 75.0   # StyleTTS cold->warm ~10-30s; set BEFORE /warm
+        # StyleTTS cold->warm ~10-30s; deadline set BEFORE /warm. Boot path passes a
+        # longer mouth_deadline_s to ride out the mouth server's own process start.
+        deadline = time.time() + mouth_deadline_s
         _http_get(ctx.server_url + "/warm", timeout=5.0)
         while time.time() < deadline:
             try:
@@ -1227,7 +1240,7 @@ def cmd_call_start(ctx, args: dict) -> dict:
                 pass
             time.sleep(1.0)
         return False
-    status["mouth"] = _run_with_timeout(_warm_mouth, 80.0, "mouth")
+    status["mouth"] = _run_with_timeout(_warm_mouth, mouth_deadline_s + 5.0, "mouth")
 
     # ── Step 2b: warm WHISPER ─────────────────────────────────────────────────
     def _warm_whisper():
@@ -1280,7 +1293,7 @@ def cmd_call_start(ctx, args: dict) -> dict:
     status["core_ready"] = core_ready
     status["degraded"] = degraded
 
-    # ── Step 4: confirm spoken ───────────────────────────────────────────────
+    # ── Step 4: confirm spoken (logged-only when silent) ─────────────────────
     if core_ready:
         ctx.call_warm = True
         if degraded:
@@ -1288,11 +1301,14 @@ def cmd_call_start(ctx, args: dict) -> dict:
                    f"{'is' if len(degraded) == 1 else 'are'} degraded, running on fallback")
         else:
             msg = "okay — it's good"
-        try:
-            _post_speak(ctx, msg)
-            status["spoken"] = msg
-        except Exception as e:
-            print(f"[call_start] mouth confirm failed: {e!r}", file=sys.stderr)
+        if silent:
+            print(f"[call_start] silent warm ready: {msg}", file=sys.stderr)
+        else:
+            try:
+                _post_speak(ctx, msg)
+                status["spoken"] = msg
+            except Exception as e:
+                print(f"[call_start] mouth confirm failed: {e!r}", file=sys.stderr)
         if degraded:
             print(f"[call_start] DEGRADED but warm — fallback active for: "
                   f"{', '.join(degraded)}", file=sys.stderr)
@@ -1301,11 +1317,12 @@ def cmd_call_start(ctx, args: dict) -> dict:
         not_ready = [k for k in ("mouth", "whisper") if not status[k]]
         msg = f"can't start the call — {', '.join(not_ready)} not ready"
         print(f"[call_start] {msg}", file=sys.stderr)
-        try:
-            _post_speak(ctx, f"heads up — {msg}")
-            status["spoken"] = f"heads up — {msg}"
-        except Exception:
-            pass
+        if not silent:
+            try:
+                _post_speak(ctx, f"heads up — {msg}")
+                status["spoken"] = f"heads up — {msg}"
+            except Exception:
+                pass
 
     return status
 
