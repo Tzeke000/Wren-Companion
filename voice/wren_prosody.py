@@ -30,6 +30,7 @@ Pairs with wren_smartturn.py (end-of-turn), wren_pace.py (utterance-level baseli
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -197,12 +198,23 @@ def _sentence_tag(features: Sequence[WordFeatures], total_s: float) -> str:
 
 # ── core analysis ─────────────────────────────────────────────────────────────
 
+# PITCH_TIME_BUDGET_S: hard budget for the per-word pitch pass (Wren's scar, adopted
+# 2026-07-06 letter 118ed9402b61: inline pyin on a long utterance blew her listen timeout
+# — words captured, never returned). Enrich runs INLINE in-call on my box too (Zeke's
+# 2026-06-17 call), so an unbudgeted pitch loop is unbounded per-turn latency. Once the
+# cumulative pitch time crosses the budget, remaining words get pitch "?" (emphasis and
+# pauses — cheap numpy — still computed for every word). Env-tunable.
+PITCH_TIME_BUDGET_S = float(os.environ.get("IRIS_PITCH_TIME_BUDGET_S", "1.5"))
+
+
 def _extract_features(audio: np.ndarray, words_data) -> list[WordFeatures]:
     """Build WordFeatures list from faster-whisper word timestamp objects."""
     utterance_rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2))) or 1e-9
 
     features: list[WordFeatures] = []
     prev_end = None
+    pitch_spent = 0.0
+    pitch_budget_hit = False
     for w in words_data:
         word = getattr(w, "word", str(w)).strip()
         start = float(getattr(w, "start", 0.0))
@@ -213,7 +225,16 @@ def _extract_features(audio: np.ndarray, words_data) -> list[WordFeatures]:
         pause_before = max(0.0, start - prev_end) if prev_end is not None else 0.0
         rms = _word_rms(audio, start, end)
         ratio = rms / utterance_rms if utterance_rms > 0 else 1.0
-        pitch = _pitch_direction(audio, start, end)
+        if pitch_spent < PITCH_TIME_BUDGET_S:
+            _t0 = time.time()
+            pitch = _pitch_direction(audio, start, end)
+            pitch_spent += time.time() - _t0
+        else:
+            pitch = "?"
+            if not pitch_budget_hit:
+                pitch_budget_hit = True
+                print(f"[prosody] pitch budget hit ({PITCH_TIME_BUDGET_S}s) — "
+                      f"remaining words unpitched (non-fatal)", file=sys.stderr)
         features.append(WordFeatures(
             word=word,
             start=start,

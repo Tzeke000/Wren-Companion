@@ -221,7 +221,16 @@ def _endpoint_incomplete(audio: "np.ndarray") -> bool:
         return False
     try:
         result = _smartturn.predict_endpoint(audio)
-        return result["prob"] < 0.6
+        prob = float(result["prob"])
+        held = prob < 0.6
+        # Log the LOAD-BEARING lane too (2026-07-06, from the Wren exchange): the 0.85
+        # early-finalize lane always logged, so the log READ as "smart-turn never fires"
+        # while the 0.6 hold-open check — the one doing the real work — ran silent. Both
+        # of us had zero evidence on our primary thresholds; now this box builds the
+        # dataset. Cheap (stderr, in-call cadence).
+        print(f"[smart-turn] prob={prob:.3f} (hold-open bar 0.6) -> "
+              f"{'HOLD' if held else 'endpoint-ok'}", file=sys.stderr)
+        return held
     except Exception:
         return False
 
