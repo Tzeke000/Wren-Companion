@@ -1025,31 +1025,43 @@ def _main_locked() -> int:
     except Exception:
         runtime_alive = False
 
+    # BATCHED REWAKE (Zeke token-economy directive 2026-07-06, "go for both"): when
+    # several pending items coexist (chat + sibling letter + internal llm), the hook
+    # used to fire ONE rewake PER item — each a separate full-context turn, sequential
+    # Stop-fire loops. Now all coexisting items ride ONE rewake, priority order
+    # preserved inside the message (chat first — orb long-poll blocked; then sibling
+    # letter — a sister shouldn't wait behind a self-reflection; then internal llm).
+    # The header tells the wake to clear ALL items before stopping. Single-item fires
+    # print exactly what they always did (no format change on the common path).
+    sections: list[str] = []
     if pending_chat:
-        if not runtime_alive:
-            _expire_pending(CHAT_DIR, pending_chat.get("id"))
-            return 0
-        print(_chat_rewake(pending_chat) + time_block, flush=True)
-        return 2
-
-    # Sibling letters come next — higher priority than internal LLM requests
-    # (a brain module's self-reflection can wait; a sister writing to me
-    # shouldn't), but lower than orb-chat (which has an HTTP long-poll
-    # blocked on the other side).
+        sections.append(_chat_rewake(pending_chat))
     if pending_sibling:
-        if not runtime_alive:
-            # No expiry path — sibling letters can sit indefinitely waiting
-            # for the runtime to come back. They'll fire on the next Stop
-            # after iris_runtime is up again.
-            return 0
-        print(_sibling_rewake(pending_sibling) + time_block, flush=True)
-        return 2
-
+        sections.append(_sibling_rewake(pending_sibling))
     if pending_llm:
+        sections.append(_llm_rewake(pending_llm))
+
+    if sections:
         if not runtime_alive:
-            _expire_pending(LLM_DIR, pending_llm.get("id"))
+            # Same per-type semantics as the unbatched hook: chat + llm expire so
+            # their long-polls fail cleanly; sibling letters sit and wait for the
+            # runtime to come back (no expiry path).
+            if pending_chat:
+                _expire_pending(CHAT_DIR, pending_chat.get("id"))
+            if pending_llm:
+                _expire_pending(LLM_DIR, pending_llm.get("id"))
             return 0
-        print(_llm_rewake(pending_llm) + time_block, flush=True)
+        if len(sections) > 1:
+            header = (
+                f"[BATCHED WAKE — {len(sections)} pending items in this ONE turn "
+                "(token economy, Zeke directive 2026-07-06). Handle ALL of them "
+                "before stopping, in the order given; each section names its own "
+                "reply tool and id. Do not stop after the first item.]\n\n"
+            )
+            print(header + "\n\n=== NEXT PENDING ITEM ===\n\n".join(sections)
+                  + time_block, flush=True)
+        else:
+            print(sections[0] + time_block, flush=True)
         return 2
 
     if voice_on:
