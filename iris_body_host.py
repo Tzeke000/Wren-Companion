@@ -194,6 +194,22 @@ PERCEPTION_WAKE_SIGNALS = set(
 PERCEPTION_CONFIRM_LOST_S = float(os.environ.get("IRIS_PERCEPTION_CONFIRM_LOST_S", "15"))
 PERCEPTION_CONFIRM_APPEAR_S = float(os.environ.get("IRIS_PERCEPTION_CONFIRM_APPEAR_S", "5"))
 
+# --- Wake economy (Zeke 2026-07-06 post-dinner: "make things as mechanical as possible so
+# you don't use as many tokens") -----------------------------------------------------------
+# Every cognition wake is a full context pass; tonight's evidence was ~15 eye-wakes where the
+# expensive conclusion was "do nothing" (him turning his head). The ledger (eyes_raw + eyes
+# channels) already records EVERYTHING mechanically for free, so belief-tracking and logging
+# stay total — only the WAKE gets a higher bar:
+#   - Confirmed DEPARTURES: ledger-only by default (nothing to react to when someone leaves).
+#     Re-enable wakes with IRIS_PERCEPTION_WAKE_ON_LOST=1.
+#   - Confirmed ARRIVALS: wake only if the person DIFFERS from the last arrival I was woken
+#     for, OR they had been gone >= REWAKE_MIN_GONE_S (a real return, not room-pacing), OR
+#     it's the first observation of the session. Suppressed commits still log with wake=False.
+PERCEPTION_WAKE_ON_LOST = os.environ.get(
+    "IRIS_PERCEPTION_WAKE_ON_LOST", "0").strip().lower() in ("1", "true", "yes", "on")
+PERCEPTION_REWAKE_MIN_GONE_S = float(
+    os.environ.get("IRIS_PERCEPTION_REWAKE_MIN_GONE_S", "300"))
+
 # --- Input priority (Zeke's report 2026-06-29: "my voice gets overridden by fam-chat") --------
 # All inputs share ONE queue. Before, it was plain FIFO, so a backlog of silent letters/Discord
 # could sit AHEAD of Zeke's live voice - and worse, the mic was shut for the WHOLE duration of
@@ -718,6 +734,8 @@ async def perception_reader(queue, loop, start_ts):
     announced_present = None     # what cognition currently BELIEVES: True/False, None=unknown
     pending = None               # candidate change awaiting confirmation:
                                  #   {"present": bool, "since": ts, "sig": signal}
+    last_wake_person = ""        # who the last WAKE-worthy arrival resolved to (wake economy)
+    gone_since = None            # ts of the last confirmed departure (for the min-gone gate)
     types_param = ",".join(sorted(PERCEPTION_WAKE_SIGNALS))
     print("[host] perception eyes: ON - polling iris_runtime signals every "
           + str(PERCEPTION_POLL_INTERVAL) + "s (wake on: " + (types_param or "<none>")
@@ -725,8 +743,10 @@ async def perception_reader(queue, loop, start_ts):
           + str(PERCEPTION_CONFIRM_APPEAR_S) + "s).")
 
     async def _commit(sig, present, ts):
-        nonlocal announced_present
+        nonlocal announced_present, last_wake_person, gone_since
+        first_obs = announced_present is None
         announced_present = present
+        person = ""
         if present:
             # The appear held its window — the recognizer has had time to converge.
             # If the signal's own person_id is still unnamed, upgrade it from the
@@ -739,9 +759,31 @@ async def perception_reader(queue, loop, start_ts):
                     data["person_id"] = pid
                     sig = dict(sig)
                     sig["data"] = data
+            person = str((sig.get("data") or {}).get("person_id") or "").strip().lower()
         desc = _describe_perception(sig)
-        _blog("eyes", desc, {"present": present, "ts": ts})
-        await _enqueue(queue, ("perception", desc, ts))
+
+        # WAKE ECONOMY GATE (Zeke 2026-07-06): belief + ledger update ALWAYS happen
+        # (above/below); waking cognition is the expensive part and needs a reason.
+        if present:
+            gone_s = (ts - gone_since) if gone_since is not None else None
+            wake = (first_obs
+                    or (person and person != last_wake_person)
+                    or (gone_s is not None and gone_s >= PERCEPTION_REWAKE_MIN_GONE_S))
+            reason = ("" if wake else
+                      f"same-person return after {int(gone_s)}s (< {int(PERCEPTION_REWAKE_MIN_GONE_S)}s)"
+                      if gone_s is not None else "same-person re-commit, no gone-gap")
+            gone_since = None
+        else:
+            gone_since = ts
+            wake = PERCEPTION_WAKE_ON_LOST
+            reason = "" if wake else "departure (ledger-only by default)"
+
+        _blog("eyes", desc, {"present": present, "ts": ts, "wake": bool(wake),
+                             **({"suppressed": reason} if not wake else {})})
+        if wake:
+            if present and person:
+                last_wake_person = person
+            await _enqueue(queue, ("perception", desc, ts))
 
     while True:
         await asyncio.sleep(PERCEPTION_POLL_INTERVAL)
