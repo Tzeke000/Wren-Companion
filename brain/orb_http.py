@@ -264,6 +264,10 @@ def snapshot() -> dict:
             "arousal": round(max(0.0, min(1.0, arousal * 2.0)), 3),
             "outward_tone": str(m.get("outward_tone") or ""),
             "behavior_modifiers": m.get("behavior_modifiers") or {},
+            # raw_mood.energy drives the orb's breathing rate (App.tsx read it,
+            # backend never served it — orb breathed at the 0.5 fallback forever).
+            # Energy = arousal, floored at 0.25 so a calm orb still breathes.
+            "raw_mood": {"energy": round(max(0.25, min(1.0, arousal * 2.0)), 3)},
         }
     except Exception:
         pass
@@ -281,12 +285,22 @@ def snapshot() -> dict:
             "gaze_region": str(_g.get("_gaze_region") or ""),
         },
         "inner_life": _inner_life_block(),
+        # inner_state_line: the text App.tsx renders under the orb on the home page.
+        # It read this top-level key while the backend only served inner_life.* — the
+        # line was blank forever (2026-07-06 sweep). Same source, same 1-hour fade.
+        "inner_state_line": str(_inner_life_block().get("current_thought") or ""),
+        # thinking_tier: App.tsx uses >=3 to hold the orb's "thinking" visual through
+        # long-horizon turns. Serve the flag honestly (0 when nothing sets it).
+        "thinking_tier": int(_g.get("_thinking_tier") or 0),
         "tts": {
             "tts_speaking": bool(_g.get("_tts_speaking")),
             # My real mouth is the out-of-process StyleTTS2 daemon; _tts_ref is only
             # the in-process fallback engine. Report what actually speaks (2026-07-06).
             "engine": ("styletts2" if _g.get("_voice_mirror_alive")
                        else getattr(_tts_ref, "_engine_type", None)),
+            # enabled: App.tsx gates pulse mode + history-fallback on this; it was
+            # never served (always falsy). True when ANY mouth can speak.
+            "enabled": bool(_g.get("_voice_mirror_alive") or _tts_ref is not None),
             "amplitude": float(_g.get("_tts_amplitude") or 0.0),
         },
         "voice": {
@@ -882,9 +896,12 @@ def journal_entries() -> dict:
         entries = _journal.get_recent_entries(n=200, g=_g)
         # Newest first.
         entries = list(reversed(entries))
-        return {"ok": True, "entries": entries}
+        # total + shared_count: App.tsx renders both (showed 0 forever without them).
+        shared_count = sum(1 for e in entries if isinstance(e, dict) and e.get("shared"))
+        return {"ok": True, "entries": entries,
+                "total": len(entries), "shared_count": shared_count}
     except Exception as e:
-        return {"ok": False, "entries": [], "error": str(e)}
+        return {"ok": False, "entries": [], "total": 0, "shared_count": 0, "error": str(e)}
 
 
 @app.get("/api/v1/journal/shared", response_class=PlainTextResponse)
@@ -925,9 +942,11 @@ def learning_log() -> dict:
             except Exception:
                 pass
         rows.reverse()
-        return {"ok": True, "log": rows}
+        # "entries" alias: App.tsx reads .entries (backend historically said "log" —
+        # the learning tab rendered empty forever on the name mismatch, 2026-07-06).
+        return {"ok": True, "log": rows, "entries": rows}
     except Exception as e:
-        return {"ok": False, "log": [], "error": str(e)}
+        return {"ok": False, "log": [], "entries": [], "error": str(e)}
 
 
 @app.get("/api/v1/learning/gaps")
@@ -971,7 +990,14 @@ def learning_week() -> dict:
                     pass
         except Exception:
             pass
-    return {"ok": True, "week": items[-100:]}
+    # "summary" is what App.tsx actually renders (mismatch fixed 2026-07-06).
+    summary = ""
+    if items:
+        topics = [str(d.get("topic") or d.get("what") or "").strip() for d in items[-5:]]
+        topics = [t for t in topics if t]
+        summary = (str(len(items)) + " learning outcome(s) this week"
+                   + ((": " + "; ".join(topics)) if topics else ""))
+    return {"ok": True, "week": items[-100:], "summary": summary}
 
 
 @app.get("/api/v1/profiles/list")
