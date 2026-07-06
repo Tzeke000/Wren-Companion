@@ -756,6 +756,19 @@ async def perception_reader(queue, loop, start_ts):
             if ts > cursor:
                 cursor = ts            # advance past every signal we've seen, fired or not
             stype = sig.get("type") or ""
+            # RAW SIGHTING LEDGER (Zeke directive 2026-07-06, voice: "every single time
+            # the eyes see someone... it needs to be logged, date and time"). EVERY signal
+            # the eyes emit gets a dated entry the moment it arrives — flickers included,
+            # whether or not it survives hysteresis. iris_body_log stamps ts_iso (local,
+            # tz-aware) + ts_epoch. Confirmed presence changes ALSO log at _commit
+            # (channel "eyes"); this channel is the unfiltered ledger.
+            _sd = sig.get("data") or {}
+            _blog("eyes_raw", stype, {
+                "person": str(_sd.get("person_id") or _sd.get("prior_person_id")
+                              or "unknown"),
+                "signal_ts": ts,
+                "believed_present": announced_present,
+            })
             if stype not in PERCEPTION_WAKE_SIGNALS:
                 continue
             present = (stype == "face_appeared")   # the presence this signal asserts
