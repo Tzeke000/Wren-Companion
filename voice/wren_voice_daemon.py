@@ -314,6 +314,32 @@ def _warm_audio_main(ctx: Ctx) -> None:
         print(f"[daemon] audio init FAILED: {e!r}", file=sys.stderr, flush=True)
 
 
+def _ears_on_boot(ctx: Ctx) -> None:
+    """EARS ON BOOT (Iris port of Wren's shape, 2026-07-06, Zeke's pick): warm the FULL
+    in-call pipeline (mouth + whisper + smart-turn + prosody, flip call_warm) at daemon
+    launch — silently, so it never talks to an empty room. Gated on IRIS_EARS_ON_BOOT
+    (default ON). Runs in a background thread so serving is never blocked; failure is
+    non-fatal and leaves the daemon exactly as it was before this feature
+    (no-worse-than-before)."""
+    try:
+        if os.environ.get("IRIS_EARS_ON_BOOT", "1").strip().lower() in ("0", "false", "off", "no"):
+            print("[daemon] ears-on-boot: disabled via IRIS_EARS_ON_BOOT", flush=True)
+            return
+        # Wait for the whisper warm thread first: wl.get_whisper() is an UNLOCKED
+        # singleton (global _WHISPER, no lock) — calling it concurrently from two
+        # threads double-loads the model on the 3060. Wait, don't race.
+        deadline = time.time() + 120.0
+        while time.time() < deadline and getattr(wl, "_WHISPER", None) is None:
+            time.sleep(1.0)
+        st = core.cmd_call_start(ctx, {"silent": True, "mouth_deadline_s": 240.0})
+        brief = {k: st.get(k) for k in ("mouth", "whisper", "smartturn", "prosody",
+                                        "core_ready", "degraded")}
+        print(f"[daemon] ears-on-boot: call_warm={ctx.call_warm} {brief}", flush=True)
+    except Exception as e:
+        print(f"[daemon] ears-on-boot FAILED (non-fatal): {e!r}",
+              file=sys.stderr, flush=True)
+
+
 def main() -> None:
     ctx = Ctx()
 
@@ -329,6 +355,11 @@ def main() -> None:
 
     # MUST run on the main thread before serving — see _warm_audio_main docstring.
     _warm_audio_main(ctx)
+
+    # EARS ON BOOT (after mic is resolved, before serving; background so the socket
+    # comes up immediately — the warm rides alongside the first connections).
+    threading.Thread(target=_ears_on_boot, args=(ctx,),
+                     daemon=True, name="iris-ears-on-boot").start()
 
     server = _ThreadedTCPServer("127.0.0.1", PORT, ctx)
     print(f"[wren-voice-daemon] listening on 127.0.0.1:{PORT}", flush=True)
