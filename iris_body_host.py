@@ -939,19 +939,24 @@ async def _ensure_iris_attached(client, retries: int = 6, settle: float = 5.0, g
 
 async def main():
     _enable_ansi_and_print_banner()
+    # Model comes from the launcher (start_iris_v2.bat pins Opus, start_iris_v2_fable.bat
+    # pins Fable 5). Unset -> SDK falls back to the CLI default model, which is whatever
+    # /model last saved - non-deterministic across launchers, so the bats always pin it.
+    model = os.environ.get("IRIS_MODEL") or None
     opts = ClaudeAgentOptions(
         include_partial_messages=True,
         permission_mode="bypassPermissions",
         cwd=REPO_ROOT,
         setting_sources=["user", "project", "local"],  # load .mcp.json (iris, cloak) + discord plugin + CLAUDE.md
         system_prompt=SYSTEM_PROMPT,
+        model=model,
     )
 
     wait_for_mouth()
     start_ts = time.time()
 
-    print("[host] connecting via Agent SDK (iris body host v2: orb + discord + letters + streaming mouth)...",
-          flush=True)
+    print("[host] connecting via Agent SDK (iris body host v2: orb + discord + letters + streaming mouth)"
+          " model=" + (model or "<cli default>") + " ...", flush=True)
     try:
         async with ClaudeSDKClient(options=opts) as client:
             loop = asyncio.get_running_loop()
