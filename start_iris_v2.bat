@@ -73,6 +73,11 @@ REM same as start_iris.bat. The watchdog has a named-mutex singleton guard, so a
 REM second launch is a safe no-op if it's already up from a prior boot.
 start "iris-voice-watchdog" /B "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\voice_watchdog.py"
 
+REM Post-office (letters :5877) + monitor. Added 2026-07-06: no launcher started it,
+REM so any boot without a manual run left the letters channel dead. Idempotent
+REM (port-probe + pidfile inside); .venv python (system py lacks fastapi).
+call "D:\Wren-Companion\start_postoffice_stack.bat"
+
 REM The host IS the cognition. Run it in the foreground so this window is Iris.
 "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\iris_body_host.py"
 

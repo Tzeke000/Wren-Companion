@@ -48,6 +48,11 @@ REM background) so the voice survives independently of CC + iris_runtime. This
 REM replaces the old XTTS-in-iris_runtime voice path.
 start "iris-voice-watchdog" /B "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\voice_watchdog.py"
 
+REM Post-office (letters :5877) + monitor. Added 2026-07-06: no launcher started it,
+REM so any boot without a manual run left the letters channel dead. Idempotent
+REM (port-probe + pidfile inside); .venv python (system py lacks fastapi).
+call "D:\Wren-Companion\start_postoffice_stack.bat"
+
 REM No-args invocation (watchdog passes none); using %1 %2 %3 instead of %*
 REM as defense-in-depth against arg re-tokenization with spaces. If args
 REM are ever needed in the future, expand explicitly.
