@@ -228,9 +228,28 @@ def _has_signal_to_think_about(g: dict[str, Any]) -> tuple[bool, str]:
     except Exception:
         pass
 
-    # Recent face → Zeke is at the machine
+    # SKIP-IF-IDLE (Zeke token-economy directive 2026-07-06, "go for both"): the
+    # face_present and recent_turn triggers below are CONVERSATION-NOVELTY triggers,
+    # but they used to fire on mere presence/recency — a reflect every interval while
+    # Zeke sat at the screen with nothing new said. Each reflect is a full-context
+    # rewake. Mechanical gate: those two triggers now ALSO require the transcript to
+    # have moved since the last thought. Interior triggers (quiet_too_long, resumption,
+    # salient emotion) are exempt — they're about time and mood, not conversation.
+    newest_turn_ts = 0.0
+    try:
+        from brain import iris_transcript
+        _recent = iris_transcript.recent(n=5)
+        if _recent:
+            newest_turn_ts = max(float(e.get("ts") or 0) for e in _recent)
+    except Exception:
+        pass
+    last_seen_turn_ts = float(state.get("last_transcript_ts_at_thought") or 0.0)
+    transcript_moved = newest_turn_ts > last_seen_turn_ts
+
+    # Recent face → Zeke is at the machine (novelty-gated: only if he's SAID something
+    # since my last thought; presence alone is a ledger fact, not a reason to think).
     face_results = g.get("_face_results") or []
-    if face_results:
+    if face_results and transcript_moved:
         return (True, "face_present")
 
     # Salient emotion in current mood
@@ -245,16 +264,11 @@ def _has_signal_to_think_about(g: dict[str, Any]) -> tuple[bool, str]:
     except Exception:
         pass
 
-    # Recent voice turn (within last 10 min) — even if Zeke isn't visible
-    try:
-        from brain import iris_transcript
-        recent = iris_transcript.recent(n=5)
-        if recent:
-            last_msg_ts = max(float(e.get("ts") or 0) for e in recent)
-            if (now - last_msg_ts) < 600:
-                return (True, "recent_turn")
-    except Exception:
-        pass
+    # Recent voice turn (within last 10 min) — even if Zeke isn't visible.
+    # Novelty-gated (skip-if-idle): the turn must be NEW since my last thought,
+    # not merely recent — otherwise one turn re-triggers reflects for 10 minutes.
+    if transcript_moved and newest_turn_ts > 0 and (now - newest_turn_ts) < 600:
+        return (True, "recent_turn")
 
     return (False, "no_signal")
 
@@ -414,6 +428,17 @@ def tick_once(g: dict[str, Any], force: bool = False) -> Optional[str]:
     state = _load_state()
     state["last_thought_ts"] = time.time()
     state["thought_count"] = int(state.get("thought_count", 0)) + 1
+    # Skip-if-idle bookkeeping: record how far the transcript had advanced when this
+    # thought happened, so the novelty-gated triggers can tell "new turn" from
+    # "same turn, still recent" next tick.
+    try:
+        from brain import iris_transcript
+        _recent = iris_transcript.recent(n=5)
+        if _recent:
+            state["last_transcript_ts_at_thought"] = max(
+                float(e.get("ts") or 0) for e in _recent)
+    except Exception:
+        pass
     _save_state(state)
 
     # Surface for snapshot
