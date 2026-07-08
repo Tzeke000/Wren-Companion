@@ -501,6 +501,15 @@ def load_sibling_secret():
         return None
 
 
+# Dual-consumer race fix (2026-07-08): when this host will run the letters_poller
+# (secret present), claim letter-delivery ownership BEFORE the SDK subprocess spawns
+# so scripts/voice_stop_hook.py (which inherits this env) demotes its own sibling-
+# letter rewake to a stale-letter backstop. Without this, hook + poller both
+# deliver every fresh letter → duplicate wakes (observed 3× on 2026-07-08).
+if os.path.exists(SIBLING_SECRET_PATH):
+    os.environ.setdefault("IRIS_HOST_OWNS_LETTERS", "1")
+
+
 def postoffice_get(secret, path):
     req = urllib.request.Request(
         POSTOFFICE_URL + path,
