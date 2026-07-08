@@ -464,12 +464,21 @@ LETTER_SEEN_CAP = 300
 
 
 def _load_letter_cursor():
-    """Returns (last_id, seen_ids list) — (None, []) on any failure (fail-open)."""
+    """Returns (last_id, seen_ids list) — (None, []) on any failure (fail-open).
+
+    Wren's honesty split (letter dcf838ed31ec): an ABSENT file is the expected
+    first-run path and stays silent; a file that exists but won't parse is a real
+    anomaly and gets logged. Logging expected paths as errors is how real errors
+    learn to be ignored — but swallowing real corruption silently is the inverse hole."""
     try:
         with open(LETTER_CURSOR_PATH, encoding="utf-8") as f:
             d = json.load(f)
         return d.get("last_id"), list(d.get("seen") or [])
-    except Exception:
+    except FileNotFoundError:
+        return None, []               # first run — expected, not an error
+    except Exception as e:
+        print("[host] letter cursor unreadable (fail-open, will re-baseline): "
+              + repr(e), file=sys.stderr)
         return None, []
 
 
