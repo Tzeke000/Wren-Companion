@@ -532,6 +532,13 @@ async def letters_poller(secret, queue, loop, baseline_id):
         except Exception as e:
             print("\n[host] letter poll failed (non-fatal): " + repr(e), file=sys.stderr)
             continue
+        if not isinstance(probe, dict):
+            # Raise-outside-the-try class (Wren's discord_poller scar, audited 2026-07-08):
+            # a non-dict body would AttributeError past the except and kill this poller
+            # silently for the whole session. Log, skip, stay alive.
+            print("\n[host] letter poll: non-dict probe body (skipped): "
+                  + repr(probe)[:200], file=sys.stderr)
+            continue
         latest_id = probe.get("latest_id")
         if not latest_id:
             continue
@@ -548,8 +555,15 @@ async def letters_poller(secret, queue, loop, baseline_id):
         except Exception as e:
             print("\n[host] letter delta fetch failed (non-fatal): " + repr(e), file=sys.stderr)
             continue
+        if not isinstance(r, dict) or not isinstance(r.get("letters"), (list, type(None))):
+            print("\n[host] letter delta: unexpected body shape (skipped): "
+                  + repr(r)[:200], file=sys.stderr)
+            continue
         changed = False
-        for L in sorted(r.get("letters", []) or [], key=lambda x: x.get("ts", 0)):
+        for L in sorted(r.get("letters", []) or [],
+                        key=lambda x: x.get("ts", 0) if isinstance(x, dict) else 0):
+            if not isinstance(L, dict):
+                continue              # one malformed letter skips; the batch survives
             lid = L.get("id")
             if not lid:
                 continue
@@ -601,6 +615,10 @@ async def orb_reader(queue, loop, start_ts):
             print("\n[host] orb poll failed (non-fatal): " + repr(e), file=sys.stderr)
             continue
         if not req:
+            continue
+        if not isinstance(req, dict):
+            print("\n[host] orb poll: non-dict pending request (skipped): "
+                  + repr(req)[:200], file=sys.stderr)
             continue
         rid = req.get("id")
         if not rid or rid in seen:
@@ -957,7 +975,13 @@ async def perception_reader(queue, loop, start_ts):
         except Exception as e:
             print("\n[host] perception poll failed (non-fatal): " + repr(e), file=sys.stderr)
             continue
-        sigs = resp.get("signals") or []
+        if not isinstance(resp, dict):
+            # Same raise-outside-the-try class as the letter poller: don't let one
+            # weird body kill the eyes for the whole session.
+            print("\n[host] perception poll: non-dict body (skipped): "
+                  + repr(resp)[:200], file=sys.stderr)
+            continue
+        sigs = [s for s in (resp.get("signals") or []) if isinstance(s, dict)]
         for sig in sorted(sigs, key=lambda x: float(x.get("ts") or 0.0)):
             ts = float(sig.get("ts") or 0.0)
             if ts > cursor:
