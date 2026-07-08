@@ -886,16 +886,31 @@ def on_drain(ctx) -> None:
 # "[voice_listen]" markers). Real short utterances ("yes", "no", "stop") are NOT
 # in the set, so nothing Zeke actually says gets eaten; worst case he says a bare
 # "you" (improbable as a full turn) and repeats once.
-PHANTOM_MAX_S = 2.5     # raw capture length bound (includes trailing end-silence pad)
+# Two legs, either damns a hallucination-text capture (v2 tuning, same day):
+# - PHANTOM_MAX_S = 0.5: no human word fits in half a second of RAW capture — the live
+#   phantoms were 0.1s. Kept TIGHT on purpose: a genuine bare "Thank you." runs ~2s raw
+#   (Zeke says exactly that — twice this morning) and must survive on this leg.
+# - PHANTOM_RMS = 0.004: real speech carries real energy (CONTINUE_PEAK alone is 0.012
+#   per-frame); a click-plus-room-hum capture has whole-capture RMS far below that.
+#   This leg catches the v1 miss: onset click + stretched noise tail can run raw length
+#   to many seconds (the pace layer's "0.1s" is SPEECH time, not raw) while staying
+#   near-silent — duration alone was the wrong ruler.
+PHANTOM_MAX_S = 0.5
 PHANTOM_TEXTS = {"you", "thank you", "thanks", "the", "uh", "um", "mm", "hmm", "bye"}
+PHANTOM_RMS = 0.004
 
 
 def _is_phantom(text: str, audio) -> bool:
     """True if this capture looks like a whisper silence-hallucination, not speech."""
     try:
-        dur_s = float(getattr(audio, "size", 0)) / float(SAMPLE_RATE)
+        n = float(getattr(audio, "size", 0))
+        if n <= 0:
+            return False
+        dur_s = n / float(SAMPLE_RATE)
+        rms = float(np.sqrt(np.mean(np.square(audio))))
         norm = re.sub(r"[^a-z ]", "", (text or "").lower()).strip()
-        return bool(norm) and dur_s <= PHANTOM_MAX_S and norm in PHANTOM_TEXTS
+        return bool(norm) and norm in PHANTOM_TEXTS \
+            and (dur_s <= PHANTOM_MAX_S or rms < PHANTOM_RMS)
     except Exception:
         return False   # fail-open: never eat a turn on a gate error
 
@@ -1014,8 +1029,10 @@ def cmd_listen(ctx, args: dict) -> str:
     if _is_phantom(text, audio):
         set_state("idle")
         dur_s = float(getattr(audio, "size", 0)) / float(SAMPLE_RATE)
-        print(f"[voice_listen] phantom discarded ({dur_s:.2f}s, {text!r})", flush=True)
-        return f"[voice_listen] phantom discarded ({dur_s:.2f}s, {text!r})"
+        rms = float(np.sqrt(np.mean(np.square(audio)))) if getattr(audio, "size", 0) else 0.0
+        print(f"[voice_listen] phantom discarded ({dur_s:.2f}s, rms={rms:.4f}, {text!r})",
+              flush=True)
+        return f"[voice_listen] phantom discarded ({dur_s:.2f}s, rms={rms:.4f}, {text!r})"
 
     # ── Step 4: completeness gate → turn-end filler + grace loop ───────────────
     # "Complete" needs BOTH signals to agree he's done: smart-turn sees a clean endpoint
