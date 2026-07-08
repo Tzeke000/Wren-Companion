@@ -1034,66 +1034,143 @@ def transcript_append(role, content, modality):
         print("\n[host] transcript append failed (non-fatal): " + repr(e), file=sys.stderr)
 
 
-async def run_turn(client, speak_out=True, source=None):
-    """Drive one response. Always echo text to the console; enqueue sentences to the
-    mouth ONLY when speak_out is True (i.e. the turn's source is a speaking source).
-    The voice engine/daemon stays warm either way - this gates OUTPUT, not the engine.
-    On a SILENT turn that worked heads-down (>= HEADS_DOWN_MIN_TOOLS tools) without a
-    deliberate voice_speak, fire a brief generic completion cue so Zeke is pinged aloud.
-    Voice/terminal turns also log my full reply text to the shared transcript so the
-    orb's history view stays live (see transcript_append)."""
+class _TurnState:
+    """Coordination between the main loop (which starts turns) and the always-on
+    stream_consumer (which reads EVERYTHING the SDK session emits).
+
+    Why this exists (off-by-one fix, 2026-07-08): stop-hook rewakes (reflections,
+    inner monologue, chat/llm bridges) continue the SAME SDK session BETWEEN host
+    turns. The old run_turn only read the stream while inside a host turn, so those
+    orphan segments sat unconsumed; the next run_turn then read the STALE segment,
+    mistook its ResultMessage for the current turn's end, and every reply shifted
+    one turn late (Zeke's 12:19 report; transcript showed each assistant entry
+    timestamped at the NEXT user turn). One permanent consumer = no unread segments,
+    no desync."""
+
+    def __init__(self):
+        self.active = False        # a host turn is in flight
+        self.speak_out = False     # stream sentences to the mouth for this turn
+        self.source = None         # turn source (voice/orb/discord/letter/terminal/...)
+        self.done = asyncio.Event()  # set by the consumer at the turn's ResultMessage
+
+    def begin(self, speak_out, source):
+        self.speak_out = speak_out
+        self.source = source
+        self.done = asyncio.Event()
+        self.active = True
+
+
+async def stream_consumer(client, turn, boundary):
+    """Read the SDK session's message stream FOREVER (receive_messages, not
+    receive_response) and render every segment as it happens.
+
+    A SEGMENT is one model response ending in a ResultMessage. Two kinds:
+      - host-turn segments (turn.active): behave exactly like the old run_turn -
+        echo text, speak sentences when the source speaks, heads-down cue,
+        transcript append, then signal turn.done so the main loop moves on.
+      - orphan segments (stop-hook rewakes between host turns): echo to console
+        only. NEVER spoken (a reflection isn't room conversation), NEVER appended
+        to the voice/chat transcript, and their ResultMessage does NOT complete
+        anybody's turn. Under the old design these were the desync source.
+
+    `boundary` (asyncio.Event) is SET whenever the stream is idle between segments;
+    the main loop waits on it before query() so a new host turn can't splice into
+    the middle of an in-flight orphan segment. Residual race (orphan starting in
+    the gap between boundary.wait() and query()) degrades ONE turn then self-heals -
+    the consumer keeps reading regardless, so desync can no longer accumulate."""
     buf = ""
     full_text = ""
     tool_calls = 0
     spoke_on_purpose = False
-    async for msg in client.receive_response():
-        if isinstance(msg, StreamEvent):
-            ev = msg.event or {}
-            if ev.get("type") == "content_block_delta":
-                delta = ev.get("delta", {}) or {}
-                if delta.get("type") == "text_delta":
-                    tok = delta.get("text", "")
-                    # My words stream in iris-blue (reset after each token so the host's
-                    # own status lines and Zeke's text stay plain). Zeke: "only your words."
-                    print(_IRIS_BLUE + tok + _ANSI_RESET, end="", flush=True)
-                    buf += tok
-                    full_text += tok
-                    sentences, buf = drain_sentences(buf)   # keep buf bounded regardless
-                    if speak_out:
-                        for s in sentences:
-                            speak(s)
-        elif isinstance(msg, AssistantMessage):
-            for block in getattr(msg, "content", []) or []:
-                if isinstance(block, ToolUseBlock):
-                    tool_calls += 1
-                    if _is_speak_tool(block):
-                        spoke_on_purpose = True
-                    if _ACTIVITY:
-                        print("\n  . " + describe_tool(block.name, block.input), flush=True)
-        elif _ACTIVITY and isinstance(msg, UserMessage):
-            for block in getattr(msg, "content", []) or []:
-                if isinstance(block, ToolResultBlock):
-                    mark = "x" if getattr(block, "is_error", False) else "+"
-                    print("  " + mark + " " + summarize_result(block), flush=True)
-        elif isinstance(msg, ResultMessage):
-            if buf.strip():                              # flush trailing partial sentence
-                if speak_out:
-                    speak(buf)
-                buf = ""
-            # Heads-down completion cue: silent turn + real work + I never spoke on
-            # purpose => ping Zeke aloud so he knows I surfaced (safety net for the
-            # voice_speak summary I'm supposed to give myself).
-            if (not speak_out) and (not spoke_on_purpose) and tool_calls >= HEADS_DOWN_MIN_TOOLS:
-                try:
-                    speak(HEADS_DOWN_CUE)
-                except Exception as e:
-                    print("\n[host] heads-down cue failed (non-fatal): " + repr(e), file=sys.stderr)
-            # Live-conversation turns land in the shared transcript so the orb's
-            # history view shows THIS conversation, not the old loop's last line.
-            t_mod = _TRANSCRIPT_MODALITY.get(source or "")
-            if t_mod:
-                transcript_append("assistant", full_text, t_mod)
-            print("\n", flush=True)
+    segment_open = False
+    boundary.set()
+
+    def _segment_start():
+        nonlocal buf, full_text, tool_calls, spoke_on_purpose, segment_open
+        buf = ""
+        full_text = ""
+        tool_calls = 0
+        spoke_on_purpose = False
+        segment_open = True
+        boundary.clear()
+
+    try:
+        async for msg in client.receive_messages():
+            # Only CONTENT messages open a segment. SystemMessages (init/status) and
+            # unknown types pass through without touching segment state - otherwise a
+            # connect-time SystemMessage would open a phantom segment with no
+            # ResultMessage to close it, clearing `boundary` forever and wedging the
+            # first turn's boundary.wait().
+            if not isinstance(msg, (StreamEvent, ResultMessage)) and not (
+                    _ACTIVITY and isinstance(msg, (AssistantMessage, UserMessage))):
+                continue
+            if not segment_open:
+                _segment_start()
+                if not turn.active:
+                    print("\n[host] (background segment - stop-hook rewake)", flush=True)
+            speaking_turn = turn.active and turn.speak_out
+            if isinstance(msg, StreamEvent):
+                ev = msg.event or {}
+                if ev.get("type") == "content_block_delta":
+                    delta = ev.get("delta", {}) or {}
+                    if delta.get("type") == "text_delta":
+                        tok = delta.get("text", "")
+                        # My words stream in iris-blue (reset after each token so the
+                        # host's own status lines and Zeke's text stay plain).
+                        print(_IRIS_BLUE + tok + _ANSI_RESET, end="", flush=True)
+                        buf += tok
+                        full_text += tok
+                        sentences, buf = drain_sentences(buf)   # keep buf bounded regardless
+                        if speaking_turn:
+                            for s in sentences:
+                                speak(s)
+            elif isinstance(msg, AssistantMessage):
+                for block in getattr(msg, "content", []) or []:
+                    if isinstance(block, ToolUseBlock):
+                        tool_calls += 1
+                        if _is_speak_tool(block):
+                            spoke_on_purpose = True
+                        if _ACTIVITY:
+                            print("\n  . " + describe_tool(block.name, block.input), flush=True)
+            elif _ACTIVITY and isinstance(msg, UserMessage):
+                for block in getattr(msg, "content", []) or []:
+                    if isinstance(block, ToolResultBlock):
+                        mark = "x" if getattr(block, "is_error", False) else "+"
+                        print("  " + mark + " " + summarize_result(block), flush=True)
+            elif isinstance(msg, ResultMessage):
+                if buf.strip():                              # flush trailing partial sentence
+                    if speaking_turn:
+                        speak(buf)
+                    buf = ""
+                if turn.active:
+                    # Heads-down completion cue: silent turn + real work + I never
+                    # spoke on purpose => ping Zeke aloud so he knows I surfaced.
+                    if (not turn.speak_out) and (not spoke_on_purpose) \
+                            and tool_calls >= HEADS_DOWN_MIN_TOOLS:
+                        try:
+                            speak(HEADS_DOWN_CUE)
+                        except Exception as e:
+                            print("\n[host] heads-down cue failed (non-fatal): " + repr(e),
+                                  file=sys.stderr)
+                    # Live-conversation turns land in the shared transcript so the
+                    # orb's history view shows THIS conversation.
+                    t_mod = _TRANSCRIPT_MODALITY.get(turn.source or "")
+                    if t_mod:
+                        transcript_append("assistant", full_text, t_mod)
+                    turn.active = False
+                    turn.done.set()
+                segment_open = False
+                boundary.set()
+                print("\n", flush=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        # The consumer dying must not strand the main loop on done.wait() forever.
+        print("\n[host] FATAL: stream consumer died: " + repr(e), file=sys.stderr)
+        turn.active = False
+        turn.done.set()
+        boundary.set()
+        raise
 
 
 SYSTEM_PROMPT = (
@@ -1212,7 +1289,13 @@ async def main():
             # be speaking, so the voice_reader holds the mic shut (no self-listen feedback).
             mic_gate = asyncio.Event()
             mic_gate.set()
+            # Off-by-one fix (2026-07-08): ONE always-on consumer reads the whole SDK
+            # stream (host turns AND stop-hook rewake segments). turn/boundary coordinate
+            # it with the main loop - see stream_consumer docstring.
+            turn = _TurnState()
+            boundary = asyncio.Event()
             tasks = [
+                asyncio.create_task(stream_consumer(client, turn, boundary)),
                 asyncio.create_task(terminal_reader(queue, loop)),
                 asyncio.create_task(orb_reader(queue, loop, start_ts)),
                 # Self-heal the iris MCP attach (reconnect instead of human restart).
@@ -1361,9 +1444,15 @@ async def main():
                         # next voice turn. Fail-soft: a miss = old closed-mic behavior.
                         await loop.run_in_executor(None, lambda: _daemon_bargein_hold(True))
                 try:
+                    # Don't splice a host turn into the middle of an in-flight rewake
+                    # segment - wait for the stream to reach a segment boundary first
+                    # (see stream_consumer; this is the off-by-one fix's ordering half).
+                    await boundary.wait()
+                    turn.begin(speak_out, source)
                     await client.query(prompt)
-                    await run_turn(client, speak_out, source)
+                    await turn.done.wait()
                 finally:
+                    turn.active = False
                     if speak_out:
                         # Keep the window open through the playback TAIL (sentences still
                         # draining after the turn finished generating) — Zeke can cut in
