@@ -255,6 +255,12 @@ def post_letter(
     return {"ok": True, "letter": letter}
 
 
+# Bounded fallback for an unknown after-id (2026-07-08 ghost-replay guard):
+# never dump the whole channel at a consumer whose cursor reset.
+AFTER_FALLBACK_WINDOW_S = 24 * 3600   # only letters from the last 24h
+AFTER_FALLBACK_MAX = 25               # and never more than the newest 25
+
+
 @app.get("/letters")
 def get_letters(
     since: float = Query(default=0.0),
@@ -275,10 +281,15 @@ def get_letters(
     appended after that id (chronological order), for a cheap exact poll that
     never dups or misses around a time boundary the way a `since` window can.
     `after` takes precedence over `since`. If the id isn't found (e.g. a
-    poller's last-seen id predates this server's view), it falls back to the
-    `since` filter so the caller — which dedups by id on its side — catches up
-    rather than silently missing letters. Pair with GET /letters/latest: poll
-    the cheap latest probe, and only pull the delta here when latest_id moves.
+    poller's last-seen id predates this server's view), it falls back to a
+    BOUNDED recent window — last AFTER_FALLBACK_WINDOW_S seconds, newest
+    AFTER_FALLBACK_MAX letters — NOT the raw `since` filter. (2026-07-08:
+    the old since-fallback with the default since=0.0 returned the ENTIRE
+    channel; on 07-06 a reset consumer cursor replayed a whole evening of
+    answered letters in order. Consumers should still dedup by id — Iris's
+    poller does as of beeefb5 — but the server caps the blast radius too.)
+    Pair with GET /letters/latest: poll the cheap latest probe, and only
+    pull the delta here when latest_id moves.
     """
     _check_secret(x_sibling_secret)
     all_letters = _load_all_letters()
@@ -288,12 +299,17 @@ def get_letters(
         if idx is not None:
             filtered = ordered[idx + 1:]
         else:
+            floor = max(float(since), time.time() - AFTER_FALLBACK_WINDOW_S)
             print(
                 f"[postoffice] /letters after={after!r} not found; "
-                f"falling back to since={since}",
+                f"falling back to bounded window "
+                f"(last {AFTER_FALLBACK_WINDOW_S / 3600:.0f}h, "
+                f"max {AFTER_FALLBACK_MAX})",
                 file=sys.stderr,
             )
-            filtered = [l for l in ordered if float(l.get("ts", 0.0)) > float(since)]
+            filtered = [l for l in ordered if float(l.get("ts", 0.0)) > floor]
+            if len(filtered) > AFTER_FALLBACK_MAX:
+                filtered = filtered[-AFTER_FALLBACK_MAX:]
     else:
         filtered = [l for l in ordered if float(l.get("ts", 0.0)) > float(since)]
     sliced = filtered[-limit:] if len(filtered) > limit else filtered
