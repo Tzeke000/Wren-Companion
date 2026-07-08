@@ -877,6 +877,29 @@ def on_drain(ctx) -> None:
         pass
 
 
+# ── Phantom gate (2026-07-08) ────────────────────────────────────────────────
+# Whisper hallucinates short filler tokens ("you", "thank you", ...) on near-silent
+# or click-onset captures — observed live 3× in ~10min (identical 0.1s "you" turns,
+# each burning a full cognition turn while the room was EMPTY). Gate: a capture
+# whose ENTIRE transcript is one of these classic hallucination tokens AND whose
+# raw audio is short gets discarded as a no-speech marker (the host already drops
+# "[voice_listen]" markers). Real short utterances ("yes", "no", "stop") are NOT
+# in the set, so nothing Zeke actually says gets eaten; worst case he says a bare
+# "you" (improbable as a full turn) and repeats once.
+PHANTOM_MAX_S = 2.5     # raw capture length bound (includes trailing end-silence pad)
+PHANTOM_TEXTS = {"you", "thank you", "thanks", "the", "uh", "um", "mm", "hmm", "bye"}
+
+
+def _is_phantom(text: str, audio) -> bool:
+    """True if this capture looks like a whisper silence-hallucination, not speech."""
+    try:
+        dur_s = float(getattr(audio, "size", 0)) / float(SAMPLE_RATE)
+        norm = re.sub(r"[^a-z ]", "", (text or "").lower()).strip()
+        return bool(norm) and dur_s <= PHANTOM_MAX_S and norm in PHANTOM_TEXTS
+    except Exception:
+        return False   # fail-open: never eat a turn on a gate error
+
+
 def cmd_listen(ctx, args: dict) -> str:
     """Listen for Zeke to speak and return what he said.
 
@@ -986,6 +1009,13 @@ def cmd_listen(ctx, args: dict) -> str:
         except Exception as e2:
             set_state("idle")
             return f"[voice_listen] transcription error: {e2!r}"
+
+    # ── Step 3b: phantom gate — discard whisper silence-hallucinations ─────────
+    if _is_phantom(text, audio):
+        set_state("idle")
+        dur_s = float(getattr(audio, "size", 0)) / float(SAMPLE_RATE)
+        print(f"[voice_listen] phantom discarded ({dur_s:.2f}s, {text!r})", flush=True)
+        return f"[voice_listen] phantom discarded ({dur_s:.2f}s, {text!r})"
 
     # ── Step 4: completeness gate → turn-end filler + grace loop ───────────────
     # "Complete" needs BOTH signals to agree he's done: smart-turn sees a clean endpoint
