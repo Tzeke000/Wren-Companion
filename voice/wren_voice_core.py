@@ -1031,7 +1031,7 @@ def cmd_listen(ctx, args: dict) -> str:
         dur_s = float(getattr(audio, "size", 0)) / float(SAMPLE_RATE)
         rms = float(np.sqrt(np.mean(np.square(audio)))) if getattr(audio, "size", 0) else 0.0
         print(f"[voice_listen] phantom discarded ({dur_s:.2f}s, rms={rms:.4f}, {text!r})",
-              flush=True)
+              file=sys.stderr, flush=True)
         return f"[voice_listen] phantom discarded ({dur_s:.2f}s, rms={rms:.4f}, {text!r})"
 
     # ── Step 4: completeness gate → turn-end filler + grace loop ───────────────
@@ -1083,6 +1083,17 @@ def cmd_listen(ctx, args: dict) -> str:
         return "[voice_listen] (unclear / empty transcription)"
 
     # ── Step 5: transcript history ────────────────────────────────────────────
+    # Capture-stats instrumentation (2026-07-08): a phantom passed the v2 gate (dur>0.5s
+    # AND rms>=0.004 — noise with real energy). Tuning PHANTOM_RMS blind risks eating
+    # Zeke's real quiet speech, so log dur+rms for EVERY accepted capture (stderr →
+    # daemon.log via the watchdog redirect) and tune from evidence. Remove once tuned.
+    try:
+        _dur = float(getattr(audio, "size", 0)) / float(SAMPLE_RATE)
+        _rms = float(np.sqrt(np.mean(np.square(audio)))) if getattr(audio, "size", 0) else 0.0
+        print(f"[voice_listen] capture stats: dur={_dur:.2f}s rms={_rms:.4f} text={text[:48]!r}",
+              file=sys.stderr, flush=True)
+    except Exception:
+        pass
     try:
         wl.append_transcript(text)
     except Exception:
