@@ -857,11 +857,26 @@ def _cancel_stall_bridge(ctx) -> None:
 def play_one(ctx, text: str) -> None:
     """Speak one chunk via the mouth server. Called by the daemon's playback worker.
     Blocks until playback finishes (the server holds the connection open until done).
-    Does not raise — failures are swallowed so the worker loop stays alive."""
+    Does not raise — failures are swallowed so the worker loop stays alive.
+
+    Playback cursor (2026-07-08, Zeke's ask): ctx.now_playing tracks the chunk in the
+    speaker RIGHT NOW; ctx.played_chunks accumulates fully-played chunks for the current
+    barge-in hold window (reset in cmd_bargein_hold). On a barge, _on_barge snapshots
+    the cursor so the returned marker can say exactly where Zeke cut me off."""
+    ctx.now_playing = text
     try:
         _post_speak(ctx, text)
+        # Only count as fully heard if a barge didn't kill this chunk mid-play
+        # (_on_barge sets bargein_fired BEFORE hitting /stop, so this is race-safe).
+        if not getattr(ctx, "bargein_fired", False):
+            try:
+                ctx.played_chunks.append(text)
+            except AttributeError:
+                ctx.played_chunks = [text]
     except Exception as e:
         print(f"[wren-voice-core] play_one error: {e!r}", file=sys.stderr)
+    finally:
+        ctx.now_playing = None
 
 
 def on_drain(ctx) -> None:
@@ -1328,6 +1343,10 @@ def cmd_bargein_hold(ctx, args: dict) -> dict:
     hold = bool(args.get("hold", False))
     ctx.bargein_hold = hold
     ctx.bargein_fired = False
+    if hold:
+        # New speaking turn: reset the playback cursor for this window.
+        ctx.played_chunks = []
+        ctx.barge_cut = None
     return {"hold": hold}
 
 
@@ -1359,9 +1378,14 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
 
     def _on_barge() -> None:
         # Confirmed onset: silence me FAST, then keep capturing his words.
+        # Snapshot the playback cursor FIRST — play_one clears now_playing once
+        # /stop makes _post_speak return, so grab it before we kill the audio.
+        cut_chunk = getattr(ctx, "now_playing", None)
+        heard_n = len(getattr(ctx, "played_chunks", None) or [])
         ctx.bargein_fired = True          # cmd_speak drops the rest of this reply
         _cancel_stall_bridge(ctx)         # no bridging phrase over his cut-in
         n = _flush_play_queue(ctx)        # unplayed sentences never start
+        ctx.barge_cut = {"cut": cut_chunk, "played": heard_n, "flushed": n}
         try:
             _req.urlopen(ctx.server_url + "/stop", timeout=3).read()   # kill current audio
         except Exception:
@@ -1400,7 +1424,22 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         wl.append_transcript(heard)
     except Exception:
         pass
-    return f"[barge-in] {heard}"
+    # Playback-cursor marker (2026-07-08): tell the host (and me) exactly where the
+    # cut landed. Host only checks startswith('[barge-in]'), so extra info is safe.
+    info = getattr(ctx, "barge_cut", None) or {}
+    cut = (info.get("cut") or "").strip()
+    played = int(info.get("played", 0) or 0)
+    flushed = int(info.get("flushed", 0) or 0)
+    if len(cut) > 160:
+        cut = cut[:157] + "..."
+    if cut:
+        marker = (f'[cut mid-sentence at: "{cut}" | {played} sentence(s) fully heard, '
+                  f"{flushed} never played]")
+    elif flushed:
+        marker = f"[cut between sentences | {played} heard, {flushed} never played]"
+    else:
+        marker = f"[reply had already finished playing — all {played} sentence(s) heard]"
+    return f"[barge-in] {marker} {heard}"
 
 
 def cmd_call_start(ctx, args: dict) -> dict:
