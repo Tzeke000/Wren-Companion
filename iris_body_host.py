@@ -1449,6 +1449,11 @@ async def main():
                     # (see stream_consumer; this is the off-by-one fix's ordering half).
                     await boundary.wait()
                     turn.begin(speak_out, source)
+                    # Receipt marker (Zeke 2026-07-08: "i cant tell if youre thinking or
+                    # have received from me") - one immediate line so the gap between
+                    # his enter-press and my first text is visibly MINE, not dead air.
+                    print("[host] <- " + str(source or "?") + " turn received; thinking...",
+                          flush=True)
                     await client.query(prompt)
                     await turn.done.wait()
                 finally:
