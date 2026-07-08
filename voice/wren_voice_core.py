@@ -898,6 +898,20 @@ def on_drain(ctx) -> None:
 PHANTOM_MAX_S = 0.5
 PHANTOM_TEXTS = {"you", "thank you", "thanks", "the", "uh", "um", "mm", "hmm", "bye"}
 PHANTOM_RMS = 0.004
+# Density leg (v3, same day — from LIVE instrumentation): the 14:2x phantom measured
+# dur=300.10s rms=0.0125 — the room's noise floor sits AT the continue threshold
+# (CONTINUE_PEAK 0.012), so once onset fires the capture runs the FULL max-utterance
+# window and whisper compresses 5min of hum into one token. Energy can't catch that
+# (the hum IS energetic); text-set can't catch every variant (the 136s "Alex" turn was
+# the same failure). Speech DENSITY can, text-agnostically: nobody real produces <5
+# words a minute over 10+ seconds. A real one-word turn held open by noise loses
+# nothing here — it would have returned minutes late anyway (noise adds max_s latency
+# before return; the discard is the honest outcome, the threshold tune with Zeke is
+# the cure).
+# Threshold at 8: today's REAL slow ambient capture measured 13wpm; noise-held
+# captures measure 0.2-5wpm. 8 splits the observed gap with margin both ways.
+PHANTOM_MIN_WPM = 8.0
+PHANTOM_WPM_MIN_DUR_S = 10.0
 
 
 def _is_phantom(text: str, audio) -> bool:
@@ -909,8 +923,14 @@ def _is_phantom(text: str, audio) -> bool:
         dur_s = n / float(SAMPLE_RATE)
         rms = float(np.sqrt(np.mean(np.square(audio))))
         norm = re.sub(r"[^a-z ]", "", (text or "").lower()).strip()
-        return bool(norm) and norm in PHANTOM_TEXTS \
-            and (dur_s <= PHANTOM_MAX_S or rms < PHANTOM_RMS)
+        if not norm:
+            return False
+        # Density leg: long capture, absurdly few words -> noise-held window, not speech.
+        wpm = len(norm.split()) / dur_s * 60.0
+        if dur_s >= PHANTOM_WPM_MIN_DUR_S and wpm < PHANTOM_MIN_WPM:
+            return True
+        # Hallucination-token legs: known phantom text + (too short OR near-silent).
+        return norm in PHANTOM_TEXTS and (dur_s <= PHANTOM_MAX_S or rms < PHANTOM_RMS)
     except Exception:
         return False   # fail-open: never eat a turn on a gate error
 
