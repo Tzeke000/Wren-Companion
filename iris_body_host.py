@@ -152,6 +152,21 @@ VOICE_MAX_UTTERANCE_S = float(os.environ.get("IRIS_VOICE_MAX_UTTERANCE_S", "300"
 # so my safe lever is to keep the host timeout comfortably ABOVE the daemon worst-case.
 DAEMON_DRAIN_CAP_S = float(os.environ.get("IRIS_DAEMON_DRAIN_CAP_S", "180"))
 
+# --- Barge-in (headphones mode, Zeke greenlight 2026-07-08) -------------------------
+# This tower ALWAYS runs headphones (Zeke), so my TTS never reaches the mic — any
+# VAD-confirmed speech during my playback IS Zeke by construction. So while a SPEAKING
+# turn is in flight, instead of holding the mic shut (the old self-listen guard), the
+# voice_reader runs the daemon's blocking bargein_watch: Zeke talking over me stops the
+# mouth mid-sentence, drops the rest of that reply (daemon-side bargein_fired), and his
+# words land in the queue as the next voice turn. The watch window is host-driven via
+# bargein_hold(True/False) around the turn + playback tail. IRIS_BARGEIN=0 restores the
+# old closed-mic behavior (required if this box ever moves to speakers — see
+# barge_in_scoped_two_layer_2026-06-29 for the AEC+voiceprint stack that needs).
+BARGEIN_ON = os.environ.get("IRIS_BARGEIN", "1").strip().lower() not in ("0", "off", "false", "no")
+# Socket timeout for one watch window: must exceed the daemon-side cap (900s backstop;
+# in practice the host ends the window at turn end via bargein_hold False).
+BARGEIN_WATCH_TIMEOUT_S = float(os.environ.get("IRIS_BARGEIN_WATCH_TIMEOUT_S", "920"))
+
 # --- Perception (the EYES, built 2026-06-29) ---------------------------------------
 # iris_runtime's always-on camera loop fires VISUAL signals (face_appeared / face_lost /
 # expression_changed / ...) into its in-process SignalBus. The body host is a SEPARATE
@@ -603,6 +618,43 @@ def _daemon_listen_once():
     return result
 
 
+def _daemon_bargein_hold(hold):
+    """Open/close the daemon's barge-in window (fail-soft; a miss just means the old
+    closed-mic behavior for this turn)."""
+    try:
+        daemon_cmd("bargein_hold", {"hold": bool(hold)}, timeout=5.0)
+    except Exception as e:
+        print("[host] bargein_hold(" + str(hold) + ") failed (non-fatal): " + repr(e),
+              file=sys.stderr)
+
+
+def _daemon_bargein_watch_once():
+    """Blocking: one barge-in watch window (daemon holds the mic, Silero VAD watches
+    while I speak). Returns Zeke's captured words WITH the '[barge-in]' prefix, or None
+    (window closed with no interruption / not-warm / error markers). Runs in an
+    executor, never on the event loop."""
+    raw = daemon_cmd("bargein_watch", {}, timeout=BARGEIN_WATCH_TIMEOUT_S)
+    try:
+        resp = json.loads(raw)
+    except Exception as e:
+        print("[host] bargein watch: non-JSON daemon reply (dropped): "
+              + repr(raw)[:200] + " err=" + repr(e), file=sys.stderr)
+        return None
+    if not resp.get("ok"):
+        print("[host] bargein watch: daemon returned ok=false (dropped): "
+              + repr(resp)[:200], file=sys.stderr)
+        return None
+    result = resp.get("result")
+    if not isinstance(result, str):
+        return None
+    result = result.strip()
+    # Only a real interruption starts with '[barge-in]'; '[bargein_watch] ...' markers
+    # (no_barge / vad_not_warm / no_hold / errors) are normal window-closures.
+    if result.startswith("[barge-in]"):
+        return result
+    return None
+
+
 async def _wait_until_quiet(loop, settle_grace=0.8, cap_s=180.0):
     """After a turn, wait for the mouth to finish playing before reopening the ears.
     Polls the daemon's overlay state (state=speaking while playing). The settle_grace lets
@@ -646,8 +698,31 @@ async def voice_reader(queue, loop, mic_gate):
         await loop.run_in_executor(None, lambda: daemon_cmd("call_start", {}, timeout=120.0))
     except Exception as e:
         print("\n[host] voice call_start failed (non-fatal, ears still on): " + repr(e), file=sys.stderr)
-    print("[host] voice ears: ON - listening via the daemon's rich pipeline (prosody + smart-turn).")
+    print("[host] voice ears: ON - listening via the daemon's rich pipeline (prosody + smart-turn)."
+          + ("  barge-in: ON (headphones mode)." if BARGEIN_ON else ""))
     while True:
+        # Barge-in (2026-07-08): while a SPEAKING turn is in flight (gate cleared),
+        # don't hold the mic shut — WATCH it. Headphones mean my TTS never reaches the
+        # mic, so confirmed speech here is Zeke talking over me: the daemon stops the
+        # mouth mid-sentence, drops the rest of my reply, captures + transcribes his
+        # words, and they land in the queue as the next voice turn.
+        if BARGEIN_ON and not mic_gate.is_set():
+            try:
+                barge = await loop.run_in_executor(None, _daemon_bargein_watch_once)
+            except Exception as e:
+                print("\n[host] bargein watch failed (non-fatal): " + repr(e), file=sys.stderr)
+                await asyncio.sleep(2.0)
+                continue
+            if barge:
+                print("\n[voice <- Zeke, BARGE-IN] " + barge, flush=True)
+                _blog("ears", barge, {"bargein": True})
+                await _enqueue(queue, ("voice", barge, None))
+            else:
+                # Window closed with no interruption (or hold not set yet — the main
+                # loop opens it right after clearing the gate). Brief sleep so the
+                # hold-not-yet-set / gate-not-yet-reopened gaps can't spin the loop.
+                await asyncio.sleep(0.25)
+            continue
         await mic_gate.wait()            # gate 1: don't open the mic while I'm in a turn
         try:
             text = await loop.run_in_executor(None, _daemon_listen_once)
@@ -658,6 +733,16 @@ async def voice_reader(queue, loop, mic_gate):
         if text and mic_gate.is_set():   # gate 2: drop if a turn spoke during this listen
             _blog("ears", text)
             await _enqueue(queue, ("voice", text, None))
+            if BARGEIN_ON:
+                # Hand the floor to the main loop: wait (briefly) for it to pick this
+                # voice item up and clear the gate, so the next iteration WATCHES for
+                # barge-in instead of re-opening a normal listen that would hold the
+                # mic through my whole spoken reply. Fail-open: if the gate doesn't
+                # clear (item queued behind others), fall back to the normal listen.
+                for _ in range(40):      # ~2s cap
+                    if not mic_gate.is_set():
+                        break
+                    await asyncio.sleep(0.05)
 
 
 # ----------------------------------------------------------------- Perception inbound (the EYES)
@@ -1269,12 +1354,23 @@ async def main():
                 # bulletproof fix, tracked with the barge-in build.)
                 if speak_out:
                     mic_gate.clear()
+                    if BARGEIN_ON:
+                        # Open the barge-in window: the voice_reader (seeing the cleared
+                        # gate) issues a blocking bargein_watch, so Zeke can talk over my
+                        # reply — the daemon stops the mouth and his words queue as the
+                        # next voice turn. Fail-soft: a miss = old closed-mic behavior.
+                        await loop.run_in_executor(None, lambda: _daemon_bargein_hold(True))
                 try:
                     await client.query(prompt)
                     await run_turn(client, speak_out, source)
                 finally:
                     if speak_out:
+                        # Keep the window open through the playback TAIL (sentences still
+                        # draining after the turn finished generating) — Zeke can cut in
+                        # right up until the mouth actually goes quiet.
                         await _wait_until_quiet(loop)
+                        if BARGEIN_ON:
+                            await loop.run_in_executor(None, lambda: _daemon_bargein_hold(False))
                         mic_gate.set()
 
             for t in tasks:

@@ -731,6 +731,11 @@ def cmd_speak(ctx, args: dict) -> str:
     text = (args.get("text") or "").strip()
     if not text:
         return "[voice_speak] nothing to say"
+    # Barge-in (2026-07-08): once Zeke has cut in during this hold window, the REST of
+    # the interrupted reply stays silent — later sentences from the same turn would
+    # otherwise restart my voice over his. Cleared by cmd_bargein_hold on both edges.
+    if getattr(ctx, "bargein_fired", False):
+        return "[voice_speak] dropped (barge-in: reply was interrupted)"
     _cancel_stall_bridge(ctx)   # a real reply (or a warned pause) suppresses the stall bridge
     # Enqueue BEFORE flipping the flag. The playback worker resets ctx.speaking=False when
     # it observes an empty queue; if we set speaking=True first and the worker's empty-check
@@ -811,6 +816,10 @@ def _arm_stall_bridge(ctx) -> None:
                 if not getattr(ctx, "call_warm", False):
                     return
                 if getattr(ctx, "speaking", False):
+                    return
+                # Barge-in (2026-07-08): Zeke already cut in this window — a bridging
+                # phrase now would talk over him. Stay silent.
+                if getattr(ctx, "bargein_fired", False):
                     return
                 phrase = STALL_FILLERS[_STALL_I[0] % len(STALL_FILLERS)]
                 _STALL_I[0] += 1
@@ -1177,6 +1186,136 @@ def cmd_speak_interruptible(ctx, args: dict) -> str:
     set_state("idle")
     if not heard:
         return "[voice_speak_interruptible] interrupted (unclear transcription)"
+    try:
+        wl.append_transcript(heard)
+    except Exception:
+        pass
+    return f"[barge-in] {heard}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONTINUOUS BARGE-IN (headphones mode, 2026-07-08)
+#
+# Zeke confirmed this tower ALWAYS runs headphones: my TTS never reaches the mic,
+# so any VAD-confirmed speech during my playback IS Zeke by construction — no AEC,
+# no voiceprint gate needed on this box. (barge_in_scoped_two_layer_2026-06-29
+# remains the SPEAKERS design; this is Layer-1 headphones — the shortcut that note
+# said this box didn't have. The hardware fact in that note was wrong.)
+#
+# Shape: the HOST drives it. Around a speaking turn the host sets
+# bargein_hold(True) and issues ONE blocking bargein_watch. The watch holds the
+# mic (ctx.mic_lock, same pattern as cmd_speak_interruptible) and runs Silero VAD
+# frames until either:
+#   (a) Zeke's speech is confirmed → stop the mouth (/stop), flush the play queue,
+#       mark ctx.bargein_fired (cmd_speak + stall bridge go silent for the rest of
+#       the window), capture his utterance on the SAME stream, transcribe, and
+#       return '[barge-in] <words>'; or
+#   (b) the host clears the hold at turn end (or the cap expires) → '... no_barge'.
+# All state lives as lazy ctx attributes (getattr defaults) so this hot-reloads
+# with cmd='reload' — no daemon bounce, no Ctx-class edit.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+BARGEIN_WATCH_CAP_S = 900.0   # backstop on one watch window; host ends it at turn end
+
+
+def _flush_play_queue(ctx) -> int:
+    """Drain every pending (unplayed) chunk from the play queue. Returns the count.
+    task_done() per item keeps play_queue.join() (cmd_speak wait=True) from hanging."""
+    n = 0
+    try:
+        while True:
+            ctx.play_queue.get_nowait()
+            try:
+                ctx.play_queue.task_done()
+            except Exception:
+                pass
+            n += 1
+    except queue.Empty:
+        pass
+    except Exception:
+        pass
+    return n
+
+
+def cmd_bargein_hold(ctx, args: dict) -> dict:
+    """Open/close the barge-in window. args: {"hold": bool}.
+
+    hold=True  → a speaking turn is starting; bargein_watch becomes active.
+    hold=False → the turn (including playback tail) is over; a running watch
+                 returns no_barge promptly.
+    BOTH edges clear bargein_fired, so a barge only mutes the reply it actually
+    interrupted — never a later deliberate voice_speak."""
+    hold = bool(args.get("hold", False))
+    ctx.bargein_hold = hold
+    ctx.bargein_fired = False
+    return {"hold": hold}
+
+
+def cmd_bargein_watch(ctx, args: dict) -> str:
+    """Blocking: watch the mic for Zeke talking over me (headphones barge-in).
+
+    args: {"cap_s": float = BARGEIN_WATCH_CAP_S}
+
+    Active while ctx.bargein_hold is True. Returns:
+      '[barge-in] <his words>'            — he cut in (mouth already stopped)
+      '[bargein_watch] no_barge'          — window closed with no interruption
+      '[bargein_watch] vad_not_warm' / 'no_hold' / errors — fail-soft markers
+    """
+    with ctx.vad_lock:
+        model = ctx.vad_model
+    if model is None:
+        return "[bargein_watch] vad_not_warm"
+    if not getattr(ctx, "bargein_hold", False):
+        return "[bargein_watch] no_hold"
+    cap_s = float(args.get("cap_s", BARGEIN_WATCH_CAP_S))
+    deadline = time.time() + cap_s
+    try:
+        model.reset_states()   # no stale VAD state leaking across windows
+    except Exception:
+        pass
+
+    def _active() -> bool:
+        return bool(getattr(ctx, "bargein_hold", False)) and time.time() < deadline
+
+    def _on_barge() -> None:
+        # Confirmed onset: silence me FAST, then keep capturing his words.
+        ctx.bargein_fired = True          # cmd_speak drops the rest of this reply
+        _cancel_stall_bridge(ctx)         # no bridging phrase over his cut-in
+        n = _flush_play_queue(ctx)        # unplayed sentences never start
+        try:
+            _req.urlopen(ctx.server_url + "/stop", timeout=3).read()   # kill current audio
+        except Exception:
+            pass
+        ctx.speaking = False
+        try:
+            set_state("listening", "you cut in")
+        except Exception:
+            pass
+        print(f"[bargein_watch] onset: mouth stopped, {n} queued chunk(s) flushed",
+              flush=True)
+
+    try:
+        # Same-thread RLock re-entry is safe (daemon dispatch doesn't lock this cmd;
+        # we serialize against listen/speak_interruptible ourselves, like they do).
+        with ctx.mic_lock:
+            audio = _bargein_watch_and_capture(ctx, model, _active, _on_barge,
+                                               device_substr=wl.DEFAULT_MIC_SUBSTR)
+    except Exception as e:
+        return f"[bargein_watch] watcher error: {e!r}"
+
+    if audio is None or getattr(audio, "size", 0) == 0:
+        return "[bargein_watch] no_barge"
+
+    try:
+        set_state("thinking", "heard you")
+    except Exception:
+        pass
+    try:
+        heard = (wl._transcribe_array(audio) or "").strip()
+    except Exception as e:
+        return f"[bargein_watch] interrupted, transcription error: {e!r}"
+    if not heard:
+        return "[bargein_watch] interrupted (unclear)"
     try:
         wl.append_transcript(heard)
     except Exception:
