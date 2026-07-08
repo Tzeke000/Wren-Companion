@@ -666,6 +666,7 @@ def _time_orientation_block() -> str:
 
 _SIBLING_TTL_S = 21600.0  # 6h — matches brain/iris_sibling._REQUEST_TTL_S
 _SIBLING_EXPIRE_BUDGET = 50  # max files scanned per Stop fire
+_HOST_OWNED_BACKSTOP_S = 600.0  # host-owned boxes: hook only backstops letters this stale
 
 
 def _expire_old_sibling_letters() -> None:
@@ -718,6 +719,14 @@ def _next_pending_sibling() -> dict | None:
     """
     if not SIBLING_INBOX_DIR.exists():
         return None
+    # Dual-consumer race fix (2026-07-08): when the body host's letters_poller
+    # owns letter delivery (IRIS_HOST_OWNS_LETTERS=1, set by iris_body_host at
+    # import when the sibling secret exists), this hook demotes itself to a
+    # BACKSTOP: it only surfaces a pending letter that has sat unanswered for
+    # _HOST_OWNED_BACKSTOP_S — i.e. the host path evidently missed it (poller
+    # dead, queue wedged). Without this gate BOTH paths deliver every fresh
+    # letter and the same wake fires twice (observed 3× on 2026-07-08).
+    host_owns = os.environ.get("IRIS_HOST_OWNS_LETTERS") == "1"
     candidates: list[tuple[float, dict]] = []
     import time as _t
     for path in SIBLING_INBOX_DIR.glob("*.json"):
@@ -735,6 +744,8 @@ def _next_pending_sibling() -> dict | None:
         # matches brain/iris_sibling._REQUEST_TTL_S.
         if (_t.time() - ts) > 21600.0:
             continue
+        if host_owns and (_t.time() - ts) < _HOST_OWNED_BACKSTOP_S:
+            continue    # fresh letter on a host-owned box: the poller delivers it
         candidates.append((ts, data))
     if not candidates:
         return None
