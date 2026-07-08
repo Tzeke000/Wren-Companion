@@ -1110,7 +1110,9 @@ def cmd_listen(ctx, args: dict) -> str:
     try:
         _dur = float(getattr(audio, "size", 0)) / float(SAMPLE_RATE)
         _rms = float(np.sqrt(np.mean(np.square(audio)))) if getattr(audio, "size", 0) else 0.0
-        print(f"[voice_listen] capture stats: dur={_dur:.2f}s rms={_rms:.4f} text={text[:48]!r}",
+        _peak = float(np.max(np.abs(audio))) if getattr(audio, "size", 0) else 0.0
+        print(f"[voice_listen] capture stats: dur={_dur:.2f}s rms={_rms:.4f} "
+              f"peak={_peak:.4f} text={text[:48]!r}",
               file=sys.stderr, flush=True)
     except Exception:
         pass
