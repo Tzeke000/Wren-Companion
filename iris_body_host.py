@@ -452,6 +452,37 @@ POSTOFFICE_URL = os.environ.get("IRIS_POSTOFFICE_URL", "http://127.0.0.1:5877").
 SIBLING_SECRET_PATH = os.path.join(os.path.expanduser("~"), ".iris_sibling_secret")
 LETTER_POLL_INTERVAL = POLL_INTERVAL
 
+# Letter-cursor persistence + seen-id dedupe (2026-07-08, the 07-06 ghost-replay fix).
+# Two holes, both mine: (1) the after-id cursor lived only in process memory, so any
+# path that reset it replayed history; (2) the post-office /letters?after= NOT-FOUND
+# fallback returns the whole channel (since=0.0) and its docstring ASSUMES "the caller
+# dedups by id on its side" — a consumer dedup that was never built. This is it.
+# Wren's survivor-side design (letter 4eca57c8b96f): persist cursor + bounded seen-set.
+LETTER_CURSOR_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "state", "letter_cursor.json")
+LETTER_SEEN_CAP = 300
+
+
+def _load_letter_cursor():
+    """Returns (last_id, seen_ids list) — (None, []) on any failure (fail-open)."""
+    try:
+        with open(LETTER_CURSOR_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return d.get("last_id"), list(d.get("seen") or [])
+    except Exception:
+        return None, []
+
+
+def _save_letter_cursor(last_id, seen_order):
+    """Atomic write-through; a failed save just means old-behavior on next boot."""
+    try:
+        tmp = LETTER_CURSOR_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"last_id": last_id, "seen": list(seen_order)[-LETTER_SEEN_CAP:]}, f)
+        os.replace(tmp, LETTER_CURSOR_PATH)
+    except Exception as e:
+        print("[host] letter cursor save failed (non-fatal): " + repr(e), file=sys.stderr)
+
 
 def load_sibling_secret():
     try:
@@ -473,8 +504,18 @@ def postoffice_get(secret, path):
 
 async def letters_poller(secret, queue, loop, baseline_id):
     """Cheap /letters/latest probe; on a moved latest_id pull /letters?after=<last> and enqueue
-    new fam-chat letters as (letter, text, id, from). I wake on letters NOT from me, to me or 'all'."""
-    last = baseline_id
+    new fam-chat letters as (letter, text, id, from). I wake on letters NOT from me, to me or 'all'.
+
+    Ghost-replay hardening (2026-07-08): the cursor persists to LETTER_CURSOR_PATH so a
+    relaunch resumes where the last process stopped, and a bounded seen-id set backstops
+    ANY cursor reset — even the server's after-not-found full-channel fallback can only
+    re-deliver ids I've never processed. Persisted cursor wins over the boot baseline."""
+    persisted_last, seen_order = _load_letter_cursor()
+    seen = set(seen_order)
+    last = persisted_last or baseline_id
+    if persisted_last:
+        print("[host] letter cursor resumed from disk: " + str(persisted_last)
+              + " (" + str(len(seen)) + " seen ids)")
     while True:
         await asyncio.sleep(LETTER_POLL_INTERVAL)
         try:
@@ -487,6 +528,7 @@ async def letters_poller(secret, queue, loop, baseline_id):
             continue
         if last is None:
             last = latest_id          # establish baseline; don't replay history on first run
+            _save_letter_cursor(last, seen_order)
             continue
         if latest_id == last:
             continue                  # cheap path: nothing new
@@ -497,11 +539,21 @@ async def letters_poller(secret, queue, loop, baseline_id):
         except Exception as e:
             print("\n[host] letter delta fetch failed (non-fatal): " + repr(e), file=sys.stderr)
             continue
+        changed = False
         for L in sorted(r.get("letters", []) or [], key=lambda x: x.get("ts", 0)):
             lid = L.get("id")
             if not lid:
                 continue
             last = lid                # advance past EVERY letter (incl. my own) so we never re-trigger
+            changed = True
+            if lid in seen:
+                continue              # dedupe backstop: a replayed id never re-wakes me
+            seen.add(lid)
+            seen_order.append(lid)
+            if len(seen_order) > LETTER_SEEN_CAP:
+                seen_order[:] = seen_order[-LETTER_SEEN_CAP:]
+                seen.clear()
+                seen.update(seen_order)
             frm = (L.get("from") or "").strip().lower()
             to = (L.get("to") or "").strip().lower()
             if frm == "iris" or to not in ("iris", "all"):
@@ -511,6 +563,8 @@ async def letters_poller(secret, queue, loop, baseline_id):
             content = ("[" + subj + "] " + body) if subj else body
             if content:
                 await _enqueue(queue, ("letter", content, lid, frm))
+        if changed:
+            _save_letter_cursor(last, seen_order)
 
 
 # ----------------------------------------------------------------- Orb inbound (the body app = my input surface)
