@@ -132,6 +132,25 @@ function getCfg(emotion: string) {
   return EMOTION_CONFIG[key] || EMOTION_CONFIG["calmness"];
 }
 
+// Derive base/light/dark from a blended emotion color (App sends primary+secondary
+// mix). Empty color → fall back to the emotion table's own colors. THREE.Color
+// parses both "#rrggbb" and "rgb(...)". light lifts toward white, dark sinks
+// toward black — same ratios the whole orb was tuned against.
+function deriveBlendColors(
+  emotionColor: string,
+  fallback: { color: string; lightColor: string; darkColor: string },
+): { color: string; lightColor: string; darkColor: string } {
+  if (!emotionColor) {
+    return { color: fallback.color, lightColor: fallback.lightColor, darkColor: fallback.darkColor };
+  }
+  const ecBase = new THREE.Color(emotionColor);
+  return {
+    color: `#${ecBase.getHexString()}`,
+    lightColor: `#${ecBase.clone().lerp(new THREE.Color("#ffffff"), 0.42).getHexString()}`,
+    darkColor: `#${ecBase.clone().lerp(new THREE.Color("#000000"), 0.55).getHexString()}`,
+  };
+}
+
 function createGlowTex(color: string): THREE.Texture {
   const c = document.createElement("canvas");
   c.width=128; c.height=128;
@@ -170,6 +189,11 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
   const emotionRef = useRef<string>(emotion);
   const shapeOverrideRef = useRef<string | undefined>(shapeOverride);
   const energyRef = useRef<number>(energy);
+  // Blended emotion color — read live by the animate loop so color shifts
+  // recolor materials IN PLACE instead of remounting the scene. Remounting on
+  // every blend step created a fresh WebGL context and reset the breathing
+  // clock phase — the "laggy pulse" Zeke reported 2026-07-08.
+  const emotionColorRef = useRef<string>(emotionColor);
   // listening/attentive cube morph: target 1.0 when listening, 0.0 otherwise.
   // The animate loop eases this toward the target so the morph is smooth.
   const morphRef = useRef<number>(0);
@@ -188,6 +212,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
   emotionRef.current = emotion;
   shapeOverrideRef.current = shapeOverride;
   energyRef.current = energy;
+  emotionColorRef.current = emotionColor;
   recenterTriggerRef.current = recenterTrigger;
   cubeMorphEnabledRef.current = cubeMorphEnabled;
   sleepProgressRef.current = sleepProgress;
@@ -203,16 +228,10 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     // shell, point-light — all colored from cfgInit below) off the blended color App sends
     // (primary+secondary mix), so a blended feeling shows consistently rather than only the
     // top emotion's flat hue. Shape/motion still come from the emotion string (getCfg).
-    // light/dark are derived by lifting toward white / sinking toward black. THREE.Color
-    // parses both "#rrggbb" and "rgb(...)". The blended color is quantized upstream (App), so
-    // this rebuilds only on a meaningful shift — the same kind of rebuild emotion-name changes
-    // already trigger — not on every tiny mood drift.
-    if (emotionColor) {
-      const ecBase = new THREE.Color(emotionColor);
-      cfgInit.color = `#${ecBase.getHexString()}`;
-      cfgInit.lightColor = `#${ecBase.clone().lerp(new THREE.Color("#ffffff"), 0.42).getHexString()}`;
-      cfgInit.darkColor = `#${ecBase.clone().lerp(new THREE.Color("#000000"), 0.55).getHexString()}`;
-    }
+    // Color CHANGES are applied live inside animate() (recolor-in-place) — they must NOT
+    // remount this effect. Remount = new WebGL context + breath-phase reset = visible hitch.
+    let appliedEmotionColor = emotionColorRef.current;
+    Object.assign(cfgInit, deriveBlendColors(appliedEmotionColor, cfgInit));
 
     const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
     renderer.setSize(size,size);
@@ -271,6 +290,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     const orig = new Float32Array(N*3);
     const vel = new Float32Array(N*3);
     const pcol = new Float32Array(N*3);
+    const ptier = new Uint8Array(N); // 0=light 1=base 2=dark — kept for live recolor
     const baseC = new THREE.Color(cfgInit.color);
     const lightC = new THREE.Color(cfgInit.lightColor);
     const darkC = new THREE.Color(cfgInit.darkColor);
@@ -284,7 +304,8 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
       pos[i*3]=x; pos[i*3+1]=y; pos[i*3+2]=z;
       orig[i*3]=x; orig[i*3+1]=y; orig[i*3+2]=z;
       vel[i*3]=(Math.random()-.5)*0.001; vel[i*3+1]=(Math.random()-.5)*0.001; vel[i*3+2]=(Math.random()-.5)*0.001;
-      const c = tier<0.25?lightC:tier<0.65?baseC:darkC;
+      ptier[i] = tier<0.25?0:tier<0.65?1:2;
+      const c = ptier[i]===0?lightC:ptier[i]===1?baseC:darkC;
       pcol[i*3]=c.r; pcol[i*3+1]=c.g; pcol[i*3+2]=c.b;
     }
 
@@ -300,7 +321,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     outerGroup.add(new THREE.Mesh(shellGeo,shellMat));
 
     // Halo
-    const haloTex = createGlowTex(cfgInit.color);
+    let haloTex = createGlowTex(cfgInit.color); // let: replaced on live recolor
     const haloMat = new THREE.SpriteMaterial({ map:haloTex, transparent:true, opacity:0.2, blending:THREE.AdditiveBlending, depthWrite:false });
     const halo = new THREE.Sprite(haloMat);
     halo.scale.set(3.5,3.5,1);
@@ -323,6 +344,10 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     const _coreScratch = new THREE.Color();
     const _glowScratch = new THREE.Color();
     const _lightScratch = new THREE.Color();
+    // Current blended base/light — updated only when emotionColor actually
+    // changes (live recolor block in animate), read every frame.
+    const _baseBaseC = new THREE.Color(cfgInit.color);
+    const _baseLightC = new THREE.Color(cfgInit.lightColor);
 
     function morph(t: number, currentState: OrbState, currentAmp: number) {
       const c = getCfg(emotionRef.current);
@@ -517,6 +542,37 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
       const s=spd(liveState);
       const r=s*0.001;
 
+      // ── Live recolor (blend shifts) ──────────────────────────────────────
+      // When App's blended emotionColor steps, recolor every mount-colored
+      // material in place. Runs only on actual change (~mood shifts), never
+      // per frame. This replaced the emotionColor useEffect dep — remounting
+      // built a fresh WebGL context and reset the breath phase every step,
+      // which read as lag/stutter (Zeke, 2026-07-08).
+      if (emotionColorRef.current !== appliedEmotionColor) {
+        appliedEmotionColor = emotionColorRef.current;
+        const derived = deriveBlendColors(appliedEmotionColor, getCfg(emotionRef.current));
+        cfgInit.color = derived.color;
+        cfgInit.lightColor = derived.lightColor;
+        cfgInit.darkColor = derived.darkColor;
+        _baseBaseC.set(derived.color);
+        _baseLightC.set(derived.lightColor);
+        const _dk = new THREE.Color(derived.darkColor);
+        streams.forEach((l, i) => {
+          (l.material as THREE.LineBasicMaterial).color.set(i < 8 ? derived.lightColor : derived.color);
+        });
+        shellMat.color.set(derived.darkColor);
+        const newTex = createGlowTex(derived.color);
+        haloMat.map = newTex;
+        haloMat.needsUpdate = true;
+        haloTex.dispose();
+        haloTex = newTex;
+        for (let i = 0; i < N; i++) {
+          const tc = ptier[i] === 0 ? _baseLightC : ptier[i] === 1 ? _baseBaseC : _dk;
+          pcol[i*3] = tc.r; pcol[i*3+1] = tc.g; pcol[i*3+2] = tc.b;
+        }
+        (pGeo.attributes.color as THREE.BufferAttribute).needsUpdate = true;
+      }
+
       // ── Cube-morph easing (listening/attentive only) ─────────────────────
       // Target = 1 while listening/attentive, 0 otherwise. Per-frame lerp at
       // ~0.05 reaches ~95% in ~700ms at 60fps which matches the spec.
@@ -610,11 +666,9 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
       // matches the particles/halo/shell/light, which are also colored from cfgInit. `c`
       // (getCfg(liveEmotion)) still drives shape/scale/pulse. Without this the core would
       // show the flat table color while everything around it shows the blend.
-      const baseLight = new THREE.Color(cfgInit.lightColor);
-      const baseBase = new THREE.Color(cfgInit.color);
-      _coreScratch.copy(baseLight);
-      _glowScratch.copy(baseBase);
-      _lightScratch.copy(baseBase);
+      _coreScratch.copy(_baseLightC);
+      _glowScratch.copy(_baseBaseC);
+      _lightScratch.copy(_baseBaseC);
 
       if (liveState === "thinking" || liveState === "deep") {
         _coreScratch.lerp(STATE_TINT.thinking, 0.55);
@@ -757,9 +811,10 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     };
 
     return () => disposeRef.current();
-    // Mount per emotion/size — state and amplitude are read via refs so they
-    // update live without remounting the scene.
-  }, [emotion, emotionColor, size]);
+    // Mount per emotion/size ONLY — state, amplitude, and emotionColor are all
+    // read via refs so they update live without remounting the scene (the
+    // emotionColor dep caused the remount-per-blend-step lag, 2026-07-08).
+  }, [emotion, size]);
 
   // Format remaining-seconds for the sleep timer label.
   const showTimer = state === "sleeping" || state === "waking";
