@@ -87,6 +87,12 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # ── L2: signal bus (used by perception + heartbeat) ──────────────────────
     _try(g, "signal_bus", lambda: _bootstrap_signal_bus(g))
 
+    # Unknown-face auto-capture (Zeke directive 2026-07-09): watches
+    # g["_face_results"] for known+unknown / multi-unknown frames, auto-saves
+    # draft photos via the video loop's enroll hook, fires 'unknown_capture'
+    # signal as a suggestion-nudge. Chores->code, wakes->decisions.
+    _try(g, "unknown_capture", lambda: _bootstrap_unknown_capture(g))
+
     # ── L3: relational + personhood ──────────────────────────────────────────
     _try(g, "anchor_moments", lambda: _bootstrap_anchor_moments(g, root))
     _try(g, "identity_stability", lambda: _bootstrap_identity_stability(g, root))
@@ -278,6 +284,12 @@ def _bootstrap_skill_sandbox(g: dict[str, Any], root: Path) -> None:
 def _bootstrap_signal_bus(g: dict[str, Any]) -> None:
     from brain.signal_bus import bootstrap_signal_bus
     bootstrap_signal_bus(g)
+
+
+def _bootstrap_unknown_capture(g: dict[str, Any]) -> None:
+    from brain import unknown_capture
+    unknown_capture.start(g)
+    g["_unknown_capture_ready"] = True
 
 
 # ── L3 helpers ──────────────────────────────────────────────────────────────
