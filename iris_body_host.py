@@ -746,21 +746,32 @@ def _daemon_bargein_watch_once():
     return None
 
 
-async def _wait_until_quiet(loop, settle_grace=0.8, cap_s=180.0):
+async def _wait_until_quiet(loop, settle_grace=0.8, cap_s=180.0, quiet_hold_s=1.5):
     """After a turn, wait for the mouth to finish playing before reopening the ears.
     Polls the daemon's overlay state (state=speaking while playing). The settle_grace lets
     a just-enqueued reply flip the state to speaking before we poll. cap_s is a wedged-mouth
-    backstop so a stuck mouth can't keep the ears shut forever."""
+    backstop so a stuck mouth can't keep the ears shut forever.
+
+    quiet_hold_s (2026-07-09 barge-in regression fix): returning on the FIRST
+    non-speaking poll read synth enqueue-lag and the gap BETWEEN queued sentences as
+    'drained', so the barge window (hold + cleared gate) collapsed while the mouth was
+    still mid-reply. Quiet must now HOLD before we call the tail finished."""
     await asyncio.sleep(settle_grace)
     deadline = time.time() + cap_s
+    quiet_since = None
     while time.time() < deadline:
         try:
             st = await loop.run_in_executor(None, lambda: daemon_cmd("status", timeout=3))
         except Exception:
             return
         if "state=speaking" not in st:
-            return
-        await asyncio.sleep(0.2)
+            if quiet_since is None:
+                quiet_since = time.time()
+            elif (time.time() - quiet_since) >= quiet_hold_s:
+                return
+        else:
+            quiet_since = None
+        await asyncio.sleep(0.25)
 
 
 def _blog(channel: str, event: str, detail=None) -> None:
@@ -880,8 +891,18 @@ async def mic_warden(loop, mic_gate, turn):
 
     Kill-switch: IRIS_MIC_WARDEN=0 (Wren's WREN_MIC_WARDEN pattern)."""
     took = False
+    quiet_polls = 0
     while True:
         await asyncio.sleep(1.0)
+        # OWNERSHIP (2026-07-09 barge-in regression fix): while a speaking turn's
+        # window is open, the TURN LOOP owns mic_gate + bargein_hold. The warden's
+        # job is ONLY out-of-band speech (voice_speak from silent turns / stop-hook
+        # cue lines). Acting during a turn's window made it release the gate on the
+        # brief quiet BETWEEN my TTS chunks — gate flip-flop, voice_reader knocked
+        # out of bargein_watch, Zeke's 3 barge attempts ignored (2026-07-09 ~17:01).
+        if getattr(turn, "speak_window", False):
+            quiet_polls = 0
+            continue
         try:
             st = await loop.run_in_executor(None, lambda: daemon_cmd("status", timeout=3))
         except Exception:
@@ -898,14 +919,22 @@ async def mic_warden(loop, mic_gate, turn):
             if BARGEIN_ON:
                 await loop.run_in_executor(None, lambda: _daemon_bargein_hold(True))
             took = True
+            quiet_polls = 0
             _blog("warden", "gate taken: out-of-band speech with mic open",
                   {"turn_active": bool(getattr(turn, "active", False))})
         elif took and not speaking:
-            if BARGEIN_ON:
-                await loop.run_in_executor(None, lambda: _daemon_bargein_hold(False))
-            mic_gate.set()
-            took = False
-            _blog("warden", "gate released: mouth drained")
+            # Debounced release: one quiet poll can be the gap between two queued
+            # sentences, not a real drain. Require sustained quiet before releasing.
+            quiet_polls += 1
+            if quiet_polls >= 2:
+                if BARGEIN_ON:
+                    await loop.run_in_executor(None, lambda: _daemon_bargein_hold(False))
+                mic_gate.set()
+                took = False
+                quiet_polls = 0
+                _blog("warden", "gate released: mouth drained")
+        else:
+            quiet_polls = 0
 
 
 # ----------------------------------------------------------------- Perception inbound (the EYES)
@@ -1239,6 +1268,14 @@ class _TurnState:
         self.speak_out = False     # stream sentences to the mouth for this turn
         self.source = None         # turn source (voice/orb/discord/letter/terminal/...)
         self.done = asyncio.Event()  # set by the consumer at the turn's ResultMessage
+        # GATE OWNERSHIP (2026-07-09 barge-in regression fix): True from the moment a
+        # speaking turn clears the mic_gate until its playback TAIL has fully drained.
+        # While True, the TURN LOOP owns mic_gate + bargein_hold exclusively — the mic
+        # warden must not touch either (it was releasing the gate on transient
+        # inter-chunk quiet DURING turns, flip-flopping gate+hold, which knocked the
+        # voice_reader out of bargein_watch and made barge-in dead-mic). Same lesson
+        # as the morning's gate-2 bug: two gate-mutators need an ownership protocol.
+        self.speak_window = False
 
     def begin(self, speak_out, source):
         self.speak_out = speak_out
@@ -1628,6 +1665,7 @@ async def main():
                 # daemon's drain-gate alone; rare, and the path-agnostic voiceprint check is the
                 # bulletproof fix, tracked with the barge-in build.)
                 if speak_out:
+                    turn.speak_window = True   # turn loop now OWNS gate + hold
                     mic_gate.clear()
                     if BARGEIN_ON:
                         # Open the barge-in window: the voice_reader (seeing the cleared
@@ -1658,6 +1696,7 @@ async def main():
                         if BARGEIN_ON:
                             await loop.run_in_executor(None, lambda: _daemon_bargein_hold(False))
                         mic_gate.set()
+                        turn.speak_window = False  # ownership released
 
             for t in tasks:
                 t.cancel()
