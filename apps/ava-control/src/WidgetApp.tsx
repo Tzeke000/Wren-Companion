@@ -184,6 +184,9 @@ export default function WidgetApp() {
   const widgetBlock = snap?.widget as Record<string, unknown> | undefined;
   const isPointing = Boolean(widgetBlock?.pointing);
   const shapeOverride = isPointing ? "pointer" : undefined;
+  // Tip-anchored pointing (2026-07-08): rotation published by the Python side
+  // (widget_spatial_tool) — degrees clockwise from screen-up.
+  const pointerAngleDeg = isPointing ? Number(widgetBlock?.pointing_angle_deg) || 0 : 0;
 
   return (
     <div
@@ -207,6 +210,7 @@ export default function WidgetApp() {
         state={orbState}
         size={150}
         shapeOverride={shapeOverride}
+        pointerAngleDeg={pointerAngleDeg}
         amplitude={ttsAmplitude}
         energy={moodEnergy}
       />
