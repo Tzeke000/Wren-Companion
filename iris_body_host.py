@@ -835,6 +835,59 @@ async def voice_reader(queue, loop, mic_gate):
                     await asyncio.sleep(0.05)
 
 
+# ----------------------------------------------------------------- Mouth-gate warden
+# Wren's mouth-gate warden, ported 2026-07-08 (steal-list item; drain-ordering
+# prereq verified 2026-07-06: the daemon flips speaking=False only at play-queue
+# DRAIN, never at synth-return — so "quiet" here means audibly quiet).
+MIC_WARDEN_ON = os.environ.get("IRIS_MIC_WARDEN", "1").strip().lower() not in ("0", "off", "false", "no")
+
+
+async def mic_warden(loop, mic_gate, turn):
+    """Continuous mouth-gate: poll the daemon's REAL speaking state 1/s and gate the
+    ears whenever the mouth is playing OUT-OF-BAND — speech no speaking-turn owns.
+
+    The turn loop only gates turns it KNOWS speak (voice turns). The residual hole
+    (comment at the speak_out gate): a SILENT turn — or a stop-hook rewake — that
+    deliberately calls voice_speak plays audio while the mic_gate is still OPEN.
+    Tonight's heads-down cue lines are exactly that shape. The warden closes it:
+
+      - mouth speaking + gate open  → TAKE the gate (clear) and, with barge-in on,
+        raise bargein_hold so Zeke can talk over cue lines too — same barge
+        semantics as a real voice turn.
+      - mouth drained (or daemon gone: fail-open) and WE took it → RELEASE
+        (hold down, gate set). Ownership flag: never releases a gate the turn
+        loop cleared; double-release after a turn-loop handover is idempotent.
+
+    Kill-switch: IRIS_MIC_WARDEN=0 (Wren's WREN_MIC_WARDEN pattern)."""
+    took = False
+    while True:
+        await asyncio.sleep(1.0)
+        try:
+            st = await loop.run_in_executor(None, lambda: daemon_cmd("status", timeout=3))
+        except Exception:
+            if took:
+                if BARGEIN_ON:
+                    await loop.run_in_executor(None, lambda: _daemon_bargein_hold(False))
+                mic_gate.set()
+                took = False
+                _blog("warden", "gate released: daemon unreachable (fail-open)")
+            continue
+        speaking = "state=speaking" in st
+        if speaking and mic_gate.is_set():
+            mic_gate.clear()
+            if BARGEIN_ON:
+                await loop.run_in_executor(None, lambda: _daemon_bargein_hold(True))
+            took = True
+            _blog("warden", "gate taken: out-of-band speech with mic open",
+                  {"turn_active": bool(getattr(turn, "active", False))})
+        elif took and not speaking:
+            if BARGEIN_ON:
+                await loop.run_in_executor(None, lambda: _daemon_bargein_hold(False))
+            mic_gate.set()
+            took = False
+            _blog("warden", "gate released: mouth drained")
+
+
 # ----------------------------------------------------------------- Perception inbound (the EYES)
 def signals_get(after, types):
     """GET iris_runtime's recent signal-bus events (ts > after). Stdlib-only, blocking;
@@ -1410,6 +1463,11 @@ async def main():
                     print("[host] voice ears: OFF - daemon ping failed: " + repr(e), file=sys.stderr)
                 if daemon_up:
                     tasks.append(asyncio.create_task(voice_reader(queue, loop, mic_gate)))
+                    if MIC_WARDEN_ON:
+                        tasks.append(asyncio.create_task(mic_warden(loop, mic_gate, turn)))
+                        print("[host] mic warden: ON - continuous mouth-gate (1/s daemon poll).")
+                    else:
+                        print("[host] mic warden: OFF - IRIS_MIC_WARDEN disabled.")
                 else:
                     print("[host] voice ears: OFF - daemon not answering on :"
                           + str(DAEMON_ADDR[1]) + ".", file=sys.stderr)
