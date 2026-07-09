@@ -184,7 +184,8 @@ PERCEPTION_POLL_INTERVAL = float(os.environ.get("IRIS_PERCEPTION_POLL_S", "1.5")
 # Which signal types are turn-worthy (wake me). Presence changes only, by default.
 PERCEPTION_WAKE_SIGNALS = set(
     s.strip() for s in os.environ.get(
-        "IRIS_PERCEPTION_WAKE_SIGNALS", "face_appeared,face_lost").split(",")
+        "IRIS_PERCEPTION_WAKE_SIGNALS",
+        "face_appeared,face_lost,unknown_capture").split(",")
     if s.strip()
 )
 # Which signal types get LEDGERED (superset of wake signals; pre-relaunch audit
@@ -195,7 +196,7 @@ PERCEPTION_WAKE_SIGNALS = set(
 PERCEPTION_LEDGER_SIGNALS = set(
     s.strip() for s in os.environ.get(
         "IRIS_PERCEPTION_LEDGER_SIGNALS",
-        "face_appeared,face_lost,expression_changed,attention_changed").split(",")
+        "face_appeared,face_lost,expression_changed,attention_changed,unknown_capture").split(",")
     if s.strip()
 ) | PERCEPTION_WAKE_SIGNALS
 # --- Presence hysteresis (built 2026-06-29 from the flicker self-test, Zeke's spec) --------
@@ -966,6 +967,15 @@ def _describe_perception(sig):
         return ("The person in view changed"
                 + ((" from " + frm) if _named(frm) else "")
                 + ((" to " + to) if _named(to) else "") + ".")
+    if stype == "unknown_capture":
+        # brain/unknown_capture.py auto-photographed unknown face(s). This is a
+        # SUGGESTION nudge (Zeke directive 2026-07-09): frames are already on disk;
+        # cognition decides whether to draft a profile + ask who they are.
+        known = ", ".join(str(k) for k in (data.get("known") or [])) or "nobody known"
+        return ("My eyes auto-captured " + str(data.get("frames") or "?")
+                + " photos of " + str(data.get("unknown_count") or "an") + " unknown person(s)"
+                + " in frame alongside " + known + " - saved to " + str(data.get("dir") or "faces/_drafts/")
+                + ". Suggestion: consider staging a draft profile and asking Zeke (or them) who they are.")
     if stype == "expression_changed":
         expr = str(data.get("expression") or "").strip()
         return "Expression changed" + ((" to " + expr) if expr else "") + "."
@@ -1082,6 +1092,15 @@ async def perception_reader(queue, loop, start_ts):
                 "believed_present": announced_present,
             })
             if stype not in PERCEPTION_WAKE_SIGNALS:
+                continue
+            if stype == "unknown_capture":
+                # Direct wake, NO hysteresis: the watcher already held the condition
+                # (~3s) and enforces its own cooldown (~10 min), and this is a
+                # suggestion about photos ALREADY on disk — not a presence assertion,
+                # so the presence belief machine must not see it.
+                desc = _describe_perception(sig)
+                _blog("eyes", desc, {"ts": ts, "wake": True, "unknown_capture": sig.get("data")})
+                await _enqueue(queue, ("perception", desc, ts))
                 continue
             present = (stype == "face_appeared")   # the presence this signal asserts
             if announced_present is None:
