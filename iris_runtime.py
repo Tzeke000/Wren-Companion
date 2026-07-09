@@ -3232,6 +3232,15 @@ def pointer_show(x: int, y: int, duration_s: float = 5.0, description: str = "")
         description: optional label so I can recall what I was pointing at.
     """
     try:
+        # 2026-07-08: delegate to the tip-anchored implementation (monitor-aware
+        # placement + known tip + rotation angle for the frontend). Fallback to
+        # the legacy center-on-target path if the module is unavailable.
+        try:
+            from tools.system.widget_spatial_tool import point_widget_at
+            return point_widget_at(_g, int(x), int(y), duration_s=duration_s,
+                                   description=description)
+        except ImportError:
+            pass
         duration_s = float(max(1.0, min(30.0, duration_s)))
         # Set state — operator snapshot exposes this as snap.widget.pointing
         _g["_widget_pointing"] = True

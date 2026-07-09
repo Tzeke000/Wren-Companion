@@ -15,7 +15,7 @@ from typing import Any
 
 from tools.tool_registry import register_tool
 
-_WIDGET_TITLE = "Ava Widget"
+_WIDGET_TITLE = "Iris Widget"  # was "Ava Widget" — stale since the Iris rename (fixed 2026-07-08)
 _WIDGET_W = 150
 _WIDGET_H = 150
 _MARGIN = 10

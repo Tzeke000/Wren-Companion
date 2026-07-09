@@ -10,6 +10,11 @@ interface OrbProps {
   size?: number;
   /** Phase 49: override shape for pointer morph */
   shapeOverride?: string;
+  /** Tip-anchored pointing (2026-07-08): arrow direction in degrees CLOCKWISE
+   *  from screen-up (0=up, 90=right, 180=down, 270=left). Comes from
+   *  snap.widget.pointing_angle_deg — the Python side placed the window so the
+   *  arrow TIP lands on the target pixel at exactly this angle. */
+  pointerAngleDeg?: number;
   /** Live speaking amplitude 0-1 (read from snap.tts.tts_amplitude). */
   amplitude?: number;
   /** Energy 0-1 from snap.mood.raw_mood.energy — drives breathing rate. */
@@ -178,7 +183,7 @@ const STATE_TINT = {
   pointing: new THREE.Color("#ffeb3b"),  // bright yellow — Iris is targeting a desktop element (cu_click preview)
 };
 
-function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverride, amplitude = 0, energy = 0.5, recenterTrigger, cubeMorphEnabled = true, sleepProgress = 0, sleepRemainingSeconds = 0, wakeProgress = 0 }: OrbProps) {
+function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverride, pointerAngleDeg = 0, amplitude = 0, energy = 0.5, recenterTrigger, cubeMorphEnabled = true, sleepProgress = 0, sleepRemainingSeconds = 0, wakeProgress = 0 }: OrbProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const disposeRef = useRef<()=>void>(()=>{});
 
@@ -188,6 +193,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
   const amplitudeRef = useRef<number>(amplitude);
   const emotionRef = useRef<string>(emotion);
   const shapeOverrideRef = useRef<string | undefined>(shapeOverride);
+  const pointerAngleRef = useRef<number>(pointerAngleDeg);
   const energyRef = useRef<number>(energy);
   // Blended emotion color — read live by the animate loop so color shifts
   // recolor materials IN PLACE instead of remounting the scene. Remounting on
@@ -211,6 +217,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
   amplitudeRef.current = amplitude;
   emotionRef.current = emotion;
   shapeOverrideRef.current = shapeOverride;
+  pointerAngleRef.current = pointerAngleDeg;
   energyRef.current = energy;
   emotionColorRef.current = emotionColor;
   recenterTriggerRef.current = recenterTrigger;
@@ -376,6 +383,17 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
         else if(shape==="pointer"){
           if(oy>0){ my*=2.2; mx*=Math.max(0.1, 1.0-oy*1.2); mz*=Math.max(0.1, 1.0-oy*1.2); }
           else{ mx*=0.5; my*=0.4; mz*=0.5; }
+          // Tip-anchored rotation (2026-07-08): base arrow points screen-UP;
+          // rotate in the screen plane by pointerAngleDeg (deg clockwise from
+          // up). THREE is y-up, so clockwise-on-screen = rotate by -angle:
+          // x' = x·cosA + y·sinA, y' = -x·sinA + y·cosA.
+          const pA = (pointerAngleRef.current || 0) * Math.PI / 180;
+          if (pA !== 0) {
+            const ca = Math.cos(pA), sa = Math.sin(pA);
+            const nx = mx*ca + my*sa;
+            const ny = -mx*sa + my*ca;
+            mx = nx; my = ny;
+          }
         }
         else if(shape==="cube"){
           mx = Math.sign(mx)*(Math.abs(mx)<0.5?Math.abs(mx):Math.abs(mx)*0.9+0.1*Math.sign(mx));
@@ -632,8 +650,18 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
       if (liveState === "thinking" || liveState === "deep") rotMul = 2.5;
       else if (liveState === "speaking") rotMul = 1.0 + liveAmp * 1.5;
       else if (liveState === "listening") rotMul = 0.55;
-      innerGroup.rotation.y += r * rotMul;
-      innerGroup.rotation.x += r * 0.4 * rotMul;
+      // While the arrow is up, the particle group must hold LEVEL or the
+      // pointing direction is meaningless — wrap accumulated spin into
+      // [-π, π] and ease to zero (no multi-turn unwind), then hold.
+      if (shapeOverrideRef.current === "pointer") {
+        const wrapA = (v: number) => ((v % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2) - Math.PI;
+        innerGroup.rotation.x = wrapA(innerGroup.rotation.x) * 0.8;
+        innerGroup.rotation.y = wrapA(innerGroup.rotation.y) * 0.8;
+        innerGroup.rotation.z = wrapA(innerGroup.rotation.z) * 0.8;
+      } else {
+        innerGroup.rotation.y += r * rotMul;
+        innerGroup.rotation.x += r * 0.4 * rotMul;
+      }
       outerGroup.rotation.y -= r * 0.7 * rotMul;
       outerGroup.rotation.z += r * 0.3 * rotMul;
       streamGroup.rotation.y += r * 1.2 * rotMul;
@@ -783,7 +811,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
         : 0.15 + Math.sin(t*0.5)*0.05 + (liveState === "speaking" ? liveAmp * 0.15 : 0);
       if(liveState==="offline"){ coreMat.opacity=Math.max(0.20,coreMat.opacity-0.001); pMat.opacity=Math.max(0.30,pMat.opacity-0.0005); }
       else { coreMat.opacity = 0.95; pMat.opacity = 0.85; }
-      if(liveEmotion==="confusion") innerGroup.rotation.z+=Math.sin(t*3)*0.005;
+      if(liveEmotion==="confusion" && shapeOverrideRef.current !== "pointer") innerGroup.rotation.z+=Math.sin(t*3)*0.005;
       renderer.render(scene,camera);
     }
     animate();

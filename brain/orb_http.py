@@ -459,6 +459,12 @@ def snapshot() -> dict:
             "pointing_description": str(_g.get("_widget_pointing_description") or ""),
             "pointing_coords": _g.get("_widget_pointing_coords"),
             "pointing_until_ts": float(_g.get("_widget_pointing_until") or 0.0),
+            # 2026-07-08 tip-anchored pointing: angle in degrees CLOCKWISE from
+            # screen-up (0=up, 90=right); the frontend rotates the particle
+            # arrow to match. tip = the exact virtual-desktop pixel the arrow
+            # tip is placed on. Written by tools/system/widget_spatial_tool.py.
+            "pointing_angle_deg": float(_g.get("_widget_pointing_angle_deg") or 0.0),
+            "pointing_tip": _g.get("_widget_pointing_tip"),
         },
         # Speech caption (2026-07-06): App.tsx reads speaking/spoken_so_far/full_reply
         # — the OLD stub {text, ts} never matched, so the home page always fell back to
