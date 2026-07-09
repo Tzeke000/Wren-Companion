@@ -329,6 +329,64 @@ def ingest_dynamic(cg: Any, root: Path | str) -> dict[str, Any]:
         return {"ok": False, "error": repr(e)}
 
 
+# ── Usage → activation (Zeke 2026-07-08 pt.2) ───────────────────────────────
+# "Those little things of light need to pass to the memories you're USING."
+# Mechanical wire: every sweep, scan what got appended to the shared transcript
+# (voice+chat turns — i.e., what I'm actually working with) and activate any
+# graph node whose slug appears in it. Unused nodes then sink naturally via
+# decay; used ones surface. No cognition involved.
+
+_transcript_cursor: dict[str, int] = {}
+
+
+def activate_from_text(cg: Any, text: str, cap: int = 20) -> int:
+    """Activate nodes whose slug appears (word-boundary-safe) in `text`."""
+    try:
+        hay = "-" + re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-") + "-"
+        if len(hay) <= 2:
+            return 0
+        # Longest ids first — most specific memories win the cap.
+        ids = sorted(getattr(cg, "nodes", {}).keys(), key=len, reverse=True)
+        hits = 0
+        for nid in ids:
+            if hits >= cap:
+                break
+            if len(nid) < 3:
+                continue
+            if f"-{nid}-" in hay:
+                try:
+                    cg.activate_node(nid)
+                    hits += 1
+                except Exception:
+                    pass
+        return hits
+    except Exception as e:
+        _log(f"activate_from_text failed (non-fatal): {e!r}")
+        return 0
+
+
+def activate_from_transcript(cg: Any, root: Path | str) -> int:
+    """Activate nodes mentioned in transcript lines appended since last sweep.
+    First call baselines to end-of-file (no replay of history)."""
+    try:
+        path = Path(root) / "state" / "transcript.jsonl"
+        if not path.is_file():
+            return 0
+        size = path.stat().st_size
+        key = str(path)
+        pos = _transcript_cursor.get(key)
+        _transcript_cursor[key] = size
+        if pos is None or size <= pos:
+            return 0
+        with open(path, "rb") as f:
+            f.seek(pos)
+            chunk = f.read(min(size - pos, 512_000)).decode("utf-8", errors="replace")
+        return activate_from_text(cg, chunk)
+    except Exception as e:
+        _log(f"transcript activation failed (non-fatal): {e!r}")
+        return 0
+
+
 def start_ingest_thread(cg: Any, root: Path | str,
                         interval_s: float = INGEST_INTERVAL_S) -> bool:
     """Start the background rescan thread (once). Returns True if started."""
@@ -342,10 +400,14 @@ def start_ingest_thread(cg: Any, root: Path | str,
         _thread_started = True
 
     def _loop() -> None:
+        activate_from_transcript(cg, root)  # baseline cursor to end-of-file
         while True:
             time.sleep(interval_s)
             ingest_all(cg, root)
             ingest_dynamic(cg, root)
+            hits = activate_from_transcript(cg, root)
+            if hits:
+                _log(f"activated {hits} node(s) from transcript usage")
 
     t = threading.Thread(target=_loop, name="graph-ingest", daemon=True)
     t.start()
