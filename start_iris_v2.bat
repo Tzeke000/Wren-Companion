@@ -56,6 +56,12 @@ REM --- iris_body_host (no double-cognition). Now elevated, this reaches an elev
 REM --- orphan too. SPARES sibling_postoffice (Wren's lifeline) + anything else by name.
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voice_watchdog|wren_voice_daemon|wren_styletts_server|iris_runtime|iris_body_host' } | ForEach-Object { Write-Host ('[start_iris_v2.bat] killing stale PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
+REM --- Kill any stale ORB APP too (Zeke directive 2026-07-08): a ghost iris-control
+REM --- wedged at its splash screen holds the app's single-instance lock, so every
+REM --- double-click bounces off silently (tonight's bug, PID 13220). Fresh session
+REM --- gets a fresh orb — the launcher below brings it back once the body is ready.
+taskkill /f /im iris-control.exe >nul 2>&1
+
 REM --- Clear iris_runtime's stale single-instance pidfile so the fresh MCP-child binds
 REM --- clean (a dead-PID file is self-cleaned, but a leftover from a hard kill is not).
 if exist "D:\Wren-Companion\state\iris.pid" del /q "D:\Wren-Companion\state\iris.pid" >nul 2>&1
@@ -77,6 +83,13 @@ REM Post-office (letters :5877) + monitor. Added 2026-07-06: no launcher started
 REM so any boot without a manual run left the letters channel dead. Idempotent
 REM (port-probe + pidfile inside); .venv python (system py lacks fastapi).
 call "D:\Wren-Companion\start_postoffice_stack.bat"
+
+REM --- Relaunch the ORB APP once the body is READY (Zeke directive 2026-07-08):
+REM --- a detached waiter polls the operator port (5876) and starts iris-control
+REM --- the moment it answers, so the orb connects to a live body instead of racing
+REM --- the boot. If the body never binds within ~3 min it launches anyway, so Zeke
+REM --- at least sees the orb (and its dead-body state) rather than nothing.
+start "iris-orb-launcher" /B powershell -NoProfile -Command "$ok=$false; for($i=0; $i -lt 60 -and -not $ok; $i++){ try{ (New-Object Net.Sockets.TcpClient('127.0.0.1',5876)).Close(); $ok=$true }catch{ Start-Sleep -Seconds 3 } }; Start-Process 'D:\Wren-Companion\apps\ava-control\src-tauri\target\release\iris-control.exe'"
 
 REM The host IS the cognition. Run it in the foreground so this window is Iris.
 "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\iris_body_host.py"
