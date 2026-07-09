@@ -73,6 +73,7 @@ class InsightFaceEngine:
         self._available = False
         self._provider: str = "none"
         self._init_error: str = ""
+        self._faces_dir: Optional[Path] = None  # remembered from initialize() for no-arg reloads
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
@@ -134,6 +135,7 @@ class InsightFaceEngine:
         except Exception:
             pass
         self._provider = actual_provider
+        self._faces_dir = Path(faces_dir)
         self._load_faces(faces_dir)
         self._available = True
         # Snapshot reader (operator_server.py:1099) checks `getattr(ife, "ready", False)`
@@ -328,15 +330,24 @@ class InsightFaceEngine:
     def update_known_faces(self, faces_dir: Path | None = None) -> int:
         """Reload all embeddings from disk. Called by onboarding after photos
         are saved so any newly-added person directory is picked up. Wipes the
-        in-memory cache and rebuilds it. Returns the new known_count."""
+        in-memory cache and rebuilds it. Returns the new known_count.
+
+        No-arg calls reload from the dir remembered at initialize(). BUG FIX
+        2026-07-08: the old no-arg path wiped the cache and returned 0 WITHOUT
+        reloading — every no-arg caller (enroll_face hot-reload, orb_http
+        refresh) silently blanked the recognizer. No-worse-than-before rule:
+        never wipe unless we have a real dir to rebuild from."""
         if not self._available or self._app is None:
             return 0
-        target = Path(faces_dir) if faces_dir is not None else None
+        target = Path(faces_dir) if faces_dir is not None else self._faces_dir
+        if target is None or not target.is_dir():
+            # Nothing to rebuild from — keep what we have instead of wiping.
+            print(f"[insight_face] update_known_faces: no valid faces dir "
+                  f"(arg={faces_dir!r}, remembered={self._faces_dir!r}) — cache kept")
+            return len(self._known)
         with self._lock:
             self._known = {}
             self._known_counts = {}
-        if target is None:
-            return 0
         self._load_faces(target)
         return len(self._known)
 
