@@ -820,7 +820,26 @@ async def voice_reader(queue, loop, mic_gate):
             print("\n[host] voice listen failed (non-fatal): " + repr(e), file=sys.stderr)
             await asyncio.sleep(2.0)
             continue
-        if text and mic_gate.is_set():   # gate 2: drop if a turn spoke during this listen
+        # Gate 2 (rewritten 2026-07-09): the ORIGINAL rule dropped any utterance whose
+        # listen window saw the mic_gate clear ("a turn spoke during this listen -> the
+        # audio is probably my own voice"). Two things broke that assumption:
+        #   1. Headphones mode (BARGEIN_ON): my TTS physically can't reach the mic, so a
+        #      cleared gate NEVER means self-audio here - the capture is Zeke, keep it.
+        #   2. The mic warden clears the gate whenever the daemon's own filler/stall-bridge
+        #      speaks (out-of-band, turn_active=false). That take races the enriched-
+        #      transcript return (prosody adds ~1-2s) and lands EXACTLY in this window -
+        #      on 2026-07-09 morning it silently ate two real utterances ("Did you not
+        #      hear what I said before, Iris?"). A silent drop of Zeke's words is the
+        #      worst failure shape the ears have; never drop silently again.
+        # On speakers (BARGEIN_ON off) the conservative drop remains - but LOGGED.
+        if text and not mic_gate.is_set() and not BARGEIN_ON:
+            print("\n[host] voice listen: utterance DROPPED (gate cleared mid-listen, "
+                  "speakers mode - self-listen risk): " + text[:80], file=sys.stderr)
+            _blog("ears", "[dropped: gate cleared mid-listen, speakers mode] " + text[:120])
+        elif text:
+            if not mic_gate.is_set():
+                print("\n[host] voice listen: gate cleared mid-listen (warden/turn) - "
+                      "keeping utterance (headphones mode).", flush=True)
             _blog("ears", text)
             await _enqueue(queue, ("voice", text, None))
             if BARGEIN_ON:
