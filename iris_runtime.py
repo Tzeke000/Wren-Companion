@@ -4307,6 +4307,19 @@ def _eager_init_engines() -> None:
                 print(f"[iris_runtime] family graph seeded: {_fam}", file=sys.stderr, flush=True)
         except Exception as _fse:
             print(f"[iris_runtime] family graph seed skipped: {_fse!r}", file=sys.stderr, flush=True)
+        # Mechanical memory mirror (Zeke 2026-07-08): profiles + memory notes +
+        # their [[wikilinks]] auto-ingest into the concept graph, then a
+        # background thread rescans mtimes so memory edits reach the brain tab
+        # without cognition involved. Gate: IRIS_GRAPH_INGEST=0.
+        try:
+            _cg_ing = _g.get("_concept_graph")
+            if _cg_ing is not None:
+                from brain.graph_ingest import ingest_all as _gi_all, start_ingest_thread as _gi_thread
+                _gi_res = _gi_all(_cg_ing, ROOT)
+                _gi_thread(_cg_ing, ROOT)
+                print(f"[iris_runtime] graph ingest: {_gi_res}", file=sys.stderr, flush=True)
+        except Exception as _gie:
+            print(f"[iris_runtime] graph ingest skipped: {_gie!r}", file=sys.stderr, flush=True)
         try:
             (ROOT / "state").mkdir(parents=True, exist_ok=True)
             print("[iris_runtime] journal ready (state/journal.jsonl)", file=sys.stderr, flush=True)
