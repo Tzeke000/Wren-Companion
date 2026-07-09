@@ -41,7 +41,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-INGEST_INTERVAL_S = 300  # background rescan cadence (mtime stat sweep — cheap)
+INGEST_INTERVAL_S = 60  # background rescan cadence (mtime stat sweep — cheap).
+# 300→60 2026-07-08: Zeke wants the brain tab live; the tab polls at 3s, so
+# this sweep is the freshness floor for file edits. ~300 stats/min ≈ nothing.
 
 _DEFAULT_NOTES_DIR = Path(
     os.environ.get("IRIS_MEMORY_NOTES_DIR")
@@ -320,6 +322,28 @@ def ingest_dynamic(cg: Any, root: Path | str) -> dict[str, Any]:
                     _link_to_person(cg, nid, str(rec.get("person_id") or ""), rel, strength)
                 except Exception:
                     continue
+
+        # Mood emotions — state/iris_mood.json weights → emotion nodes edged to
+        # iris (Zeke 2026-07-08: "every person topic EMOTION memory ... should
+        # all be in here"). Only meaningful weights; strength tracks the weight
+        # so the felt blend is readable off the edges.
+        try:
+            mood = json.loads((root / "state" / "iris_mood.json").read_text(encoding="utf-8"))
+            weights = mood.get("emotion_weights") or {}
+            top = sorted(weights.items(), key=lambda kv: float(kv[1] or 0), reverse=True)
+            for name, w in top[:8]:
+                w = float(w or 0)
+                if w < 0.02:
+                    break
+                nid = cg.find_or_create(str(name), "emotion")
+                node = cg.nodes.get(nid)
+                if node is not None and not getattr(node, "notes", ""):
+                    node.notes = "felt emotion — weight from the live mood substrate"
+                _link_to_person(cg, nid, "iris", "feels", min(1.0, w))
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            _log(f"mood ingest failed (non-fatal): {e!r}")
 
         return {"ok": True,
                 "nodes_added": len(getattr(cg, "nodes", {})) - nodes_before,
