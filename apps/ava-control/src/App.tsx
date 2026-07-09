@@ -1909,18 +1909,25 @@ export default function App() {
     try {
       const rawNodes = brainGraph.nodes || [];
       const rawEdges = brainGraph.edges || [];
-      // Type-aware cap (2026-07-08): a flat top-N-by-weight cull let the
-      // memory-note flood push RARE types (people! curiosities! events!) out
-      // of view — Zeke saw "a bunch of memory and nothing else" and half the
-      // family missing. Rare types are the graph's soul; guarantee them a
-      // seat (up to 50 per type by weight), then fill the rest by weight.
+      // Type-aware LIVENESS cap (2026-07-08): a flat top-N-by-weight cull let
+      // the memory-note flood push RARE types (people! curiosities! events!)
+      // out of view. And weight alone is static — Zeke: the lights should
+      // "pass to the memories you're USING; if you're not using it, it sinks
+      // back" (it stays on disk, always look-back-able). So the seat-picker
+      // scores by liveness — recent activation (48h half-life) + usage count
+      // + weight — with rare types guaranteed up to 50 seats per type first.
+      const liveScore = (n: any) => {
+        const lastAct = Number(n.last_activated || 0);
+        const ageH = Math.max(0, (Date.now() / 1000 - lastAct) / 3600);
+        const recency = Math.exp(-ageH / 48);
+        const usage = Math.log1p(Number(n.activation_count || 0));
+        return recency * 2 + usage + Number(n.weight || 0);
+      };
       let topNodes = rawNodes;
       if (rawNodes.length > BRAIN_GRAPH_MAX_NODES) {
         const RARE_TYPES = new Set(["person", "self", "curiosity", "event", "emotion", "opinion"]);
         const RARE_KEEP_PER_TYPE = 50;
-        const byWeight = [...rawNodes].sort(
-          (a, b) => Number(b.weight || 0) - Number(a.weight || 0)
-        );
+        const byWeight = [...rawNodes].sort((a, b) => liveScore(b) - liveScore(a));
         const keep: typeof rawNodes = [];
         const keptIds = new Set<string>();
         const rareCounts: Record<string, number> = {};

@@ -3505,6 +3505,17 @@ def memory_search(query: str, k: int = 5, person_id: str = "") -> dict:
             query, k=int(k),
             person_id=(person_id or None),
         )
+        # Usage lights (Zeke 2026-07-08): recalling a memory IS using it —
+        # activate matching graph nodes so the brain tab surfaces what I
+        # actually touch. Guarded; recall never fails because of the graph.
+        try:
+            _cg_act = _g.get("_concept_graph")
+            if _cg_act is not None and results:
+                from brain.graph_ingest import activate_from_text
+                blob = query + " " + " ".join(str(r.get("text") or "") for r in results if isinstance(r, dict))
+                activate_from_text(_cg_act, blob, cap=10)
+        except Exception:
+            pass
         return {"ok": True, "count": len(results), "results": results}
     except Exception as e:
         return {"ok": False, "error": str(e)}
