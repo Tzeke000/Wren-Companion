@@ -240,6 +240,95 @@ def ingest_all(cg: Any, root: Path | str, notes_dir: Path | None = None,
         return {"ok": False, "error": repr(e)}
 
 
+def _short_label(text: str, limit: int = 60) -> str:
+    t = " ".join(str(text or "").split())
+    return t if len(t) <= limit else t[: limit - 1].rstrip() + "…"
+
+
+def _link_to_person(cg: Any, node_id: str, person_id: str, rel: str, strength: float) -> None:
+    pid = str(person_id or "").strip().lower()
+    if not pid:
+        return
+    try:
+        target = cg.nodes.get(pid)
+        if target is not None:
+            cg.add_edge(node_id, pid, rel, strength)
+    except Exception:
+        pass
+
+
+def ingest_dynamic(cg: Any, root: Path | str) -> dict[str, Any]:
+    """Curiosities + episodes + anchor moments → curiosity/event nodes.
+
+    Zeke 2026-07-08 (looking at the freshly-ingested brain tab): "what about
+    any things you were curious about ... any events? I'm just seeing a bunch
+    of memory and nothing else." These live in state/ stores, not markdown, so
+    the file ingester never saw them. Labels derive deterministically from the
+    record text, so find_or_create dedupes across runs. Never raises.
+    """
+    try:
+        root = Path(root)
+        nodes_before = len(getattr(cg, "nodes", {}))
+        edges_before = len(getattr(cg, "edges", []))
+
+        # Curiosities — state/curiosity_topics.json {topics:[{topic,priority,resolved}]}
+        try:
+            raw = json.loads((root / "state" / "curiosity_topics.json").read_text(encoding="utf-8"))
+            for t in raw.get("topics") or []:
+                label = _short_label(t.get("topic"))
+                if not label:
+                    continue
+                nid = cg.find_or_create(label, "curiosity")
+                node = cg.nodes.get(nid)
+                if node is not None and not getattr(node, "notes", ""):
+                    status = "resolved" if t.get("resolved") else "open"
+                    node.notes = f"curiosity ({status}) — {str(t.get('topic') or '')[:400]}"
+                _link_to_person(cg, nid, "iris", "curious_about", float(t.get("priority") or 0.5))
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            _log(f"curiosity ingest failed (non-fatal): {e!r}")
+
+        # Episodes + anchor moments — jsonl, one event node per record.
+        for fname, kind_note, rel in (
+            ("iris_episodes.jsonl", "episode", "involves"),
+            ("anchor_moments.jsonl", "anchor moment", "anchored_with"),
+        ):
+            path = root / "state" / fname
+            if not path.is_file():
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except Exception:
+                continue
+            for line in lines[-200:]:  # cap: newest 200 per store
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                label = _short_label(rec.get("summary"))
+                if not label:
+                    continue
+                try:
+                    nid = cg.find_or_create(label, "event")
+                    node = cg.nodes.get(nid)
+                    if node is not None and not getattr(node, "notes", ""):
+                        when = rec.get("iso") or ""
+                        extra = rec.get("kind") or rec.get("type") or kind_note
+                        node.notes = f"{kind_note} ({extra}) {when} — {str(rec.get('summary') or '')[:400]}"
+                    strength = float(rec.get("importance") or 0.7)
+                    _link_to_person(cg, nid, str(rec.get("person_id") or ""), rel, strength)
+                except Exception:
+                    continue
+
+        return {"ok": True,
+                "nodes_added": len(getattr(cg, "nodes", {})) - nodes_before,
+                "edges_added": len(getattr(cg, "edges", [])) - edges_before}
+    except Exception as e:
+        _log(f"dynamic ingest failed (non-fatal): {e!r}")
+        return {"ok": False, "error": repr(e)}
+
+
 def start_ingest_thread(cg: Any, root: Path | str,
                         interval_s: float = INGEST_INTERVAL_S) -> bool:
     """Start the background rescan thread (once). Returns True if started."""
@@ -256,6 +345,7 @@ def start_ingest_thread(cg: Any, root: Path | str,
         while True:
             time.sleep(interval_s)
             ingest_all(cg, root)
+            ingest_dynamic(cg, root)
 
     t = threading.Thread(target=_loop, name="graph-ingest", daemon=True)
     t.start()

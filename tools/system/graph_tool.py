@@ -19,9 +19,10 @@ def _graph_ingest_run(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
     cg = g.get("_concept_graph")
     if cg is None:
         return {"ok": False, "error": "concept graph not initialized"}
-    from brain.graph_ingest import ingest_all, start_ingest_thread
+    from brain.graph_ingest import ingest_all, ingest_dynamic, start_ingest_thread
     root = Path(g.get("BASE_DIR") or ".")
     result = ingest_all(cg, root, force=bool(params.get("force")))
+    result["dynamic"] = ingest_dynamic(cg, root)
     if params.get("start_thread"):
         result["thread_started"] = start_ingest_thread(cg, root)
     return result

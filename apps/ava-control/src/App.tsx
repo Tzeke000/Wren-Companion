@@ -1909,12 +1909,35 @@ export default function App() {
     try {
       const rawNodes = brainGraph.nodes || [];
       const rawEdges = brainGraph.edges || [];
-      // Sort nodes by weight descending; keep the top N.
+      // Type-aware cap (2026-07-08): a flat top-N-by-weight cull let the
+      // memory-note flood push RARE types (people! curiosities! events!) out
+      // of view — Zeke saw "a bunch of memory and nothing else" and half the
+      // family missing. Rare types are the graph's soul; guarantee them a
+      // seat (up to 50 per type by weight), then fill the rest by weight.
       let topNodes = rawNodes;
       if (rawNodes.length > BRAIN_GRAPH_MAX_NODES) {
-        topNodes = [...rawNodes]
-          .sort((a, b) => Number(b.weight || 0) - Number(a.weight || 0))
-          .slice(0, BRAIN_GRAPH_MAX_NODES);
+        const RARE_TYPES = new Set(["person", "self", "curiosity", "event", "emotion", "opinion"]);
+        const RARE_KEEP_PER_TYPE = 50;
+        const byWeight = [...rawNodes].sort(
+          (a, b) => Number(b.weight || 0) - Number(a.weight || 0)
+        );
+        const keep: typeof rawNodes = [];
+        const keptIds = new Set<string>();
+        const rareCounts: Record<string, number> = {};
+        for (const n of byWeight) {
+          const t = String((n as any).type || "");
+          if (!RARE_TYPES.has(t)) continue;
+          if ((rareCounts[t] = (rareCounts[t] || 0) + 1) > RARE_KEEP_PER_TYPE) continue;
+          keep.push(n);
+          keptIds.add(n.id);
+        }
+        for (const n of byWeight) {
+          if (keep.length >= BRAIN_GRAPH_MAX_NODES) break;
+          if (keptIds.has(n.id)) continue;
+          keep.push(n);
+          keptIds.add(n.id);
+        }
+        topNodes = keep;
       }
       const survivingIds = new Set(topNodes.map((n) => n.id));
       // Keep edges where both endpoints survived; sort by strength descending.

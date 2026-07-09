@@ -4314,8 +4314,9 @@ def _eager_init_engines() -> None:
         try:
             _cg_ing = _g.get("_concept_graph")
             if _cg_ing is not None:
-                from brain.graph_ingest import ingest_all as _gi_all, start_ingest_thread as _gi_thread
+                from brain.graph_ingest import ingest_all as _gi_all, ingest_dynamic as _gi_dyn, start_ingest_thread as _gi_thread
                 _gi_res = _gi_all(_cg_ing, ROOT)
+                _gi_dyn(_cg_ing, ROOT)
                 _gi_thread(_cg_ing, ROOT)
                 print(f"[iris_runtime] graph ingest: {_gi_res}", file=sys.stderr, flush=True)
         except Exception as _gie:
