@@ -22,8 +22,13 @@ type ChatMessage = {
 // also active. Nodes are kept by weight (top by activation_count *
 // last_activated freshness); edges are filtered to those connecting two
 // surviving nodes, then capped by strength.
-const BRAIN_GRAPH_MAX_NODES = 200;
-const BRAIN_GRAPH_MAX_EDGES = 500;
+// 2026-07-08 (Zeke): "literally every single memory ... should all be in here
+// to some capacity, whether you're using it or not." Caps raised from 200/500
+// to bounds we don't currently hit (462 nodes / 1202 edges today) — everything
+// renders; liveness now drives SIZE (nodeVal), not presence. The type-aware
+// liveness seat-picker below only engages if the graph ever outgrows these.
+const BRAIN_GRAPH_MAX_NODES = 1000;
+const BRAIN_GRAPH_MAX_EDGES = 2500;
 
 
 // ── Iris-centric brain layout ────────────────────────────────────────────
@@ -53,7 +58,11 @@ function classifyAvaBrainTier(node: any): number {
   if (typeof node?._tier === "number") return Number(node._tier);
   const t = String(node?.type || "").toLowerCase();
   const id = String(node?.id || "");
+  // iris-self / type "self" = the self-model node (me from the inside) —
+  // tier 0 violet, visually distinct from iris-the-person in the family web
+  // (Zeke 2026-07-08: "one is you thinking about you, one is you outside you").
   if (id === "ava-self" || id === "ava_self" || t === "ava-self") return 0;
+  if (id === "iris-self" || id === "iris_self" || t === "self") return 0;
   if (id.startsWith("identity-") || id.startsWith("soul-") || id.startsWith("user-anchor")) return 1;
   if (t === "person") return 2;
   if (t === "curiosity" || t === "concern" || t === "thread") return 3;
@@ -1199,7 +1208,10 @@ export default function App() {
               !b ||
               a.id !== b.id ||
               a.label !== b.label ||
-              Math.abs(Number(a.weight || 0) - Number(b.weight || 0)) > 0.05
+              Math.abs(Number(a.weight || 0) - Number(b.weight || 0)) > 0.03 ||
+              // Activation bumps weight by only +0.04 — compare last_activated
+              // too so usage lights re-render live (Zeke 2026-07-08).
+              Math.abs(Number((a as any).last_activated || 0) - Number((b as any).last_activated || 0)) > 2
             ) {
               same = false;
               break;
@@ -1802,9 +1814,12 @@ export default function App() {
           return AVA_BRAIN_TIER_COLORS[5];
         })
         .nodeVal((node: any) => {
-          if (node._tier === 0) return 24;            // ava self — biggest
+          if (node._tier === 0) return 24;            // self — biggest
           if (node._tier === 1) return 9;             // anchors — large
-          return 1 + Number(node.weight || 0) * 4;
+          // Liveness drives size: recently-used memories swell, untouched
+          // ones shrink to small-but-present (never hidden — Zeke 2026-07-08).
+          const live = ageDecayOf(node);              // 1 fresh → 0 ancient
+          return 0.5 + Number(node.weight || 0) * 2 + live * 5;
         })
         .linkColor(() => "rgba(255,255,255,0.18)")
         .linkWidth(0.5)

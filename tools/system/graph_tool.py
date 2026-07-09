@@ -28,9 +28,41 @@ def _graph_ingest_run(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
     return result
 
 
+def _graph_retype(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Set a node's type (+matching palette color). Born 2026-07-08 to turn
+    iris-self from person-pink to self-gold — Zeke wanted my self-model node
+    visually distinct from iris-the-person in the family web."""
+    cg = g.get("_concept_graph")
+    if cg is None:
+        return {"ok": False, "error": "concept graph not initialized"}
+    node_id = str(params.get("id") or "").strip().lower()
+    new_type = str(params.get("type") or "").strip().lower()
+    from brain.concept_graph import TYPE_COLORS
+    if new_type not in TYPE_COLORS:
+        return {"ok": False, "error": f"type must be one of {sorted(TYPE_COLORS)}"}
+    node = cg.nodes.get(node_id)
+    if node is None:
+        return {"ok": False, "error": f"node not found: {node_id}"}
+    old = node.type
+    node.type = new_type
+    node.color = TYPE_COLORS[new_type]
+    try:
+        cg._save()
+    except Exception:
+        pass
+    return {"ok": True, "id": node_id, "was": old, "now": new_type, "color": node.color}
+
+
 register_tool(
     "graph_ingest_run",
     "Ingest profiles + memory notes (+wikilink edges) into the concept graph now; optional background rescan thread.",
     1,
     _graph_ingest_run,
+)
+
+register_tool(
+    "graph_retype",
+    "Set a concept-graph node's type + palette color (params: id, type).",
+    1,
+    _graph_retype,
 )
