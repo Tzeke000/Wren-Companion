@@ -37,6 +37,77 @@ _ATTENTION_COLORS = {
     "absent": (0, 0, 220),
 }
 
+# ── Box/landmark smoothing (2026-07-08) ──────────────────────────────────────
+# Detection runs at ~5fps (insight_every_n=6) but annotate_frame runs at 30fps,
+# so drawing raw _face_results froze the box for 6 frames then snapped it —
+# Zeke saw the tracker "lagging behind" his face. Exponential easing toward the
+# newest detection each frame turns the freeze-and-jump into a smooth glide.
+# _SMOOTH_ALPHA=0.35 reaches ~92% of a new target within one detection interval.
+_SMOOTH_ALPHA = 0.35
+# Snap (no easing) when the target center jumps more than this fraction of the
+# frame diagonal — a real teleport (camera cut, person swap), not motion.
+_SNAP_FRAC = 0.25
+_smooth_state: dict[str, dict[str, Any]] = {}
+
+
+def _smooth_face(face: dict[str, Any], frame_shape: Any) -> dict[str, Any]:
+    """Return a copy of `face` with bbox+landmarks eased toward the detection.
+
+    Keyed by person_id (single-face household; unknowns share one slot). Any
+    error falls back to the raw face so annotation never breaks.
+    """
+    try:
+        import numpy as np  # type: ignore
+
+        pid = str(face.get("person_id") or "unknown")
+        target_bbox = np.asarray(face.get("bbox") or [0, 0, 0, 0], dtype=np.float64)
+        lm_raw = face.get("landmarks")
+        target_lm = None if lm_raw is None else np.asarray(lm_raw, dtype=np.float64)
+
+        h = float(frame_shape[0]) if frame_shape is not None else 480.0
+        w = float(frame_shape[1]) if frame_shape is not None else 640.0
+        diag = (w * w + h * h) ** 0.5
+
+        st = _smooth_state.get(pid)
+        snap = st is None
+        if st is not None:
+            prev_cx = (st["bbox"][0] + st["bbox"][2]) / 2.0
+            prev_cy = (st["bbox"][1] + st["bbox"][3]) / 2.0
+            cur_cx = (target_bbox[0] + target_bbox[2]) / 2.0
+            cur_cy = (target_bbox[1] + target_bbox[3]) / 2.0
+            jump = ((cur_cx - prev_cx) ** 2 + (cur_cy - prev_cy) ** 2) ** 0.5
+            if jump > diag * _SNAP_FRAC:
+                snap = True
+            # Landmark count changed (different detector path) → don't lerp mismatched arrays.
+            if (st.get("lm") is None) != (target_lm is None):
+                snap = True
+            elif target_lm is not None and st["lm"].shape != target_lm.shape:
+                snap = True
+
+        if snap:
+            _smooth_state[pid] = {"bbox": target_bbox.copy(),
+                                  "lm": None if target_lm is None else target_lm.copy()}
+        else:
+            st["bbox"] += (target_bbox - st["bbox"]) * _SMOOTH_ALPHA
+            if target_lm is not None:
+                st["lm"] += (target_lm - st["lm"]) * _SMOOTH_ALPHA
+
+        st = _smooth_state[pid]
+        smoothed = dict(face)
+        smoothed["bbox"] = st["bbox"].tolist()
+        if st.get("lm") is not None:
+            smoothed["landmarks"] = st["lm"]
+        return smoothed
+    except Exception:
+        return face
+
+
+def _prune_smooth_state(seen_pids: set[str]) -> None:
+    """Drop smoothing slots for faces no longer in the results."""
+    for k in list(_smooth_state.keys()):
+        if k not in seen_pids:
+            _smooth_state.pop(k, None)
+
 
 def annotate_frame(frame: Any, face_results: list[dict[str, Any]] | None, g: dict[str, Any]) -> Any:
     """Draw face overlays on `frame` and return the modified frame.
@@ -47,6 +118,7 @@ def annotate_frame(frame: Any, face_results: list[dict[str, Any]] | None, g: dic
     if frame is None:
         return frame
     if not face_results:
+        _smooth_state.clear()  # returning faces snap fresh, no stale glide
         return _draw_attention_only(frame, g)
 
     try:
@@ -59,8 +131,11 @@ def annotate_frame(frame: Any, face_results: list[dict[str, Any]] | None, g: dic
 
     profiles = g.get("_profiles") or {}
 
+    _prune_smooth_state({str(f.get("person_id") or "unknown") for f in face_results})
+
     for face in face_results:
         try:
+            face = _smooth_face(face, out.shape if hasattr(out, "shape") else None)
             bbox = face.get("bbox") or [0, 0, 0, 0]
             x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
             pid = str(face.get("person_id") or "unknown")
