@@ -825,6 +825,32 @@ export default function App() {
     return () => { active = false; window.clearTimeout(timeoutId); };
   }, [online]);
 
+  // ── Ear-mute sync (wired 2026-07-10) — the Input-on button used to be UI-local
+  // only; it now drives the backend ear mute (scratch/voice_control.json via
+  // /api/v1/voice_input), which the voice daemon honors at capture time. Sync
+  // state from the backend on connect so the pill reflects reality, not local
+  // toggles from a previous orb session.
+  useEffect(() => {
+    if (!online) return;
+    let active = true;
+    (async () => {
+      try {
+        const r = await getJson<{ ok: boolean; muted?: boolean }>("/api/v1/voice_input");
+        if (active && r?.ok) setInputMuted(Boolean(r.muted));
+      } catch { /* backend without the endpoint: keep local-only behavior */ }
+    })();
+    return () => { active = false; };
+  }, [online]);
+
+  const toggleInputMute = async () => {
+    const want = !inputMuted;
+    setInputMuted(want); // optimistic — reconciled from the response below
+    try {
+      const r = await postJson<{ ok: boolean; muted?: boolean }>("/api/v1/voice_input/toggle", { muted: want });
+      if (r?.ok) setInputMuted(Boolean(r.muted));
+    } catch { /* backend unreachable: local mute still blocks the orb's own inputs */ }
+  };
+
   // ── UI tab routing — polls /api/v1/ui/tab every 1s; switches tab when set
   useEffect(() => {
     if (!online) return;
@@ -2395,7 +2421,7 @@ export default function App() {
         <button
           type="button"
           className={`mute-input-btn ${inputMuted ? "muted" : ""}`}
-          onClick={() => setInputMuted((v) => !v)}
+          onClick={() => void toggleInputMute()}
           aria-label={inputMuted ? "Unmute your input" : "Mute your input"}
           title={inputMuted ? "Input muted" : "Input on"}
         >

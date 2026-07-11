@@ -415,8 +415,15 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                     if now - t_start > timeout_s:
                         return None  # nobody spoke within the window
                     if is_muted():
+                        # Ear-mute (orb "Input on" toggle, 2026-07-10): discard frames,
+                        # capture nothing. Muted time DOES count against the timeout now
+                        # (the old `t_start = now` reset was Wren-era push-to-talk
+                        # semantics with no caller timeout budget): if it didn't, a long
+                        # mute would block cmd_listen past the HOST's socket timeout and
+                        # surface as "voice listen failed" error spam. Counting it means
+                        # a muted window ends as a normal paced "[voice_listen] no
+                        # speech" marker the host quietly re-polls on.
                         time.sleep(0.1)
-                        t_start = now  # don't count muted time against the timeout
                         continue
                     if peak >= ONSET_PEAK:
                         started = True
@@ -1366,6 +1373,14 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         return "[bargein_watch] vad_not_warm"
     if not getattr(ctx, "bargein_hold", False):
         return "[bargein_watch] no_hold"
+    # Ear-mute gate (orb "Input on" toggle → scratch/voice_control.json, 2026-07-10).
+    # cmd_listen already honors is_muted() inside _capture_utterance's pre-onset wait;
+    # this closes the OTHER ear path — while muted, don't watch for barge-in either
+    # (Zeke talking over my TTS is room-chatter to a friend, not an interrupt).
+    # Fail-soft marker; the host treats it like a closed window and re-polls.
+    if is_muted():
+        time.sleep(0.5)   # pace the host's re-poll; unmute picks up within ~0.5s
+        return "[bargein_watch] no_barge"
     cap_s = float(args.get("cap_s", BARGEIN_WATCH_CAP_S))
     deadline = time.time() + cap_s
     try:

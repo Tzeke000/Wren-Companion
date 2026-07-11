@@ -69,6 +69,20 @@ class _IrisPaths:
         the voice_body_pause MCP tool if the body is misbehaving."""
         return self.tmp_dir / "body_pause.flag"
 
+    @property
+    def voice_control_file(self) -> Path:
+        """Ear-mute control channel (orb "Input on" button, wired 2026-07-10).
+        JSON {mic_muted: bool, ping_ts: float} — the SAME file
+        voice/wren_voice_status.py declares as CONTROL_FILE (a Wren-era
+        channel the daemon's capture loop already honors; nothing wrote it
+        until the orb toggle was wired). mic_muted=True → the daemon's
+        cmd_listen / cmd_bargein_watch don't capture: Zeke has explicitly
+        muted Iris's ears (e.g. he's on a call with a friend and doesn't
+        want side-chatter landing as voice turns). Written by orb_http
+        /api/v1/voice_input/toggle; missing/unreadable = ears ON (fail-open:
+        a broken read never silences the ears)."""
+        return self.root / "scratch" / "voice_control.json"
+
     # ── Chat ────────────────────────────────────────────────────────────────
     @property
     def chat_dir(self) -> Path:
