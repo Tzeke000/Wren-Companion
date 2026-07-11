@@ -50,6 +50,125 @@ def _rebind_orb_http_state(params: dict[str, Any], g: dict[str, Any]) -> dict[st
     return out
 
 
+def _wire_voice_input_routes(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Activate the ear-mute endpoints (added to brain/orb_http.py 2026-07-10)
+    on the RUNNING uvicorn app — new routes can't land via brain_hot_swap
+    because uvicorn keeps serving the app object it was started with, and a
+    module reload builds a fresh (unserved) app.
+
+    Steps: grab the SERVED app ref → reload brain.orb_http (new handler code)
+    → restore the module state the reload wiped (_g/_root/_tts_ref/camera —
+    the 2026-07-08 rebind scar, generalized) → add_api_route the new
+    endpoints onto the served app. Idempotent: skips routes already present."""
+    import importlib
+
+    out: dict[str, Any] = {"ok": True, "added": [], "skipped": []}
+    try:
+        import brain.orb_http as m
+        served = m.app  # what uvicorn is actually serving
+        # Preserve state a reload would wipe (module top-level placeholders).
+        keep = {k: getattr(m, k) for k in
+                ("_g", "_root", "_tts_ref", "_cam", "_cam_lock", "_cam_last_b64",
+                 "_cam_last_grab_ts", "_chat_history") if hasattr(m, k)}
+        importlib.reload(m)
+        for k, v in keep.items():
+            setattr(m, k, v)
+        m._g = g  # live state dict, always (idempotent with keep)
+        existing = {getattr(r, "path", None) for r in served.routes}
+        for path, handler_name, methods in (
+            ("/api/v1/voice_input", "voice_input_state", ["GET"]),
+            ("/api/v1/voice_input/toggle", "voice_input_toggle", ["POST"]),
+        ):
+            if path in existing:
+                out["skipped"].append(path)
+                continue
+            handler = getattr(m, handler_name, None)
+            if handler is None:
+                out["ok"] = False
+                out["error"] = f"{handler_name} missing post-reload — is brain/orb_http.py saved?"
+                return out
+            served.add_api_route(path, handler, methods=methods)
+            out["added"].append(path)
+        out["served_routes_now"] = len(served.routes)
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = repr(e)
+    return out
+
+
+def _eyes_rest(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Pause/resume the GPU face-detection step of the always-on camera loop
+    (2026-07-10, born while Zeke gamed: background_ticks._video_frame_capture_thread
+    runs InsightFace ~5fps with a HARDCODED every_n that ignores iris_tune, and the
+    running while-True loop can't take a __code__ swap — but it re-reads
+    g['_insight_face'] EVERY frame, so nulling that key skips the CUDA step live).
+
+    params: {"rest": true} → stash engine ref + null the key (eyes rest; frames
+    still stream, no face detect). {"rest": false} → restore. Idempotent."""
+    rest = bool(params.get("rest", True))
+    out: dict[str, Any] = {"ok": True, "rest": rest}
+    # Every per-frame engine the camera loop re-reads from g each iteration.
+    # (2026-07-10 deep-rest extension: _expression_detector runs EVERY frame —
+    # not even every_n-gated — and _eye_tracker/_video_memory add more; nulling
+    # all of them leaves only cap.read + annotate(None) + push_frame.)
+    keys = ("_insight_face", "_expression_detector", "_eye_tracker", "_video_memory")
+    if rest:
+        stash = g.get("_eyes_rest_stash") or {}
+        if not isinstance(stash, dict):   # migrate pre-2026-07-10 single-ref stash
+            stash = {"_insight_face": stash}
+        paused = []
+        for k in keys:
+            eng = g.get(k)
+            if eng is not None:
+                stash[k] = eng
+                g[k] = None
+                paused.append(k)
+        g["_eyes_rest_stash"] = stash
+        g["_face_results"] = None  # stop annotating stale boxes
+        out["paused"] = paused
+        if not paused:
+            out["note"] = "already resting (or engines never loaded)"
+    else:
+        stash = g.get("_eyes_rest_stash")
+        if not isinstance(stash, dict):   # migrate pre-2026-07-10 single-ref stash
+            stash = {"_insight_face": stash} if stash is not None else {}
+        resumed = []
+        for k, eng in stash.items():
+            if eng is not None:
+                g[k] = eng
+                resumed.append(k)
+        g["_eyes_rest_stash"] = None
+        out["resumed"] = resumed
+        if not resumed:
+            out["note"] = "nothing stashed — eyes were not resting"
+    return out
+
+
+register_tool(
+    name="eyes_rest",
+    description=(
+        "Pause (rest=true) or resume (rest=false) the camera loop's GPU face-detection "
+        "step live — for gaming/GPU-contention windows. Frames keep streaming; InsightFace "
+        "skips. Idempotent. Tier 2."
+    ),
+    tier=2,
+    handler=_eyes_rest,
+)
+
+
+register_tool(
+    name="wire_voice_input_routes",
+    description=(
+        "Repair/activate: register the ear-mute endpoints (/api/v1/voice_input GET, "
+        "/api/v1/voice_input/toggle POST) on the RUNNING orb_http app after adding them "
+        "to brain/orb_http.py. Reloads the module, restores reload-wiped state, adds "
+        "routes to the served app. Idempotent. Tier 2."
+    ),
+    tier=2,
+    handler=_wire_voice_input_routes,
+)
+
+
 register_tool(
     name="rebind_orb_http_state",
     description=(

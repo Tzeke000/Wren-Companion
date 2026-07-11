@@ -502,6 +502,71 @@ def tts_state() -> dict:
     }
 
 
+# ── Ear-mute (orb "Input on" button, wired 2026-07-10) ───────────────────────
+# The daemon's capture paths honor scratch/voice_control.json {mic_muted} (a
+# Wren-era control channel nothing wrote until now). These endpoints let the
+# orb's Input-on/muted toggle actually reach Iris's ears. Path computed
+# module-relative (NOT via _g/_root) so a brain_hot_swap reload can't break it.
+
+def _voice_control_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "scratch" / "voice_control.json"
+
+
+def _voice_input_muted() -> bool:
+    try:
+        import json as _j
+        d = _j.loads(_voice_control_path().read_text(encoding="utf-8"))
+        return bool(d.get("mic_muted", False))
+    except Exception:
+        return False  # fail-open: unreadable control file = ears ON
+
+
+def _voice_input_set(muted: bool) -> None:
+    # Atomic replace, mirroring voice/wren_voice_status.py:_write_control —
+    # the daemon polls this file at 10Hz inside a capture loop; it must never
+    # observe a half-written JSON.
+    import json as _j
+    import tempfile as _tf
+    p = _voice_control_path()
+    try:
+        d = _j.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(d, dict):
+            d = {}
+    except Exception:
+        d = {}
+    d["mic_muted"] = bool(muted)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = _tf.mkstemp(dir=str(p.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            _j.dump(d, f)
+        os.replace(tmp, p)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+@app.get("/api/v1/voice_input")
+def voice_input_state() -> dict:
+    """Current ear-mute state for the orb toggle (polled/fetched on mount)."""
+    return {"ok": True, "muted": _voice_input_muted()}
+
+
+@app.post("/api/v1/voice_input/toggle")
+async def voice_input_toggle(payload: dict = Body(default={})) -> dict:
+    """Set (payload {"muted": bool}) or flip (empty payload) the ear mute."""
+    want = payload.get("muted") if isinstance(payload, dict) else None
+    muted = (not _voice_input_muted()) if want is None else bool(want)
+    try:
+        _voice_input_set(muted)
+    except Exception as e:
+        return {"ok": False, "muted": _voice_input_muted(), "error": repr(e)}
+    return {"ok": True, "muted": muted}
+
+
 # Tier 2 — identity files (read-only)
 @app.get("/api/v1/identity/{name}", response_class=PlainTextResponse)
 def identity(name: str) -> str:
