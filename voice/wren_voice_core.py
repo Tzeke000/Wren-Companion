@@ -957,6 +957,39 @@ def _is_phantom(text: str, audio) -> bool:
         return False   # fail-open: never eat a turn on a gate error
 
 
+# ── Per-speaker pause profiles (Zeke design directive, voice, 2026-07-12 ~05:05) ──
+# Q thinks in pauses; the global END_SILENCE_S cut him mid-thought all night
+# (fragments: "where you are", "still but I can't really tell"). Zeke's spec, given
+# as he drifted off: when the speaker is NEW/unknown, default the end-silence window
+# to a generous ~3s; once a speaker's rhythm is known, trim or extend PER SPEAKER
+# (Zeke's own effective window ≈ 1.5s; Q needs longer). The active speaker and the
+# learned profiles live in scratch/speaker_pace.json (host/tools write it; face-rec
+# wire can set "active" later):
+#   {"active": "zeke", "profiles": {"zeke": 1.5, "q": 3.0}, "default_unknown": 3.0}
+# Precedence in cmd_listen: explicit end_silence_seconds arg > speaker file > module
+# default. File ABSENT/unparseable/insane → END_SILENCE_S exactly as before, so this
+# is no-worse-than-before by construction (same fail-open shape as the ear-mute gate).
+SPEAKER_PACE_FILE = Path(r"D:\Wren-Companion\scratch\speaker_pace.json")
+
+def _speaker_end_silence():
+    """Return the per-speaker end-silence override (float seconds) or None."""
+    try:
+        if not SPEAKER_PACE_FILE.exists():
+            return None
+        import json as _json
+        d = _json.loads(SPEAKER_PACE_FILE.read_text(encoding="utf-8"))
+        active = str(d.get("active") or "").strip().lower()
+        profiles = d.get("profiles") or {}
+        if active and active in profiles:
+            v = float(profiles[active])
+        else:
+            v = float(d.get("default_unknown", 0) or 0)
+        # Sanity clamp: outside 0.3–8.0s is a typo, not a pause profile.
+        return v if 0.3 <= v <= 8.0 else None
+    except Exception:
+        return None   # fail-open to module default — a bad file must never break ears
+
+
 def cmd_listen(ctx, args: dict) -> str:
     """Listen for Zeke to speak and return what he said.
 
@@ -980,7 +1013,11 @@ def cmd_listen(ctx, args: dict) -> str:
     timeout_s = float(args.get("timeout_seconds", 45.0))
     max_s = float(args.get("max_utterance_seconds", 20.0))
     end_sil = float(args.get("end_silence_seconds", 0.0))
-    end_silence = end_sil if end_sil > 0 else END_SILENCE_S
+    if end_sil > 0:
+        end_silence = end_sil                      # explicit caller override wins
+    else:
+        # Per-speaker pause profile (scratch/speaker_pace.json) > module default.
+        end_silence = _speaker_end_silence() or END_SILENCE_S
 
     # ── Step 1: wait until playback drained, then settle ──────────────────────
     # The drain-gate (wait for ctx.speaking==False) is the strong form of Wren's
@@ -1351,6 +1388,21 @@ def cmd_bargein_hold(ctx, args: dict) -> dict:
     ctx.bargein_hold = hold
     ctx.bargein_fired = False
     if hold:
+        # Stale-queue guard (2026-07-12, flag-gated DEFAULT OFF): if chunks from a
+        # PREVIOUS turn are still queued when a NEW turn opens, they play into this
+        # window as out-of-order ghosts (observed live with Q: "I'd rather be
+        # corrected than flattered" replayed several turns late, then got barged).
+        # Toggle: scratch/voice_control.json {"flush_stale_on_hold": true} — hot,
+        # no reload needed. OFF until Zeke live-verifies (no-worse-than-before).
+        try:
+            from wren_voice_status import read_control
+            if bool(read_control().get("flush_stale_on_hold", False)):
+                n = _flush_play_queue(ctx)
+                if n:
+                    print(f"[bargein_hold] flushed {n} stale queued chunk(s) at "
+                          f"new-turn edge", flush=True)
+        except Exception:
+            pass   # guard must never break the hold edge itself
         # New speaking turn: reset the playback cursor for this window.
         ctx.played_chunks = []
         ctx.barge_cut = None
@@ -1452,8 +1504,19 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
                   f"{flushed} never played]")
     elif flushed:
         marker = f"[cut between sentences | {played} heard, {flushed} never played]"
-    else:
+    elif played:
         marker = f"[reply had already finished playing — all {played} sentence(s) heard]"
+    else:
+        # played==0, flushed==0, nothing in the speaker: the barge landed BEFORE this
+        # reply produced ANY audio (host still thinking / TTS still synthesizing / new
+        # hold window just opened). The old label claimed "already finished playing —
+        # all 0 sentence(s) heard", which reads as if the reply played and vanished.
+        # It never started — and cmd_speak will drop it (bargein_fired), so the host
+        # must know the listener heard NONE of it and restate what matters.
+        # (Found live: Q's night, 2026-07-12 — his continuing speech kept landing in
+        # this gap and whole replies died silently while the marker said "finished".)
+        marker = ("[barge landed before the reply started playing — nothing had been "
+                  "spoken; the pending reply was dropped unheard]")
     return f"[barge-in] {marker} {heard}"
 
 
