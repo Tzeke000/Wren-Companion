@@ -218,13 +218,20 @@ def _dir(theta_deg: float) -> tuple[float, float]:
     return math.sin(a), -math.cos(a)
 
 
-def plan_pointing(tx: int, ty: int) -> dict[str, Any]:
+def plan_pointing(tx: int, ty: int, prefer_angle: "float | None" = None) -> dict[str, Any]:
     """Choose an angle + widget-center placement so the arrow tip is AT (tx, ty)
-    and the whole 150x150 widget body sits inside the target's monitor work area."""
+    and the whole 150x150 widget body sits inside the target's monitor work area.
+
+    prefer_angle (2026-07-13): explicit arrow direction (deg clockwise from
+    screen-up) tried FIRST — lets the caller choose approach direction (all 8+
+    directions demoable). Falls back to the standard candidate ring if the
+    preferred placement doesn't fit the work area."""
     mons = enum_monitors()
     mon = monitor_for_point(tx, ty, mons)
     # Preference: diagonals first (least occluding), then cardinals.
-    candidates = (315.0, 45.0, 225.0, 135.0, 0.0, 270.0, 90.0, 180.0)
+    candidates: tuple = (315.0, 45.0, 225.0, 135.0, 0.0, 270.0, 90.0, 180.0)
+    if prefer_angle is not None:
+        candidates = (float(prefer_angle) % 360.0,) + candidates
     half_w, half_h = WIDGET_W // 2, WIDGET_H // 2
     chosen = None
     if mon:
@@ -256,10 +263,11 @@ def plan_pointing(tx: int, ty: int) -> dict[str, Any]:
 
 
 def point_widget_at(g: dict[str, Any], x: int, y: int,
-                    duration_s: float = 8.0, description: str = "") -> dict[str, Any]:
+                    duration_s: float = 8.0, description: str = "",
+                    prefer_angle: "float | None" = None) -> dict[str, Any]:
     """Shared implementation — also called by iris_runtime.pointer_show."""
     duration_s = float(max(1.0, min(60.0, duration_s)))
-    plan = plan_pointing(int(x), int(y))
+    plan = plan_pointing(int(x), int(y), prefer_angle=prefer_angle)
     cx, cy = plan["center"]["x"], plan["center"]["y"]
     moved = _move_widget_center_to(cx, cy)
     _save_position(g, cx - WIDGET_W // 2, cy - WIDGET_H // 2)
@@ -358,10 +366,12 @@ def _tool_widget_point(params: dict[str, Any], g: dict[str, Any]) -> dict[str, A
         y = params.get("y")
         if x is None or y is None:
             return {"ok": False, "error": "x and y (virtual-desktop pixels) required"}
+        prefer = params.get("angle_deg")
         return point_widget_at(
             g, int(x), int(y),
             duration_s=float(params.get("duration_s") or 8.0),
             description=str(params.get("description") or ""),
+            prefer_angle=(float(prefer) if prefer is not None else None),
         )
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -410,7 +420,8 @@ register_tool(
         "Point the widget ARROW precisely at virtual-desktop pixel (x, y) on either monitor. "
         "Tip-anchored: places the widget so the arrow TIP lands on the target and publishes the "
         "rotation angle for the frontend. Params: x, y (required), duration_s (1-60, default 8), "
-        "description (label for recall). Tier 1."
+        "description (label for recall), angle_deg (optional preferred approach direction, deg "
+        "clockwise from screen-up; falls back to auto if it doesn't fit). Tier 1."
     ),
     tier=1,
     handler=_tool_widget_point,
