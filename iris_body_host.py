@@ -259,10 +259,15 @@ async def _enqueue(queue, item):
     """Put one (source, text, msg_id[, sender]) item on the priority queue, tagged by source
     priority + a monotonic sequence. The seq guarantees the inner tuple is never compared
     (so heterogeneous items can't raise 'unorderable types') and preserves arrival order
-    within the same priority band."""
+    within the same priority band.
+
+    2026-07-13 (TikTok incident): entries also carry their ENQUEUE TIME. A backlog
+    of captured utterances used to be served one-per-turn minutes later with no age
+    marker — stale captures read as live replies and the input queue 'fabricated a
+    conversation'. The consumer stamps '[captured Ns ago]' on old voice items."""
     prio = _SOURCE_PRIORITY.get(item[0], 5)
     _enqueue_seq[0] += 1
-    await queue.put((prio, _enqueue_seq[0], item))
+    await queue.put((prio, _enqueue_seq[0], item, time.time()))
 
 
 def _is_speak_tool(block):
@@ -1590,9 +1595,30 @@ async def main():
             print("[host] (type here, or 'quit' to exit.)\n", flush=True)
 
             while True:
-                _prio, _seq, item = await queue.get()
+                entry = await queue.get()
+                _prio, _seq, item = entry[0], entry[1], entry[2]
+                enq_ts = entry[3] if len(entry) > 3 else None   # 2026-07-13 age stamp
                 source, text, msg_id = item[0], item[1], item[2]
                 sender = item[3] if len(item) > 3 else None
+                # ── Input staleness marker (2026-07-13, TikTok incident) ──────
+                # A voice utterance that sat in the queue is NOT a live reply to
+                # whatever I just said. Say so, so I never again mistake a
+                # backlog for a conversation. Backlog count included when more
+                # inputs are already waiting behind this one.
+                if source == "voice" and enq_ts is not None:
+                    _age = time.time() - enq_ts
+                    _backlog = queue.qsize()
+                    _stale_bits = []
+                    if _age >= 30.0:
+                        _stale_bits.append(
+                            f"[STALE: captured {_age:.0f}s ago — the conversation may have moved on; "
+                            "treat as backlog, not a live reply]")
+                    elif _age >= 10.0:
+                        _stale_bits.append(f"[captured {_age:.0f}s ago]")
+                    if _backlog > 0:
+                        _stale_bits.append(f"[+{_backlog} more input(s) queued behind this]")
+                    if _stale_bits:
+                        text = " ".join(_stale_bits) + " " + text
                 if source == "quit":
                     break
                 if source == "discord":
