@@ -180,6 +180,16 @@ BARGEIN_PREROLL_MS = 1000  # rolling audio kept BEFORE confirmed onset (recovers
                            # barge captures both start from audio that predates their window.
 BARGEIN_END_SILENCE_MS = 600  # continuous sub-threshold audio that ENDS the captured interruption
 BARGEIN_MAX_CAPTURE_S = 20.0  # hard cap on a single captured interruption
+BARGEIN_MIN_RMS = 0.02     # energy floor on ONSET chunks (2026-07-13). Silero fires on
+                           # speech-LIKE audio at ANY volume — my own TTS bleeding from
+                           # the headset earcups into the boom mic (~0.004 rms) confirmed
+                           # as onset, cut my mouth mid-sentence, and entered the queue
+                           # as ghost turns ("So", "Let me") voice-id'd iris 0.75-0.85.
+                           # Zeke's real voice at that mic runs ~0.15-0.29 rms (log
+                           # capture stats), so 0.02 has ~5x margin below him and above
+                           # the bleed. Hot-tunable: voice_control.json bargein_min_rms.
+                           # Applies to onset counting ONLY — post-onset capture keeps
+                           # soft trailing words.
 
 # ── engine registry ──────────────────────────────────────────────────────────
 _EXP_DIR = str(Path(__file__).resolve().parent)
@@ -623,7 +633,8 @@ def _run_with_timeout(fn, seconds: float, name: str = "") -> bool:
 def _bargein_accumulate(frame_prob_iter, is_speaking, on_barge, *,
                         threshold: float, need: int, preroll_chunks: int,
                         end_silence_chunks: int, max_chunks: int,
-                        on_event=None) -> "np.ndarray | None":
+                        on_event=None, min_rms: float = 0.0,
+                        stats: "dict | None" = None) -> "np.ndarray | None":
     """PURE accumulation core — no audio I/O, testable with a synthetic (frame, prob)
     sequence.
 
@@ -653,6 +664,14 @@ def _bargein_accumulate(frame_prob_iter, is_speaking, on_barge, *,
 
         if not barged:
             preroll.append(f)
+            # Energy floor (2026-07-13): pre-onset ONLY — a VAD-voiced chunk that's
+            # too faint to be Zeke at the mic (headset-bleed of my own TTS) must not
+            # count toward onset. See BARGEIN_MIN_RMS.
+            if is_voiced and min_rms > 0.0:
+                if float(np.sqrt(float((f * f).mean()))) < min_rms:
+                    is_voiced = False
+                    if stats is not None:
+                        stats["faint_voiced"] = stats.get("faint_voiced", 0) + 1
             voiced = voiced + 1 if is_voiced else 0
             if voiced >= need:
                 barged = True
@@ -689,7 +708,8 @@ def _bargein_watch_and_capture(ctx, model, is_speaking, on_barge, *,
                                preroll_ms: int = BARGEIN_PREROLL_MS,
                                end_silence_ms: int = BARGEIN_END_SILENCE_MS,
                                max_capture_s: float = BARGEIN_MAX_CAPTURE_S,
-                               on_event=None) -> "np.ndarray | None":
+                               on_event=None, min_rms: float = 0.0,
+                               stats: "dict | None" = None) -> "np.ndarray | None":
     """ONE continuous mic stream that watches for a barge-in via Silero VAD AND captures
     the interrupting utterance on the same stream (no second open).
 
@@ -726,7 +746,8 @@ def _bargein_watch_and_capture(ctx, model, is_speaking, on_barge, *,
                                    threshold=threshold, need=need,
                                    preroll_chunks=preroll_chunks,
                                    end_silence_chunks=end_silence_chunks,
-                                   max_chunks=max_chunks, on_event=on_event)
+                                   max_chunks=max_chunks, on_event=on_event,
+                                   min_rms=min_rms, stats=stats)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1686,6 +1707,21 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         return "[bargein_watch] no_barge"
     cap_s = float(args.get("cap_s", BARGEIN_WATCH_CAP_S))
     deadline = time.time() + cap_s
+    # Hot tunables (2026-07-13, echo-bleed fix): voice_control.json overrides, no reload.
+    try:
+        from wren_voice_status import read_control
+        _ctl = read_control()
+    except Exception:
+        _ctl = {}
+    try:
+        min_rms = float(_ctl.get("bargein_min_rms", BARGEIN_MIN_RMS))
+    except Exception:
+        min_rms = BARGEIN_MIN_RMS
+    try:
+        self_drop_bar = float(_ctl.get("self_voice_drop_bar", 0.5))
+    except Exception:
+        self_drop_bar = 0.5
+    watch_stats: dict = {}
     try:
         model.reset_states()   # no stale VAD state leaking across windows
     except Exception:
@@ -1721,11 +1757,17 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         # we serialize against listen/speak_interruptible ourselves, like they do).
         with ctx.mic_lock:
             audio = _bargein_watch_and_capture(ctx, model, _active, _on_barge,
-                                               device_substr=wl.DEFAULT_MIC_SUBSTR)
+                                               device_substr=wl.DEFAULT_MIC_SUBSTR,
+                                               min_rms=min_rms, stats=watch_stats)
     except Exception as e:
         return f"[bargein_watch] watcher error: {e!r}"
 
     if audio is None or getattr(audio, "size", 0) == 0:
+        n_faint = int(watch_stats.get("faint_voiced", 0))
+        if n_faint:
+            # Visible evidence the floor is doing work (never a silent drop).
+            print(f"[bargein_watch] no_barge — {n_faint} voiced-but-faint chunk(s) "
+                  f"held below rms floor {min_rms}", flush=True)
         return "[bargein_watch] no_barge"
 
     try:
@@ -1742,6 +1784,27 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         wl.append_transcript(heard)
     except Exception:
         pass
+    # Self-voice DROP (2026-07-13): voice-id is TAG-not-DROP everywhere else, but my
+    # OWN voice must never become a conversation turn — headset-bleed echo captures
+    # ("So", "Let me") were entering the queue tagged iris 0.75-0.85 and cutting my
+    # mouth off. The rms floor above prevents the cut; this stops any ghost turn that
+    # still gets through. Drop-but-LOG (ears-gate-2 lesson: no silent drops in a sense
+    # channel) — the text is already in voice_in.txt via append_transcript, the daemon
+    # log names the drop, and the host gets an explicit marker, not silence.
+    try:
+        _cfg = _voice_id_cfg()
+        if (_cfg is not None and _HAVE_VOICEID and _voiceid.warm_async()
+                and getattr(audio, "size", 0) >= int(_cfg["min_seconds"] * SAMPLE_RATE)):
+            _r = _voiceid.identify(audio)
+            if (_r.get("n_profiles") and _r.get("best") == "iris"
+                    and float(_r.get("score", 0.0)) >= self_drop_bar):
+                print(f"[bargein_watch] SELF-VOICE dropped (iris "
+                      f"{float(_r['score']):.2f}, bar {self_drop_bar}): "
+                      f"{heard[:80]!r}", flush=True)
+                return (f"[bargein_watch] self_voice_dropped (iris "
+                        f"{float(_r['score']):.2f})")
+    except Exception:
+        pass   # ID failure must never eat a real interruption — fall through to turn
     # Playback-cursor marker (2026-07-08): tell the host (and me) exactly where the
     # cut landed. Host only checks startswith('[barge-in]'), so extra info is safe.
     info = getattr(ctx, "barge_cut", None) or {}
@@ -2125,5 +2188,15 @@ def reload_helpers() -> list:
         reloaded.append("wren_pace")
     except Exception as e:
         print(f"[reload_helpers] wren_pace reload failed: {e!r}", file=sys.stderr)
+
+    # wren_voice_status (added 2026-07-13): read_control/set_muted live here; without
+    # this, a status-module fix stays inert until a daemon bounce (the exact
+    # committed-fix-inert-in-live-daemon scar). Cheap module, no warm state to lose.
+    try:
+        import wren_voice_status as _wvs
+        importlib.reload(_wvs)
+        reloaded.append("wren_voice_status")
+    except Exception as e:
+        print(f"[reload_helpers] wren_voice_status reload failed: {e!r}", file=sys.stderr)
 
     return reloaded

@@ -102,14 +102,30 @@ def read_amplitude(max_age: float = 0.3) -> float:
 # --- control channel: Zeke -> Wren (mute, push-to-talk ping) -------------------
 
 def read_control() -> dict:
-    """Read the control file. {mic_muted: bool, ping_ts: float}."""
+    """Read the control file. Known keys get typed defaults (mic_muted, ping_ts);
+    ALL other keys pass through untouched (flush_stale_on_hold, bargein_min_rms,
+    self_voice_drop_bar, ...).
+
+    NB (2026-07-13): this used to whitelist mic_muted+ping_ts ONLY, which silently
+    discarded every other toggle — flush_stale_on_hold always read as False even when
+    set true in the file, and set_muted()'s read-modify-write ERASED extra keys on
+    every mute toggle. Found while building the barge-in rms floor."""
     try:
         with open(CONTROL_FILE, encoding="utf-8") as f:
             d = json.load(f)
-        return {"mic_muted": bool(d.get("mic_muted", False)),
-                "ping_ts": float(d.get("ping_ts", 0.0))}
+        if not isinstance(d, dict):
+            d = {}
     except Exception:
-        return {"mic_muted": False, "ping_ts": 0.0}
+        d = {}
+    try:
+        d["mic_muted"] = bool(d.get("mic_muted", False))
+    except Exception:
+        d["mic_muted"] = False
+    try:
+        d["ping_ts"] = float(d.get("ping_ts", 0.0))
+    except Exception:
+        d["ping_ts"] = 0.0
+    return d
 
 
 def _write_control(d: dict) -> None:
