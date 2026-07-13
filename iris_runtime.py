@@ -4001,10 +4001,21 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
     insight_every_n = 6   # ~5fps face detection (unchanged)
     expr_every_n = 10     # ~3fps expression detection (unchanged)
     attn_every_n = 60     # ~0.5fps attention/gaze (unchanged)
+    hands_every_n = 10    # ~3fps hand/gesture step (2026-07-13, Zeke directive) —
+                          # CPU-only (XNNPACK, ~17ms/frame, ZERO VRAM), and it only
+                          # runs at all while the face step sees someone (person-
+                          # present gate) AND g["_hands_enabled"] is true (hands_rest
+                          # tool). Model lazy-loads on the first gated frame.
     frame_idx = 0
 
     from brain.camera_annotator import annotate_frame as _annotate
     from brain.frame_store import push_frame as _push_frame
+    try:
+        from brain import iris_hands as _hands_mod
+    except Exception as _he:
+        _hands_mod = None
+        print(f"[iris_video] iris_hands unavailable (non-fatal): {_he!r}",
+              file=sys.stderr, flush=True)
 
     while True:
         try:
@@ -4086,6 +4097,20 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                             pass
                     except Exception as _ie:
                         print(f"[iris_video] insight analyze error: {_ie!r}", file=sys.stderr, flush=True)
+
+            # ── Hands step (2026-07-13) — gesture understanding, person-gated ──
+            # Runs ONLY when someone is in frame (face step's results non-empty):
+            # empty room = zero hand compute. brain/iris_hands.py handles the
+            # lazy model, wave heuristic, and transition-fired signal events
+            # (hand_wave / gesture_detected / gesture_cleared).
+            if (_hands_mod is not None and frame_idx % hands_every_n == 0
+                    and g.get("_hands_enabled", True)
+                    and (g.get("_face_results") or [])):
+                try:
+                    _hands_mod.process_frame(frame, g)
+                except Exception as _hge:
+                    print(f"[iris_video] hands step error (non-fatal): {_hge!r}",
+                          file=sys.stderr, flush=True)
 
             # Phase 1.5 enrollment hook — save the RAW pre-annotation frame to
             # disk when an enrollment is in progress. Throttled by interval_s.
