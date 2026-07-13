@@ -1094,9 +1094,38 @@ def _voice_id_cfg():
         return None   # fail-open: a bad config must never change ear behavior
 
 
-def _voice_id_line(audio) -> str:
-    """Best-effort speaker tag for a captured utterance. '' = no tag (off/cold/error).
+# Sticky speaker state (Zeke spec 2026-07-13, same session voice-id went live):
+# "first time someone speaks — bam, figured out who it is. It STAYS them until the
+# ears hear someone new. Alert only on change." Mechanical, daemon-side; per-turn
+# scores go to stderr, the transcript tag appears only on LOCK and CHANGE.
+_VID_STATE = {"current": None, "since": 0.0}
 
+
+def _voice_id_speaker_changed(name: str) -> None:
+    """On lock/change to an enrolled speaker, mirror them into speaker_pace.json
+    'active' so their pause profile applies automatically (closes the 'future
+    wire: face-rec sets active' loop — voice-id is the better source). Unknown
+    speaker → active cleared → daemon falls to default_unknown. Best-effort."""
+    try:
+        import json as _json
+        d = {}
+        if SPEAKER_PACE_FILE.exists():
+            d = _json.loads(SPEAKER_PACE_FILE.read_text(encoding="utf-8"))
+        d["active"] = name if name != "unknown" else ""
+        SPEAKER_PACE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SPEAKER_PACE_FILE.write_text(_json.dumps(d), encoding="utf-8")
+        print(f"[voice-id] speaker_pace active -> {d['active'] or '(default_unknown)'}",
+              file=sys.stderr)
+    except Exception as e:
+        print(f"[voice-id] pace-mirror failed (non-fatal): {e!r}", file=sys.stderr)
+
+
+def _voice_id_line(audio) -> str:
+    """Best-effort speaker tag for a captured utterance. '' = no tag.
+
+    Sticky mode (default, Zeke spec): silence means SAME SPEAKER — a tag appears
+    only on the first identification ('speaker lock') and on speaker CHANGE.
+    Set {"sticky": false} in voice_id.json for the old per-turn tags.
     Never blocks a turn on a cold model: warm_async() kicks a background load and
     we skip tagging until it's ready (the model warms behind the first turns).
     """
@@ -1112,10 +1141,30 @@ def _voice_id_line(audio) -> str:
         if r["n_profiles"] == 0:
             return ""   # nothing enrolled yet
         name, score = r["best"], r["score"]
-        if name and score >= cfg["threshold"]:
-            return f"[voice-id: {name} {score:.2f}]"
-        return (f"[voice-id: NO MATCH (closest {name} {score:.2f}) — "
-                f"unenrolled voice or media audio]")
+        speaker = name if (name and score >= cfg["threshold"]) else "unknown"
+        if not cfg.get("sticky", True):
+            if speaker != "unknown":
+                return f"[voice-id: {name} {score:.2f}]"
+            return (f"[voice-id: NO MATCH (closest {name} {score:.2f}) — "
+                    f"unenrolled voice or media audio]")
+        # ── Sticky mode ──────────────────────────────────────────────────────
+        prev = _VID_STATE["current"]
+        print(f"[voice-id] {speaker} (closest {name} {score:.2f}, "
+              f"locked={prev})", file=sys.stderr)   # every turn, stderr only
+        if speaker == prev:
+            return ""   # same voice as last turn — silence means continuity
+        _VID_STATE["current"] = speaker
+        _VID_STATE["since"] = time.time()
+        _voice_id_speaker_changed(speaker)
+        if prev is None:
+            if speaker == "unknown":
+                return (f"[voice-id: UNKNOWN VOICE locked (closest {name} {score:.2f}) — "
+                        f"unenrolled speaker or media audio]")
+            return f"[voice-id: {speaker} {score:.2f} — speaker locked]"
+        if speaker == "unknown":
+            return (f"[voice-id: SPEAKER CHANGED {prev} → UNKNOWN (closest {name} "
+                    f"{score:.2f}) — unenrolled voice or media audio]")
+        return f"[voice-id: SPEAKER CHANGED {prev} → {speaker} {score:.2f}]"
     except Exception as e:
         print(f"[voice-id] tag failed (non-fatal): {e!r}", file=sys.stderr)
         return ""
