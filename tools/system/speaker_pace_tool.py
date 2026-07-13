@@ -17,8 +17,12 @@ daemon-side to 0.3–8.0s; out-of-range values are ignored (fail-open).
 Tools:
   speaker_pace_get  -> current file contents (or {"dormant": true})
   speaker_pace_set  -> params: {active?: str, profile?: {name: str, seconds: float},
-                                default_unknown?: float, disable?: bool}
+                                default_unknown?: float, disable?: bool,
+                                smart_extend?: {enabled: bool, max_seconds?: float,
+                                                recheck_seconds?: float}}
     - disable=true deletes the file (back to dormant/global default)
+    - smart_extend: hold the mic past the fast window when smart-turn says the
+      sentence sounds unfinished (daemon _smart_extend_cfg reads this per-listen)
     - any other combination merges into the existing file
 """
 from __future__ import annotations
@@ -84,9 +88,33 @@ def _speaker_pace_set(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
             changed.append(f"default_unknown={duf}s")
         except (TypeError, ValueError) as e:
             return {"ok": False, "error": f"bad default_unknown: {e!r}"}
+    se = params.get("smart_extend")
+    if isinstance(se, dict):
+        # Smart-extend (Zeke spec 2026-07-13): if the turn SOUNDS unfinished at the
+        # fast window, the daemon holds the mic up to max_seconds. Daemon-side reader
+        # (_smart_extend_cfg) fail-opens on anything insane; we validate here too.
+        try:
+            cur = d.get("smart_extend") or {}
+            cur["enabled"] = bool(se.get("enabled", cur.get("enabled", True)))
+            if "max_seconds" in se:
+                ms = float(se["max_seconds"])
+                if not 1.0 <= ms <= 10.0:
+                    return {"ok": False, "error": f"smart_extend.max_seconds {ms} outside 1.0-10.0"}
+                cur["max_seconds"] = ms
+            if "recheck_seconds" in se:
+                rs = float(se["recheck_seconds"])
+                if not 0.2 <= rs <= 2.0:
+                    return {"ok": False, "error": f"smart_extend.recheck_seconds {rs} outside 0.2-2.0"}
+                cur["recheck_seconds"] = rs
+            cur.setdefault("max_seconds", 3.0)
+            d["smart_extend"] = cur
+            changed.append(f"smart_extend={'on' if cur['enabled'] else 'off'} "
+                           f"(max {cur['max_seconds']}s)")
+        except (TypeError, ValueError) as e:
+            return {"ok": False, "error": f"bad smart_extend param: {e!r}"}
 
     if not changed:
-        return {"ok": False, "error": "nothing to set — pass active, profile, default_unknown, or disable"}
+        return {"ok": False, "error": "nothing to set — pass active, profile, default_unknown, smart_extend, or disable"}
     try:
         PACE_FILE.parent.mkdir(parents=True, exist_ok=True)
         PACE_FILE.write_text(json.dumps(d), encoding="utf-8")
@@ -110,7 +138,7 @@ register_tool(
 
 register_tool(
     "speaker_pace_set",
-    "Set per-speaker end-silence: params {active?: str, profile?: {name, seconds}, default_unknown?: float, disable?: bool}. Zeke~1.5s, Q~3.0s, unknown default 3.0s. Takes effect next listen.",
+    "Set per-speaker end-silence: params {active?: str, profile?: {name, seconds}, default_unknown?: float, smart_extend?: {enabled, max_seconds, recheck_seconds}, disable?: bool}. Zeke~1.5s, Q~3.0s, unknown 3.0s; smart_extend holds the mic when the sentence sounds unfinished. Takes effect next listen.",
     2,
     _speaker_pace_set,
 )

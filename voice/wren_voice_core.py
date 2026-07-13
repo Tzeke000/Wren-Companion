@@ -332,7 +332,9 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                        end_silence_s: float = END_SILENCE_S,
                        partials: "_StreamingPartials | None" = None,
                        transcribe_fn=None, mouth_busy_fn=None,
-                       early_finalize_fn=None, ef_state: "dict | None" = None) -> "np.ndarray | None":
+                       early_finalize_fn=None, ef_state: "dict | None" = None,
+                       hold_open_fn=None, extend_max_s: float = 0.0,
+                       extend_recheck_s: float = 0.4) -> "np.ndarray | None":
     """Block until speech onset (or timeout), then record until trailing silence or max
     length. Sets overlay state to listening when mic opens.
     Returns float32 audio, or None if nothing was said.
@@ -345,7 +347,14 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     Early-finalize: if `early_finalize_fn` is given and EARLY_FINALIZE, then once
     EARLY_FINALIZE_MIN_SILENCE_S of trailing silence has accrued, ask early_finalize_fn
     (smart-turn, high-confidence) whether the turn is done; if so, end capture before the
-    full end_silence_s wait. Checked at most every EARLY_FINALIZE_CHECK_EVERY_S. Best-effort."""
+    full end_silence_s wait. Checked at most every EARLY_FINALIZE_CHECK_EVERY_S. Best-effort.
+
+    Smart-extend: if `hold_open_fn` is given and extend_max_s > end_silence_s, then at the
+    moment end_silence_s of trailing silence is reached, ask hold_open_fn (smart-turn,
+    hold-open bar) whether the speaker sounds MID-THOUGHT; if so, keep capturing until
+    extend_max_s of total silence (re-checking every extend_recheck_s so a flip to
+    'complete' ends promptly). Speech resuming during the extension resets the silence
+    clock and the next crossing re-decides fresh. Any error → end as before. Best-effort."""
     # Use the mic index resolved on the daemon's MAIN thread (ctx.mic_dev_idx). Calling
     # find_input_device (sd.query_devices) HERE on a worker connection thread hangs on
     # Windows. Fall back to find_input_device only if the daemon didn't set it.
@@ -363,6 +372,9 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     last_voice_t = 0.0
     last_ef_check = 0.0           # last early-finalize smart-turn check (cadence cap)
     ef_enabled = (early_finalize_fn is not None and EARLY_FINALIZE)
+    ext_enabled = (hold_open_fn is not None and extend_max_s > end_silence_s)
+    ext_active = False            # smart-extend: currently holding past end_silence_s
+    last_ext_check = 0.0          # last smart-extend re-check (cadence cap)
 
     # ── Background partial transcriber (Route 1) ──────────────────────────────
     stop_evt = threading.Event()
@@ -437,13 +449,52 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
                     if peak >= CONTINUE_PEAK:
                         last_voice_t = now
                         pause_evt.clear()   # he's still talking → let partials run
+                        ext_active = False  # speech resumed → next crossing re-decides fresh
                     silence = now - last_voice_t
                     # Pause the partial worker once trailing silence begins, before early-finalize
                     # runs — keeps the two off the GPU at once and idles the worker for a fast join.
                     if silence >= PARTIAL_PAUSE_SILENCE_S:
                         pause_evt.set()
                     if silence >= end_silence_s:
-                        break  # he finished a thought (full end-silence reached)
+                        if not ext_enabled:
+                            break  # he finished a thought (full end-silence reached)
+                        # Smart-extend: at the normal turn-end, ask smart-turn whether he
+                        # sounds mid-thought. Complete/error → end exactly as before.
+                        if not ext_active:
+                            try:
+                                with buf_lock:
+                                    snap = collected[:]
+                                if hold_open_fn(np.concatenate(snap)):
+                                    ext_active = True
+                                    last_ext_check = now
+                                    print(f"[smart-extend] mid-thought at the "
+                                          f"{end_silence_s*1000:.0f}ms window — holding mic "
+                                          f"up to {extend_max_s*1000:.0f}ms", file=sys.stderr)
+                                else:
+                                    break  # sounds finished → normal turn-end
+                            except Exception as e:
+                                print(f"[smart-extend] check failed (non-fatal): {e!r}",
+                                      file=sys.stderr)
+                                break
+                        else:
+                            if silence >= extend_max_s:
+                                print(f"[smart-extend] extension exhausted at "
+                                      f"{silence*1000:.0f}ms — ending turn", file=sys.stderr)
+                                break
+                            if now - last_ext_check >= extend_recheck_s:
+                                last_ext_check = now
+                                try:
+                                    with buf_lock:
+                                        snap = collected[:]
+                                    if not hold_open_fn(np.concatenate(snap)):
+                                        print(f"[smart-extend] completion flipped at "
+                                              f"{silence*1000:.0f}ms — ending turn",
+                                              file=sys.stderr)
+                                        break
+                                except Exception as e:
+                                    print(f"[smart-extend] re-check failed (non-fatal): "
+                                          f"{e!r}", file=sys.stderr)
+                                    break
                     # Early-finalize: once a short silence has accrued, ask smart-turn
                     # (high bar) if he's confidently done — break before the full wait.
                     if (ef_enabled and silence >= EARLY_FINALIZE_MIN_SILENCE_S
@@ -990,6 +1041,42 @@ def _speaker_end_silence():
         return None   # fail-open to module default — a bad file must never break ears
 
 
+# ── Smart-extend (Zeke spec, voice, 2026-07-13 lunch test session) ────────────────
+# "If the sentence isn't done, extend the wait to ~3-5s before pushing to her."
+# The per-speaker window (above) sets the FAST path (e.g. Zeke 1.5s); smart-extend
+# adds a CONDITIONAL slow path: at the moment the fast window would end the turn,
+# ask smart-turn (the 0.6 hold-open bar — same as _endpoint_incomplete) whether the
+# waveform sounds finished. Finished → end exactly as before (one ~20-50ms inference
+# added). Mid-thought → keep the mic open up to max_seconds of total silence,
+# re-checking every recheck_seconds so a late "…done" still ends promptly. If he
+# resumes speaking during the extension, capture just continues (silence clock
+# resets) and the next crossing re-decides fresh.
+# Config lives in scratch/speaker_pace.json under "smart_extend":
+#   {"smart_extend": {"enabled": true, "max_seconds": 3.0, "recheck_seconds": 0.4}}
+# Key ABSENT / enabled=false / insane values / smart-turn unavailable → the fast
+# window behaves EXACTLY as before. No-worse-than-before by construction.
+
+def _smart_extend_cfg():
+    """Return {"max_seconds": float, "recheck_seconds": float} or None (feature off)."""
+    try:
+        if not SPEAKER_PACE_FILE.exists():
+            return None
+        import json as _json
+        d = _json.loads(SPEAKER_PACE_FILE.read_text(encoding="utf-8"))
+        se = d.get("smart_extend") or {}
+        if not se.get("enabled"):
+            return None
+        max_s = float(se.get("max_seconds", 3.0))
+        recheck = float(se.get("recheck_seconds", 0.4))
+        # Sanity: extension must be a real extension, rechecks must not spin.
+        if not 1.0 <= max_s <= 10.0:
+            return None
+        recheck = min(max(recheck, 0.2), 2.0)
+        return {"max_seconds": max_s, "recheck_seconds": recheck}
+    except Exception:
+        return None   # fail-open: bad config must never change ear behavior
+
+
 def cmd_listen(ctx, args: dict) -> str:
     """Listen for Zeke to speak and return what he said.
 
@@ -1046,6 +1133,10 @@ def cmd_listen(ctx, args: dict) -> str:
     in_call = getattr(ctx, "call_warm", False) and _HAVE_PROSODY
     partials = _StreamingPartials() if (in_call and STREAMING_PARTIALS) else None
     ef_state: dict = {}   # _capture_utterance sets {"fired": True} if early-finalize triggered
+    # Smart-extend (read per-listen, same hot pattern as the pace file): when enabled,
+    # a turn that reaches the fast window but SOUNDS unfinished holds the mic open up
+    # to max_seconds. Off/absent → identical to before.
+    ext_cfg = _smart_extend_cfg() if _HAVE_SMARTTURN else None
     try:
         with ctx.mic_lock:
             audio = _capture_utterance(
@@ -1055,6 +1146,9 @@ def cmd_listen(ctx, args: dict) -> str:
                 mouth_busy_fn=(lambda: getattr(ctx, "speaking", False)),
                 early_finalize_fn=(_endpoint_complete_confident if in_call else None),
                 ef_state=ef_state,
+                hold_open_fn=(_endpoint_incomplete if ext_cfg else None),
+                extend_max_s=(ext_cfg["max_seconds"] if ext_cfg else 0.0),
+                extend_recheck_s=(ext_cfg["recheck_seconds"] if ext_cfg else 0.4),
             )
     except Exception as e:
         set_state("idle")
