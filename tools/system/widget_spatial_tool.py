@@ -375,6 +375,21 @@ def _tool_widget_unpoint(params: dict[str, Any], g: dict[str, Any]) -> dict[str,
         return {"ok": False, "error": str(e)}
 
 
+def _tool_widget_pin(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Widget-up-while-app-up standing mode (Zeke directive 2026-07-08, built 07-13).
+
+    pinned=true keeps the widget visible even while the main app window is up —
+    so I can point at things without waiting for a minimize. pinned=false returns
+    to the classic minimize-linked show/hide. App.tsx reads snapshot.widget.pinned."""
+    try:
+        pinned = bool(params.get("pinned", True))
+        g["_widget_pinned"] = pinned
+        return {"ok": True, "pinned": pinned,
+                "note": "App.tsx applies within ~0.5s (widget poll loop)"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 register_tool(
     name="monitor_layout",
     description="List all monitors (virtual-desktop rects, work areas, primary flag) plus current mouse position and which monitor it is on. Tier 1.",
@@ -406,4 +421,11 @@ register_tool(
     description="Stop pointing immediately — clears all pointing state; widget morphs back to orb. Tier 1.",
     tier=1,
     handler=_tool_widget_unpoint,
+)
+
+register_tool(
+    name="widget_pin",
+    description="Pin the widget orb visible even while the main app is up (standing mode). Params: {pinned: bool=true}. pinned=false returns to minimize-linked show/hide. Tier 1.",
+    tier=1,
+    handler=_tool_widget_pin,
 )

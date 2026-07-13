@@ -465,6 +465,11 @@ def snapshot() -> dict:
             # tip is placed on. Written by tools/system/widget_spatial_tool.py.
             "pointing_angle_deg": float(_g.get("_widget_pointing_angle_deg") or 0.0),
             "pointing_tip": _g.get("_widget_pointing_tip"),
+            # 2026-07-13 widget-up-while-app-up flag (Zeke directive 07-08):
+            # when true, App.tsx keeps the widget visible even while the main
+            # window is up (standing mode); minimize-linked show/hide still
+            # applies when false. Written by widget_pin in widget_spatial_tool.
+            "pinned": bool(_g.get("_widget_pinned")),
         },
         # Speech caption (2026-07-06): App.tsx reads speaking/spoken_so_far/full_reply
         # — the OLD stub {text, ts} never matched, so the home page always fell back to
