@@ -577,6 +577,10 @@ export default function App() {
   const [displayedThought, setDisplayedThought] = useState<string>("");
   const [thoughtVisible, setThoughtVisible] = useState<boolean>(false);
   const prevOnlineRef = useRef<boolean | null>(null);
+  // Widget standing mode (widget_pin tool, 2026-07-13): mirrors
+  // snapshot.widget.pinned so the widget show/hide effect (below) can keep the
+  // widget visible alongside the main window.
+  const widgetPinnedRef = useRef<boolean>(false);
   const appStartedAtRef = useRef(Date.now());
   const connectStartRef = useRef(Date.now());
   const pollFailureCountRef = useRef(0);
@@ -594,12 +598,14 @@ export default function App() {
     return () => registerApiLogger(null);
   }, []);
 
-  // Widget orb: show when main window minimizes, hide when restored
+  // Widget orb: show when main window minimizes, hide when restored — unless
+  // PINNED (widget_pin tool, 2026-07-13): snapshot.widget.pinned holds the
+  // widget up alongside the main window (standing mode, e.g. for pointing).
   useEffect(() => {
     let unlistenFocus: (() => void) | null = null;
     let unlistenBlur: (() => void) | null = null;
     let pollId: ReturnType<typeof setInterval> | null = null;
-    let wasMinimized = false;
+    let lastShown: boolean | null = null;
 
     const setupWidgetListeners = async () => {
       try {
@@ -621,35 +627,32 @@ export default function App() {
           } catch { /* widget window may not exist */ }
         };
 
+        // Single arbiter: desired = minimized OR pinned. Acts only on CHANGE so
+        // a backend force-show (pointing's SWP_SHOWWINDOW) is never fought.
+        const applyDesired = async () => {
+          const minimized = await mainWin.isMinimized();
+          const desired = minimized || widgetPinnedRef.current;
+          if (desired !== lastShown) {
+            lastShown = desired;
+            if (desired) await showWidget();
+            else await hideWidget();
+          }
+        };
+
         // Event-based: blur fires when minimize button is clicked on Windows
         unlistenBlur = await mainWin.listen("tauri://blur", async () => {
           await new Promise((r) => setTimeout(r, 200));
-          try {
-            const minimized = await mainWin.isMinimized();
-            if (minimized && !wasMinimized) {
-              wasMinimized = true;
-              await showWidget();
-            }
-          } catch { /* silent — no fallback; polling handles it */ }
+          try { await applyDesired(); } catch { /* polling handles it */ }
         });
 
         unlistenFocus = await mainWin.listen("tauri://focus", async () => {
-          if (wasMinimized) {
-            wasMinimized = false;
-            await hideWidget();
-          }
+          try { await applyDesired(); } catch { /* polling handles it */ }
         });
 
-        // Polling backup: catches cases where blur event doesn't fire (e.g. Win+D)
+        // Polling backup: catches cases where blur event doesn't fire (e.g.
+        // Win+D) and applies pin/unpin flips within ~500ms.
         pollId = setInterval(async () => {
-          try {
-            const minimized = await mainWin.isMinimized();
-            if (minimized !== wasMinimized) {
-              wasMinimized = minimized;
-              if (minimized) await showWidget();
-              else await hideWidget();
-            }
-          } catch { /* Tauri not available in browser */ }
+          try { await applyDesired(); } catch { /* Tauri not available in browser */ }
         }, 500);
       } catch {
         // Not running inside Tauri (dev browser) — no-op
@@ -671,6 +674,9 @@ export default function App() {
       const s = await getJson<Snapshot>("/api/v1/snapshot");
       setSnap(s);
       setLastSnapshotRaw(s);
+      try {
+        widgetPinnedRef.current = Boolean((s as { widget?: { pinned?: boolean } }).widget?.pinned);
+      } catch { /* absent block = unpinned */ }
       pollFailureCountRef.current = 0;
       setOnline(true);
       setConnecting(false);

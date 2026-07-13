@@ -325,7 +325,8 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     // Shell
     const shellGeo = new THREE.SphereGeometry(1.0,16,12);
     const shellMat = new THREE.MeshBasicMaterial({ color:new THREE.Color(cfgInit.darkColor), wireframe:true, transparent:true, opacity:0.08, blending:THREE.AdditiveBlending, depthWrite:false });
-    outerGroup.add(new THREE.Mesh(shellGeo,shellMat));
+    const shell = new THREE.Mesh(shellGeo,shellMat);
+    outerGroup.add(shell);
 
     // Halo
     let haloTex = createGlowTex(cfgInit.color); // let: replaced on live recolor
@@ -346,6 +347,10 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     let lastSeenRecenterTrigger: number | undefined = recenterTriggerRef.current;
     let recenterStartT = -Infinity;
     const RECENTER_DURATION = 0.32;  // seconds — matches the CSS pulse
+    // Pointing lean factor (whole-orb morph, Zeke 2026-07-13): eased 0..1 while
+    // the pointer shape is active, so the BODY of the orb (core/glow/shell/halo)
+    // visibly stretches into the arrow direction — not just the particle stream.
+    let pointLeanState = 0;
 
     // Reusable color scratch — avoid allocating per frame.
     const _coreScratch = new THREE.Color();
@@ -355,6 +360,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     // changes (live recolor block in animate), read every frame.
     const _baseBaseC = new THREE.Color(cfgInit.color);
     const _baseLightC = new THREE.Color(cfgInit.lightColor);
+    const _baseDarkC = new THREE.Color(cfgInit.darkColor);
 
     function morph(t: number, currentState: OrbState, currentAmp: number) {
       const c = getCfg(emotionRef.current);
@@ -574,6 +580,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
         cfgInit.darkColor = derived.darkColor;
         _baseBaseC.set(derived.color);
         _baseLightC.set(derived.lightColor);
+        _baseDarkC.set(derived.darkColor);
         const _dk = new THREE.Color(derived.darkColor);
         streams.forEach((l, i) => {
           (l.material as THREE.LineBasicMaterial).color.set(i < 8 ? derived.lightColor : derived.color);
@@ -602,6 +609,19 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
       if (morphRef.current < 0.001) morphRef.current = 0;
       else if (morphRef.current > 0.999) morphRef.current = 1;
       const cubeFactor = morphRef.current;
+
+      // ── Pointing lean (whole-orb morph, Zeke 2026-07-13) ─────────────────
+      // "Your orb as well should morph and point, not just the particles."
+      // Ease 0..1 while the pointer shape is active; leanA/leanDir describe the
+      // arrow direction in scene coords (angle is deg CLOCKWISE from screen-up,
+      // so +y-up scene direction = (sin A, cos A)).
+      const pointTarget = shapeOverrideRef.current === "pointer" ? 1.0 : 0.0;
+      pointLeanState += (pointTarget - pointLeanState) * 0.08;
+      if (pointLeanState < 0.001) pointLeanState = 0;
+      else if (pointLeanState > 0.999) pointLeanState = 1;
+      const pointLean = pointLeanState;
+      const leanA = (pointerAngleRef.current || 0) * Math.PI / 180;
+      const leanDirX = Math.sin(leanA), leanDirY = Math.cos(leanA);
 
       // ── Breathing (always-on) ─────────────────────────────────────────────
       // Period shrinks with energy (0 → 3.5s, 1 → 2.0s). Attentive shaves 0.3s
@@ -653,17 +673,23 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
       // While the arrow is up, the particle group must hold LEVEL or the
       // pointing direction is meaningless — wrap accumulated spin into
       // [-π, π] and ease to zero (no multi-turn unwind), then hold.
-      if (shapeOverrideRef.current === "pointer") {
+      if (shapeOverrideRef.current === "pointer" || pointLean > 0.001) {
+        // While the arrow is up (or easing away), BOTH orb groups must hold
+        // LEVEL or the lean/pointing axis wobbles off the true screen angle —
+        // wrap accumulated spin into [-π, π] and ease to zero, then hold.
         const wrapA = (v: number) => ((v % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2) - Math.PI;
         innerGroup.rotation.x = wrapA(innerGroup.rotation.x) * 0.8;
         innerGroup.rotation.y = wrapA(innerGroup.rotation.y) * 0.8;
         innerGroup.rotation.z = wrapA(innerGroup.rotation.z) * 0.8;
+        outerGroup.rotation.x = wrapA(outerGroup.rotation.x) * 0.8;
+        outerGroup.rotation.y = wrapA(outerGroup.rotation.y) * 0.8;
+        outerGroup.rotation.z = wrapA(outerGroup.rotation.z) * 0.8;
       } else {
         innerGroup.rotation.y += r * rotMul;
         innerGroup.rotation.x += r * 0.4 * rotMul;
+        outerGroup.rotation.y -= r * 0.7 * rotMul;
+        outerGroup.rotation.z += r * 0.3 * rotMul;
       }
-      outerGroup.rotation.y -= r * 0.7 * rotMul;
-      outerGroup.rotation.z += r * 0.3 * rotMul;
       streamGroup.rotation.y += r * 1.2 * rotMul;
       streamGroup.rotation.x -= r * 0.5 * rotMul;
 
@@ -684,8 +710,29 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
       const stateScaleMul = liveState === "speaking" ? (1 + liveAmp * 0.25)
         : liveState === "listening" ? (0.95 + Math.sin(t * 1.3) * 0.04)
         : 1;
-      core.scale.setScalar(pulse * c.coreScale * stateScaleMul);
-      innerGlow.scale.setScalar(pulse * c.coreScale * 0.9 * stateScaleMul);
+      const coreS = pulse * c.coreScale * stateScaleMul;
+      const glowS = pulse * c.coreScale * 0.9 * stateScaleMul;
+      if (pointLean > 0.001) {
+        // Whole-orb lean: core + glow + shell stretch INTO the arrow direction
+        // and shift toward the tip — the body morphs, not just the particles.
+        // rotation.z = -leanA aligns each mesh's local +y with the screen-space
+        // arrow; scale.y then elongates along it.
+        core.rotation.z = -leanA;
+        innerGlow.rotation.z = -leanA;
+        shell.rotation.z = -leanA;
+        core.scale.set(coreS * (1 - 0.30 * pointLean), coreS * (1 + 1.6 * pointLean), coreS * (1 - 0.30 * pointLean));
+        innerGlow.scale.set(glowS * (1 - 0.25 * pointLean), glowS * (1 + 1.1 * pointLean), glowS * (1 - 0.25 * pointLean));
+        shell.scale.set(1 - 0.25 * pointLean, 1 + 0.55 * pointLean, 1 - 0.25 * pointLean);
+        core.position.set(leanDirX * 0.30 * pointLean, leanDirY * 0.30 * pointLean, 0);
+        innerGlow.position.set(leanDirX * 0.22 * pointLean, leanDirY * 0.22 * pointLean, 0);
+        shell.position.set(leanDirX * 0.15 * pointLean, leanDirY * 0.15 * pointLean, 0);
+      } else {
+        core.rotation.z = 0; innerGlow.rotation.z = 0; shell.rotation.z = 0;
+        core.position.set(0, 0, 0); innerGlow.position.set(0, 0, 0); shell.position.set(0, 0, 0);
+        core.scale.setScalar(coreS);
+        innerGlow.scale.setScalar(glowS);
+        shell.scale.setScalar(1);
+      }
       pLight.intensity = 1.5 + Math.sin(t * pulseSpeed) * 0.5;
 
       // ── Color overlays per state ──────────────────────────────────────────
@@ -740,6 +787,21 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
         _coreScratch.lerp(STATE_TINT.pointing, 0.55);
         _glowScratch.lerp(STATE_TINT.pointing, 0.45);
         _lightScratch.lerp(STATE_TINT.pointing, 0.45);
+      }
+
+      // ── Pointing recolor by LEAN (owed item, 2026-07-13) ─────────────────
+      // The widget points via shapeOverride="pointer", not state="pointing", so
+      // the tint above never fired for the finger. Tint everything toward the
+      // pointing color proportional to the lean so it's unmistakable that the
+      // whole orb is indicating, and fades cleanly as the lean releases.
+      pMat.color.setRGB(1, 1, 1);
+      shellMat.color.copy(_baseDarkC);
+      if (pointLean > 0.01) {
+        _coreScratch.lerp(STATE_TINT.pointing, 0.55 * pointLean);
+        _glowScratch.lerp(STATE_TINT.pointing, 0.50 * pointLean);
+        _lightScratch.lerp(STATE_TINT.pointing, 0.50 * pointLean);
+        pMat.color.lerp(STATE_TINT.pointing, 0.45 * pointLean);
+        shellMat.color.lerp(STATE_TINT.pointing, 0.50 * pointLean);
       }
 
       // ── Sleep / wake visuals ─────────────────────────────────────────────
@@ -805,7 +867,11 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
         l.rotation.y+=r*0.5*Math.sin(streamPhases[i]);
       });
       const haloAmpBoost = liveState === "speaking" ? liveAmp * 0.5 : 0;
-      halo.scale.set(3.5+Math.sin(t*0.7)*0.3 + haloAmpBoost, 3.5+Math.sin(t*0.7)*0.3 + haloAmpBoost, 1);
+      const haloBase = 3.5 + Math.sin(t*0.7)*0.3 + haloAmpBoost;
+      // Pointing: halo stretches into the arrow direction too (sprite quad
+      // rotates via material.rotation; scale axes rotate with it).
+      halo.scale.set(haloBase * (1 - 0.15 * pointLean), haloBase * (1 + 0.30 * pointLean), 1);
+      haloMat.rotation = -leanA * pointLean;
       haloMat.opacity = liveState === "offline"
         ? 0.06
         : 0.15 + Math.sin(t*0.5)*0.05 + (liveState === "speaking" ? liveAmp * 0.15 : 0);
