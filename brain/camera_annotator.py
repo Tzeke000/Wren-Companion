@@ -37,6 +37,22 @@ _ATTENTION_COLORS = {
     "absent": (0, 0, 220),
 }
 
+# ── Hand overlay (2026-07-13, Zeke: "I can see what you see" — help me tune hands) ──
+# MediaPipe 21-landmark hand skeleton connections (bone pairs). Drawn from
+# g["_hand_results"] (brain/iris_hands.py) so Zeke sees exactly what the gesture
+# recognizer sees — the same debug affordance as the face boxes.
+_HAND_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),            # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),            # index
+    (5, 9), (9, 10), (10, 11), (11, 12),       # middle
+    (9, 13), (13, 14), (14, 15), (15, 16),     # ring
+    (13, 17), (17, 18), (18, 19), (19, 20),    # pinky
+    (0, 17),                                    # palm base
+)
+_HAND_BONE = (255, 180, 0)      # cyan-ish (BGR) skeleton
+_HAND_JOINT = (0, 230, 255)     # yellow joints
+_HAND_LABEL = (0, 230, 255)
+
 # ── Box/landmark smoothing (2026-07-08) ──────────────────────────────────────
 # Detection runs at ~5fps (insight_every_n=6) but annotate_frame runs at 30fps,
 # so drawing raw _face_results froze the box for 6 frames then snapped it —
@@ -119,7 +135,10 @@ def annotate_frame(frame: Any, face_results: list[dict[str, Any]] | None, g: dic
         return frame
     if not face_results:
         _smooth_state.clear()  # returning faces snap fresh, no stale glide
-        return _draw_attention_only(frame, g)
+        # No faces — but hands may still be up (person just off the face-detect
+        # cadence, or holding hands to camera). Draw hands + attention.
+        base = _draw_attention_only(frame, g)
+        return _draw_hands(base, g)
 
     try:
         import cv2  # type: ignore
@@ -217,7 +236,55 @@ def annotate_frame(frame: Any, face_results: list[dict[str, Any]] | None, g: dic
             print(f"[camera_annotator] face draw error: {e!r}")
             continue
 
+    out = _draw_hands(out, g)
     return _overlay_attention(out, h, g)
+
+
+def _draw_hands(frame: Any, g: dict[str, Any]) -> Any:
+    """Overlay the hand skeleton + gesture label from g['_hand_results'].
+    No-op when there are no hands. Never raises — camera pipeline safety."""
+    hr = g.get("_hand_results")
+    if not hr:
+        return frame
+    hands = hr.get("hands") if isinstance(hr, dict) else None
+    if not hands:
+        return frame
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return frame
+    try:
+        for hand in hands:
+            lms = hand.get("landmarks_px")
+            if not lms or len(lms) < 21:
+                continue
+            # Bones first, joints on top.
+            for a, b in _HAND_CONNECTIONS:
+                try:
+                    cv2.line(frame, (int(lms[a][0]), int(lms[a][1])),
+                             (int(lms[b][0]), int(lms[b][1])), _HAND_BONE, 2)
+                except Exception:
+                    continue
+            for pt in lms:
+                try:
+                    cv2.circle(frame, (int(pt[0]), int(pt[1])), 3, _HAND_JOINT, -1)
+                except Exception:
+                    continue
+            # Label: handedness + gesture (+ WAVE flag) near the wrist.
+            gesture = str(hand.get("gesture") or "None")
+            handed = str(hand.get("handedness") or "?")
+            score = float(hand.get("score") or 0.0)
+            tag = f"{handed}: {gesture}"
+            if gesture not in ("None", ""):
+                tag += f" {score*100:.0f}%"
+            if hr.get("wave"):
+                tag += "  WAVE"
+            wx, wy = lms[0][0], lms[0][1]
+            cv2.putText(frame, tag, (int(wx) - 10, int(wy) + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, _HAND_LABEL, 2)
+    except Exception as e:
+        print(f"[camera_annotator] hand draw error: {e!r}")
+    return frame
 
 
 def _draw_attention_only(frame: Any, g: dict[str, Any]) -> Any:
