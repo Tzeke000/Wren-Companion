@@ -84,6 +84,10 @@ REM so any boot without a manual run left the letters channel dead. Idempotent
 REM (port-probe + pidfile inside); .venv python (system py lacks fastapi).
 call "D:\Wren-Companion\start_postoffice_stack.bat"
 
+REM Vector brain bridge (:8772) — Iris IS the robot's knowledge graph (2026-07-13).
+REM Idempotent: port-probe skips the launch if :8772 already answers.
+start "iris-vector-brain" /B powershell -NoProfile -Command "try{ (New-Object Net.Sockets.TcpClient('127.0.0.1',8772)).Close() }catch{ Start-Process -WindowStyle Hidden 'D:\Wren-Companion\.venv\Scripts\python.exe' 'D:\Wren-Companion\scripts\vector_brain_server.py' }"
+
 REM --- Relaunch the ORB APP once the body is READY (Zeke directive 2026-07-08):
 REM --- a detached waiter polls the operator port (5876) and starts iris-control
 REM --- the moment it answers, so the orb connects to a live body instead of racing
