@@ -864,7 +864,10 @@ def _fire_filler(ctx) -> None:
 # first rule. At most once per turn, gated on call_warm, NEVER touches the mic (it
 # only fills my own silence). Lives entirely in the reloadable core — hot-reloads, no
 # daemon edit. Threshold owed live-call tuning (synth ≠ Zeke's pace; see Wren's note).
-STALL_BRIDGE = True
+STALL_BRIDGE = False   # OFF 2026-07-13: speakers-in-room setup means every filler
+                       # is re-captured by the mic and re-enqueued — the echo-loop
+                       # pump (fillers were verbatim the loop's queue content).
+                       # Re-enable only with AEC or a self-voice drop at capture.
 STALL_FILLER_DELAY_S = 3.5
 STALL_FILLERS = ("Let me think on that.", "Give me a moment.", "Let me sit with that for a second.")
 _STALL_I = [0]
