@@ -84,7 +84,9 @@ def _vector_say(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     if not text:
         return {"ok": False, "error": "text required"}
     try:
-        r = _sdk("say_text", {"text": text[:600]})
+        # 30s: say_text blocks until the robot finishes speaking — a 10s
+        # read-timeout cut off a long line mid-flight (2026-07-13).
+        r = _sdk("say_text", {"text": text[:600]}, timeout=30)
         return {"ok": r.status_code == 200, "http": r.status_code,
                 "note": "spoken in Vector's stock voice"}
     except Exception as e:
