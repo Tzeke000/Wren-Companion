@@ -213,3 +213,71 @@ register_tool(
     2,
     _landmark_delete,
 )
+
+
+# ── Window minimize/restore by TITLE (2026-07-13) ────────────────────────────
+# Scar from the finger demo: Get-Process MainWindowHandle returned the WIDGET
+# window and I minimized my own finger mid-demo. These resolve by title via the
+# same EnumWindows finder the landmarks use (widget excluded), so the right
+# window gets hit every time.
+
+def _find_hwnd_by_title(title_substr: str) -> "tuple[int, str] | None":
+    """hwnd+title by title substring, widget excluded. Unlike _find_window_client
+    this has NO client-rect requirement — a MINIMIZED window has a 0x0 client
+    rect and must still be findable for restore."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    found: list = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def _enum(hwnd, _l):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        t = buf.value
+        if title_substr.lower() in t.lower() and "widget" not in t.lower():
+            found.append((int(hwnd), t))
+        return True
+
+    user32.EnumWindows(_enum, 0)
+    return found[0] if found else None
+
+
+def _window_show_cmd(params: dict[str, Any], g: dict[str, Any], cmd: int, verb: str) -> dict[str, Any]:
+    title = str(params.get("window") or "").strip()
+    if not title:
+        return {"ok": False, "error": "window (title substring) required"}
+    hit = _find_hwnd_by_title(title)
+    if hit is None:
+        return {"ok": False, "error": f"no visible window matching '{title}' (widget excluded)"}
+    hwnd, full_title = hit
+    import ctypes
+    ok = bool(ctypes.windll.user32.ShowWindow(hwnd, cmd))
+    return {"ok": ok, "action": verb, "hwnd": hwnd, "title": full_title}
+
+
+def _window_minimize(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    return _window_show_cmd(params, g, 6, "minimized")     # SW_MINIMIZE
+
+
+def _window_restore(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    return _window_show_cmd(params, g, 9, "restored")      # SW_RESTORE
+
+
+register_tool(
+    "window_minimize",
+    "Minimize a window by title substring (resolved via EnumWindows, widget excluded — never hits the wrong window). Params {window}.",
+    2,
+    _window_minimize,
+)
+register_tool(
+    "window_restore",
+    "Restore (un-minimize) a window by title substring. Params {window}.",
+    2,
+    _window_restore,
+)

@@ -3241,7 +3241,7 @@ def pointer_show(x: int, y: int, duration_s: float = 5.0, description: str = "")
                                    description=description)
         except ImportError:
             pass
-        duration_s = float(max(1.0, min(30.0, duration_s)))
+        duration_s = float(max(1.0, min(60.0, duration_s)))  # match widget_spatial cap (2026-07-13)
         # Set state — operator snapshot exposes this as snap.widget.pointing
         _g["_widget_pointing"] = True
         _g["_widget_pointing_description"] = str(description or "")[:200]
