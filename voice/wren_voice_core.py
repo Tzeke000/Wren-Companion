@@ -43,6 +43,14 @@ except ImportError:
           file=sys.stderr)
 
 try:
+    import wren_voiceid as _voiceid
+    _HAVE_VOICEID = True
+except ImportError:
+    _HAVE_VOICEID = False
+    print("[wren-voice-core] wren_voiceid not importable — voice-id disabled",
+          file=sys.stderr)
+
+try:
     import wren_prosody as _prosody
     _HAVE_PROSODY = True
 except ImportError:
@@ -1056,6 +1064,89 @@ def _speaker_end_silence():
 # Key ABSENT / enabled=false / insane values / smart-turn unavailable → the fast
 # window behaves EXACTLY as before. No-worse-than-before by construction.
 
+# ── Voice-id (Zeke directive 2026-07-13 — "voice recognition def needs to be a thing")
+# Born the day TikTok audio from his phone was captured and attributed to him: every
+# unmuted capture lands as source=zeke with no speaker check. Voice-id TAGS each
+# captured utterance with the closest enrolled voiceprint (WeSpeaker ResNet34-LM,
+# see wren_voiceid.py). TAG, DON'T DROP — silent drops are forbidden in sense
+# channels (2026-07-09 scar); cognition decides what to do with a NO-MATCH.
+# Config: scratch/voice_id.json {"enabled": true, "threshold": 0.4,
+#   "min_seconds": 0.8, "save_utts": true}
+# Absent/invalid/model-missing/cold → no tag, behavior exactly as before.
+VOICE_ID_FILE = Path(r"D:\Wren-Companion\scratch\voice_id.json")
+
+def _voice_id_cfg():
+    """Return {"threshold","min_seconds","save_utts"} or None (feature off)."""
+    try:
+        if not VOICE_ID_FILE.exists():
+            return None
+        import json as _json
+        d = _json.loads(VOICE_ID_FILE.read_text(encoding="utf-8"))
+        if not d.get("enabled"):
+            return None
+        thr = float(d.get("threshold", 0.4))
+        if not 0.05 <= thr <= 0.95:
+            thr = 0.4
+        return {"threshold": thr,
+                "min_seconds": max(0.3, float(d.get("min_seconds", 0.8))),
+                "save_utts": bool(d.get("save_utts", True))}
+    except Exception:
+        return None   # fail-open: a bad config must never change ear behavior
+
+
+def _voice_id_line(audio) -> str:
+    """Best-effort speaker tag for a captured utterance. '' = no tag (off/cold/error).
+
+    Never blocks a turn on a cold model: warm_async() kicks a background load and
+    we skip tagging until it's ready (the model warms behind the first turns).
+    """
+    cfg = _voice_id_cfg()
+    if cfg is None or not _HAVE_VOICEID:
+        return ""
+    try:
+        if getattr(audio, "size", 0) < int(cfg["min_seconds"] * SAMPLE_RATE):
+            return ""   # too short for a reliable embedding
+        if not _voiceid.warm_async():
+            return ""   # still loading — tag next turn
+        r = _voiceid.identify(audio)
+        if r["n_profiles"] == 0:
+            return ""   # nothing enrolled yet
+        name, score = r["best"], r["score"]
+        if name and score >= cfg["threshold"]:
+            return f"[voice-id: {name} {score:.2f}]"
+        return (f"[voice-id: NO MATCH (closest {name} {score:.2f}) — "
+                f"unenrolled voice or media audio]")
+    except Exception as e:
+        print(f"[voice-id] tag failed (non-fatal): {e!r}", file=sys.stderr)
+        return ""
+
+
+def _save_utt_wav(audio, tag: str) -> None:
+    """Rolling per-utterance wav dump (enrollment source + wav A/B material).
+    Keeps the newest ~20 files in state/voiceid/last_utts/. Best-effort."""
+    cfg = _voice_id_cfg()
+    if cfg is None or not cfg.get("save_utts") or not _HAVE_VOICEID:
+        return
+    try:
+        import wave
+        from datetime import datetime
+        d = _voiceid.UTT_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        path = d / f"utt_{ts}_{tag}.wav"
+        pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0) * 32767).astype(np.int16)
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(pcm.tobytes())
+        old = sorted(d.glob("utt_*.wav"), key=lambda p: p.stat().st_mtime)
+        for p in old[:-20]:
+            p.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"[voice-id] utt save failed (non-fatal): {e!r}", file=sys.stderr)
+
+
 def _smart_extend_cfg():
     """Return {"max_seconds": float, "recheck_seconds": float} or None (feature off)."""
     try:
@@ -1322,6 +1413,11 @@ def cmd_listen(ctx, args: dict) -> str:
     else:
         suffix = " ".join(s for s in (pace, tone) if s)
         result = f"{text}\n{suffix}" if suffix else text
+    # ── Step 9b: voice-id tag + rolling utterance wav (2026-07-13) ─────────────
+    vid = _voice_id_line(audio)
+    if vid:
+        result = f"{result}\n{vid}"
+    _save_utt_wav(audio, "listen")
     if end_call_intent:
         result = f"{result}\n{end_call_intent}"
     # Arm the stall bridge for the upcoming think-gap — in-call, non-terminal turns only
@@ -1423,7 +1519,9 @@ def cmd_speak_interruptible(ctx, args: dict) -> str:
         wl.append_transcript(heard)
     except Exception:
         pass
-    return f"[barge-in] {heard}"
+    vid = _voice_id_line(audio)
+    _save_utt_wav(audio, "barge")
+    return f"[barge-in] {vid + ' ' if vid else ''}{heard}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1611,7 +1709,9 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         # this gap and whole replies died silently while the marker said "finished".)
         marker = ("[barge landed before the reply started playing — nothing had been "
                   "spoken; the pending reply was dropped unheard]")
-    return f"[barge-in] {marker} {heard}"
+    vid = _voice_id_line(audio)
+    _save_utt_wav(audio, "barge")
+    return f"[barge-in] {marker}{(' ' + vid) if vid else ''} {heard}"
 
 
 def cmd_call_start(ctx, args: dict) -> dict:
@@ -1946,6 +2046,13 @@ def reload_helpers() -> list:
             reloaded.append("wren_prosody")
         except Exception as e:
             print(f"[reload_helpers] wren_prosody reload failed: {e!r}", file=sys.stderr)
+
+    if _HAVE_VOICEID:
+        try:
+            importlib.reload(_voiceid)
+            reloaded.append("wren_voiceid")
+        except Exception as e:
+            print(f"[reload_helpers] wren_voiceid reload failed: {e!r}", file=sys.stderr)
 
     if _HAVE_SMARTTURN:
         try:
