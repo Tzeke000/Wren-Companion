@@ -73,11 +73,14 @@ def nudge(sense: str, text: str) -> None:
         return
     _last_fire[sense] = now
     try:
+        stamp = time.strftime("%H:%M:%S")
         iris_chat.submit(
-            f"[VECTOR SENSE — not Zeke typing; a signal from my ROBOT BODY] "
-            f"{text} Decide whether it warrants acting (vector tools / "
-            f"voice_speak) or just noticing. Reply to this nudge with "
-            f"chat_reply (one short line is fine — it's a log, not a chat)."
+            f"[VECTOR SENSE @ {stamp} — not Zeke typing; a signal from my "
+            f"ROBOT BODY] {text} If this stamp is more than ~30s old when "
+            f"you read it, treat it as a replayed log line, not a live "
+            f"alarm. Decide whether it warrants acting (vector tools / "
+            f"voice_speak) or just noticing. Reply with chat_reply (one "
+            f"short line is fine — it's a log, not a chat)."
         )
         log(f"NUDGE {sense}: {text}")
     except Exception as e:
