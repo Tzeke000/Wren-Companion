@@ -170,7 +170,14 @@ VAD_CHUNK = 512            # Silero requires EXACTLY 512 samples @ 16kHz (32ms).
 VAD_THRESHOLD = 0.5        # per-chunk speech probability cutoff
 VAD_DEBOUNCE_MS = 250      # consecutive voiced ms before it's a real barge-in (~8 chunks)
 VAD_CHUNK_MS = 32          # 512 samples / 16 kHz = 32 ms per Silero chunk
-BARGEIN_PREROLL_MS = 400   # rolling audio kept BEFORE confirmed onset (recovers first syllable)
+BARGEIN_PREROLL_MS = 1000  # rolling audio kept BEFORE confirmed onset (recovers the first
+                           # words, not just the first syllable). Raised 400→1000 2026-07-13:
+                           # the morning's barge fragments ("something out to you?") lost
+                           # whole leading clauses — the host's watch-loop poll gap (~0.25s)
+                           # + VAD debounce eat the front, and 400ms couldn't cover it.
+                           # 1s @16kHz mono f32 = ~64KB — negligible. Real fix one layer
+                           # deeper (OWED): an always-open shared ring buffer so listen and
+                           # barge captures both start from audio that predates their window.
 BARGEIN_END_SILENCE_MS = 600  # continuous sub-threshold audio that ENDS the captured interruption
 BARGEIN_MAX_CAPTURE_S = 20.0  # hard cap on a single captured interruption
 
