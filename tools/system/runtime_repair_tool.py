@@ -156,6 +156,32 @@ register_tool(
 )
 
 
+def _hands_rest(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Smart on/off for the hands/gesture step (Zeke 2026-07-13: 'if it's too many
+    programs that take up too much VRAM then we need a smart on/off switch').
+    The step is CPU-only (zero VRAM) and already person-gated, so this flag is
+    the manual override on top: rest=true stops ALL hand compute regardless.
+    The camera loop re-reads g['_hands_enabled'] every gated frame — live."""
+    rest = bool(params.get("rest", True))
+    g["_hands_enabled"] = not rest
+    if rest:
+        g["_hand_results"] = None
+    return {"ok": True, "hands_enabled": g["_hands_enabled"],
+            "note": ("hand/gesture step OFF (no hand compute at all)" if rest else
+                     "hand/gesture step ON (runs only while someone is in frame)")}
+
+
+register_tool(
+    name="hands_rest",
+    description=(
+        "Pause (rest=true) or resume (rest=false) the camera loop's hand/gesture step. "
+        "It's CPU-only and person-gated already; this is the manual override. Tier 1."
+    ),
+    tier=1,
+    handler=_hands_rest,
+)
+
+
 register_tool(
     name="wire_voice_input_routes",
     description=(
