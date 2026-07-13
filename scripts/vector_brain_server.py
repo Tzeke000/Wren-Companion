@@ -127,6 +127,16 @@ async def chat_completions(request: Request):
         except Exception as e:
             print(f"[vector-brain] nudge submit failed (non-fatal): {e!r}")
         out = iris_llm.wait_for_reply(rid, timeout_s=TIMEOUT_S)
+        if out is None:
+            # GHOST-DRAIN GUARD (2026-07-13): a timed-out request left
+            # "pending" gets drained to Iris by a later Stop hook and she
+            # answers a dead waiter (happened with the first two live
+            # questions). Close it out so it can never rewake her.
+            try:
+                iris_llm.mark_answered(
+                    rid, "(bridge timeout — waiter gone, do not answer)")
+            except Exception:
+                pass
         if nudge_id:
             try:
                 iris_chat.mark_answered(
