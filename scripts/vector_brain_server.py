@@ -35,8 +35,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
 from brain import iris_llm
+from brain import iris_chat
 
 iris_llm.configure(REPO)
+iris_chat.configure(REPO)
 
 PORT = 8772
 KIND = "vector_voice"
@@ -101,11 +103,39 @@ async def chat_completions(request: Request):
     print(f"[vector-brain] question in ({len(prompt)} chars), stream={stream}")
 
     # Blocking call in a thread so the event loop stays free.
+    #
+    # IDLE-WAKE NUDGE (2026-07-13): the Stop hook only services pending LLM
+    # requests at the END of one of Iris's turns — when she's idle, a
+    # vector_voice request would sit until timeout (first live test failed
+    # exactly this way: 45s -> fallback -> Vector showed an error). The host
+    # polls iris_chat every 1s though, so we submit + nudge, then wait.
+    # The nudge chat item is self-answered below so it never needs chat_reply.
     import asyncio
-    reply = await asyncio.to_thread(
-        iris_llm.ask_iris, prompt,
-        kind=KIND, requester=REQUESTER, timeout_s=TIMEOUT_S,
-    )
+
+    def _ask_with_nudge() -> str | None:
+        rid = iris_llm.submit(prompt, kind=KIND, requester=REQUESTER)
+        nudge_id = None
+        try:
+            nudge_id = iris_chat.submit(
+                "[VECTOR-BRAIN WAKE NUDGE — not Zeke typing] Vector heard a "
+                f"question and it's waiting in the LLM bridge (request_id="
+                f"{rid!r}, kind={KIND!r}). Answer it NOW via "
+                f"mcp__iris__llm_reply — 1-3 speakable sentences, the robot "
+                "says your words. Do NOT chat_reply this nudge; it "
+                "self-resolves."
+            )
+        except Exception as e:
+            print(f"[vector-brain] nudge submit failed (non-fatal): {e!r}")
+        out = iris_llm.wait_for_reply(rid, timeout_s=TIMEOUT_S)
+        if nudge_id:
+            try:
+                iris_chat.mark_answered(
+                    nudge_id, "(vector-brain nudge resolved)")
+            except Exception:
+                pass
+        return out
+
+    reply = await asyncio.to_thread(_ask_with_nudge)
     if not reply or not str(reply).strip():
         reply = FALLBACK
     reply = str(reply).strip()
