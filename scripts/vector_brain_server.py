@@ -43,7 +43,10 @@ iris_chat.configure(REPO)
 PORT = 8772
 KIND = "vector_voice"
 REQUESTER = "vector_body"
-TIMEOUT_S = 45.0
+TIMEOUT_S = 75.0  # 45 lost a real answer when Iris was mid-voice-turn with
+                  # Zeke (18:23 third ask) — she arrived seconds late. The
+                  # robot demonstrably holds >=45s (it spoke the fallback each
+                  # time), so buy the wake path more room.
 FALLBACK = "Sorry, my big brain is busy right now. Ask me again in a minute."
 
 app = FastAPI(title="iris-vector-brain")
