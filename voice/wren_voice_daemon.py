@@ -303,10 +303,44 @@ def _warm_audio_main(ctx: Ctx) -> None:
         try:
             idx = wl.find_input_device(wl.DEFAULT_MIC_SUBSTR)
             ctx.mic_dev_idx = idx
-            with sd.InputStream(samplerate=16000, channels=1, dtype="float32",
-                                device=idx, blocksize=1600) as s:
-                s.read(1600)
-            print(f"[daemon] mic resolved idx={idx}; capture path primed", flush=True)
+            if idx is None:
+                # ── LOUD mic-fallback refusal (2026-07-13, echo-saga etiology fix) ──
+                # The 17:58 boot race: daemon started before the Logitech USB stack
+                # enumerated → name-match failed → idx None → every capture opened
+                # the system DEFAULT input, which was 'CABLE Output (VB-Audio)' — a
+                # loopback of everything the PC plays. My ears heard my own mouth
+                # for ~90 min. Core now REFUSES device=None (deaf-but-honest); this
+                # probe keeps hunting for the named mic so ears come back on their
+                # own once USB settles. Thread is daemon=True and best-effort: if
+                # worker-thread device enumeration hangs (the known WASAPI/COM
+                # gotcha), we lose only the probe — never the daemon.
+                print(f"[daemon] NAMED MIC '{wl.DEFAULT_MIC_SUBSTR}' NOT FOUND at "
+                      "boot — ears will stay DOWN (no default-device fallback; "
+                      "that's the loopback trap). Retry-probing every 5s...",
+                      flush=True)
+                def _mic_retry_probe() -> None:
+                    for _ in range(720):   # 5s x 720 = 60 min of patience
+                        time.sleep(5.0)
+                        if ctx.mic_dev_idx is not None:
+                            return
+                        try:
+                            i2 = wl.find_input_device(wl.DEFAULT_MIC_SUBSTR)
+                        except Exception:
+                            i2 = None
+                        if i2 is not None:
+                            ctx.mic_dev_idx = i2
+                            print(f"[daemon] named mic APPEARED idx={i2} — ears "
+                                  "back up (retry-probe)", flush=True)
+                            return
+                    print("[daemon] mic retry-probe gave up after 60 min — ears "
+                          "still down; check the headset / relaunch", flush=True)
+                threading.Thread(target=_mic_retry_probe, daemon=True,
+                                 name="mic-retry-probe").start()
+            else:
+                with sd.InputStream(samplerate=16000, channels=1, dtype="float32",
+                                    device=idx, blocksize=1600) as s:
+                    s.read(1600)
+                print(f"[daemon] mic resolved idx={idx}; capture path primed", flush=True)
         except Exception as e:
             print(f"[daemon] capture-path warm warning: {e!r}", file=sys.stderr, flush=True)
         print("[daemon] audio (PortAudio/WASAPI) initialised on main thread", flush=True)

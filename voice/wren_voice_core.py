@@ -353,6 +353,33 @@ class _StreamingPartials:
 _WHISPER_LOCK = threading.Lock()
 
 
+def _trusted_mic_or_none(ctx):
+    """Resolved NAMED-mic index, or None — and None means REFUSE to capture.
+
+    device=None in sd.InputStream opens the system DEFAULT input. After the
+    2026-07-13 17:58 boot race that default was 'CABLE Output (VB-Audio)' — a
+    loopback of everything the PC plays — and my ears spent ~90 min hearing my
+    own mouth as conversation (the echo saga; Zeke's mic had nothing to do with
+    it). Deaf-but-honest beats hearing-the-wrong-thing: callers treat None as
+    'no audio', the guard logs loudly, and the daemon's retry probe keeps
+    hunting for the real mic until it enumerates."""
+    dev_idx = getattr(ctx, "mic_dev_idx", None)
+    if dev_idx is None:
+        try:
+            dev_idx = wl.find_input_device(wl.DEFAULT_MIC_SUBSTR)
+        except Exception:
+            dev_idx = None
+        if dev_idx is not None:
+            ctx.mic_dev_idx = dev_idx
+            print(f"[mic-guard] named mic resolved late: idx={dev_idx}", flush=True)
+    if dev_idx is None:
+        print(f"[mic-guard] NAMED mic '{wl.DEFAULT_MIC_SUBSTR}' not found — REFUSING "
+              "default-device fallback (loopback trap); ears stay down until it "
+              "appears", flush=True)
+        time.sleep(1.0)   # pace callers' retry loops so the log can't firehose
+    return dev_idx
+
+
 def _capture_utterance(ctx, timeout_s: float, max_s: float,
                        end_silence_s: float = END_SILENCE_S,
                        partials: "_StreamingPartials | None" = None,
@@ -383,9 +410,9 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
     # Use the mic index resolved on the daemon's MAIN thread (ctx.mic_dev_idx). Calling
     # find_input_device (sd.query_devices) HERE on a worker connection thread hangs on
     # Windows. Fall back to find_input_device only if the daemon didn't set it.
-    dev_idx = getattr(ctx, "mic_dev_idx", None)
+    dev_idx = _trusted_mic_or_none(ctx)
     if dev_idx is None:
-        dev_idx = wl.find_input_device(wl.DEFAULT_MIC_SUBSTR)
+        return None   # deaf-but-honest: never open the default device (loopback trap)
     frame_s = 0.1
     frame_n = int(SAMPLE_RATE * frame_s)
 
@@ -720,9 +747,9 @@ def _bargein_watch_and_capture(ctx, model, is_speaking, on_barge, *,
     import torch
 
     # Reuse the main-thread-resolved mic index (worker-thread query_devices hangs on Win).
-    dev_idx = getattr(ctx, "mic_dev_idx", None)
+    dev_idx = _trusted_mic_or_none(ctx)
     if dev_idx is None:
-        dev_idx = wl.find_input_device(device_substr or wl.DEFAULT_MIC_SUBSTR)
+        return None   # deaf-but-honest: never watch the default device (loopback trap)
     need = max(1, round(debounce_ms / VAD_CHUNK_MS))
     preroll_chunks = max(1, round(preroll_ms / VAD_CHUNK_MS))
     end_silence_chunks = max(1, round(end_silence_ms / VAD_CHUNK_MS))
@@ -825,6 +852,18 @@ def cmd_speak(ctx, args: dict) -> str:
     text = (args.get("text") or "").strip()
     if not text:
         return "[voice_speak] nothing to say"
+    # MOUTH MUTE (2026-07-13, echo-source hunt): voice_control.json {"mouth_muted":
+    # true} silences EVERY playback path through the daemon — voice-turn streaming,
+    # host auto-cues, stall bridge, deliberate voice_speak — because behavioral
+    # silence can't stop the host's own cues. Zeke's directive: no sound while we
+    # find the software loopback. Drop-but-log; hot, no reload.
+    try:
+        from wren_voice_status import read_control
+        if bool(read_control().get("mouth_muted", False)):
+            print(f"[voice_speak] MUTED (mouth_muted): {text[:60]!r}", flush=True)
+            return "[voice_speak] dropped (mouth_muted — voice_control.json)"
+    except Exception:
+        pass
     # Barge-in (2026-07-08): once Zeke has cut in during this hold window, the REST of
     # the interrupted reply stays silent — later sentences from the same turn would
     # otherwise restart my voice over his. Cleared by cmd_bargein_hold on both edges.
