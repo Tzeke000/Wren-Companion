@@ -331,6 +331,35 @@ def _ears_loop(robot, alive) -> None:
         log(f"ears stream ended: {e!r}")
 
 
+def _nav_map_loop(robot, alive) -> None:
+    """ROOM BLUEPRINT (Zeke 2026-07-14: map as I move so I don't get lost).
+    nav_map works in OBSERVE mode — proven — so the daemon builds the blueprint
+    passively while ANYONE drives (my control-session behaviors, wire-pod, or
+    the stock brain), and my control sessions never have to init the feed
+    (which hangs the behavior API). Writes state/vector/room_map.{json,png}
+    every few seconds. Best-effort; a missing map is just skipped."""
+    if os.environ.get("IRIS_VECTOR_MAP", "1") == "0":
+        return
+    from brain import vector_map as vmap
+    try:
+        robot.nav_map.init_nav_map_feed(frequency=0.5)
+        log("nav-map feed online (observe) — room blueprint building while I move")
+    except Exception as e:
+        log(f"nav-map init failed (non-fatal): {e!r}")
+    last_cells = -1
+    while alive.get("ok"):
+        try:
+            r = vmap.capture_map(robot, tag="live")
+            if r.get("ok"):
+                c = r.get("cells", 0)
+                if c != last_cells:
+                    log(f"blueprint: {c} cells {r.get('counts')}")
+                    last_cells = c
+        except Exception:
+            pass
+        time.sleep(3.0)
+
+
 def nudge(sense: str, text: str) -> None:
     now = time.time()
     if now - _last_fire.get(sense, 0.0) < COOLDOWN.get(sense, 30.0):
@@ -421,10 +450,12 @@ def run_once() -> None:
         except Exception as e:
             log(f"enable_marker_detection failed (non-fatal): {e!r}")
         alive = {"ok": True}
+        import threading as _threading
         if os.environ.get("IRIS_VECTOR_EARS", "1") != "0":
-            import threading as _threading
             _threading.Thread(target=_ears_loop, args=(robot, alive),
                               daemon=True, name="vector-ears").start()
+        _threading.Thread(target=_nav_map_loop, args=(robot, alive),
+                          daemon=True, name="vector-navmap").start()
         try:
             _poll_loop(robot)
         finally:
