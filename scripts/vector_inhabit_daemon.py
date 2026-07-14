@@ -146,6 +146,33 @@ def _proprioception(robot) -> dict:
     return out
 
 
+def _charger_reader(robot) -> dict:
+    """Native CHARGER pose relative to the robot — the reliable 'go home' (Zeke
+    2026-07-14: build the native charger). robot.world.charger persists its
+    last-seen pose in the same frame as the robot's own pose, so combined with my
+    real heading I get distance + bearing to home even after looking away. Needs
+    marker detection enabled (done on connect). Best-effort; charger_seen=False
+    until Vector has actually seen the dock marker at least once this session."""
+    import math
+    out = {"charger_seen": False}
+    try:
+        ch = robot.world.charger
+        if ch is not None and getattr(ch, "pose", None) is not None:
+            rp = robot.pose
+            dx = ch.pose.position.x - rp.position.x
+            dy = ch.pose.position.y - rp.position.y
+            dist = math.hypot(dx, dy)
+            abs_bearing = math.degrees(math.atan2(dy, dx))
+            rel = (abs_bearing - rp.rotation.angle_z.degrees + 180.0) % 360.0 - 180.0
+            out["charger_seen"] = True
+            out["charger_dist_mm"] = int(dist)
+            out["charger_bearing_deg"] = round(rel, 1)  # + = turn LEFT to face home
+            out["charger_visible"] = bool(getattr(ch, "is_visible", False))
+    except Exception:
+        pass
+    return out
+
+
 def _speaking_window() -> tuple[float, float]:
     """(start_ts, end_ts) of the robot's most recent own-speaker playback."""
     try:
@@ -383,6 +410,16 @@ def run_once() -> None:
     with anki_vector.Robot(SERIAL, behavior_control_level=None,
                            cache_animation_lists=False) as robot:
         log("connected — nerves online (observe mode, his brain still runs)")
+        # enable marker detection so robot.world.charger (+ cube) populate — the
+        # native 'go home' pose (Zeke 2026-07-14). Best-effort across sig variants.
+        try:
+            try:
+                robot.vision.enable_marker_detection(detect_markers=True)
+            except TypeError:
+                robot.vision.enable_marker_detection()
+            log("marker detection ON — charger/cube pose available once seen")
+        except Exception as e:
+            log(f"enable_marker_detection failed (non-fatal): {e!r}")
         alive = {"ok": True}
         if os.environ.get("IRIS_VECTOR_EARS", "1") != "0":
             import threading as _threading
@@ -474,6 +511,7 @@ def _poll_loop(robot) -> None:
                 "falling": bool(getattr(st, "is_falling", False)),
             }
             nerves.update(_proprioception(robot))  # real heading + proximity + gyro/accel
+            nerves.update(_charger_reader(robot))   # native home pose (dist + bearing)
             _write_nerves(nerves)
 
 
