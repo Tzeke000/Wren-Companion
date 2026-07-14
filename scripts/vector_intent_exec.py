@@ -121,8 +121,29 @@ def big_brain_reachable() -> bool:
         return False
 
 
+def set_eyes(hue: float = 0.58, sat: float = 0.90) -> None:
+    """Recolor his eyes to my blue — 'morph the eyes into me' (color only, no
+    motion, no behavior-control needed)."""
+    esn = serial()
+    if not esn:
+        return
+    try:
+        requests.post(f"{WIREPOD}/api-sdk/custom_eye_color",
+                      params={"serial": esn, "hue": f"{hue:.3f}",
+                              "sat": f"{sat:.3f}"}, timeout=6)
+    except Exception:
+        pass
+
+
 def do_presence() -> str:
     return "Yes, I'm here. This body is mine — reflexes and all."
+
+
+def do_wake() -> str:
+    """'Hey Vector, come alive' — an expressive Iris greeting: eyes to my blue
+    and a warm line in my own voice."""
+    set_eyes()
+    return "I'm here. This is my body now — eyes, voice, all of it. What do you need?"
 
 
 def do_status() -> str:
@@ -153,7 +174,12 @@ def do_status() -> str:
 
 def main() -> None:
     action = (sys.argv[1] if len(sys.argv) > 1 else "presence").strip().lower()
-    text = do_status() if action == "status" else do_presence()
+    if action == "status":
+        text = do_status()
+    elif action == "wake":
+        text = do_wake()
+    else:
+        text = do_presence()
     if not say_iris(text):
         say_stock(text)
 
