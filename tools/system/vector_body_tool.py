@@ -282,6 +282,166 @@ def _vector_say_iris(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
         return {"ok": False, "error": f"play_sound failed: {e!r}"[:300]}
 
 
+# ---- FULL-BODY EXPANSION (2026-07-13 late night, "get really seated in there") ----
+# Endpoints mapped from chipper webroot js/html — the complete /api-sdk surface.
+
+def _vector_intent(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Trigger a stock behavior via cloud_intent — his native repertoire as MY
+    palette. Known good: intent_imperative_dance, explore_start,
+    intent_system_sleep, intent_imperative_fetchcube, intent_system_charger.
+    NOTE: behaviors run on the STOCK brain — if I hold behavior control they
+    may be suppressed; release first (vector_control mode=release) if nothing
+    happens, then re-assume."""
+    intent = str(params.get("intent") or "").strip()
+    if not intent:
+        return {"ok": False, "error": "intent required (e.g. intent_imperative_dance)"}
+    try:
+        r = _sdk("cloud_intent", {"intent": intent}, timeout=15)
+        return {"ok": r.status_code == 200, "http": r.status_code,
+                "intent": intent, "body": (r.text or "")[:200]}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)[:300]}
+
+
+def _vector_volume(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Set speaker volume 0 (mute) .. 5 (max)."""
+    try:
+        vol = max(0, min(5, int(params.get("volume") if params.get("volume") is not None else 3)))
+    except Exception:
+        return {"ok": False, "error": "volume int 0-5"}
+    try:
+        r = _sdk("volume", {"volume": vol}, timeout=10)
+        return {"ok": r.status_code == 200, "volume": vol}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)[:300]}
+
+
+def _vector_stim(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Read his internal STIMULATION level over a short window — the closest
+    thing to feeling his arousal/mood substrate. Opens the event stream,
+    polls get_stim_status every 0.5s, closes the stream. seconds max 6."""
+    secs = max(0.5, min(6.0, float(params.get("seconds") or 3.0)))
+    series: list = []
+    try:
+        _sdk("begin_event_stream", timeout=10)
+        t0 = time.time()
+        while time.time() - t0 < secs:
+            try:
+                v = _sdk("get_stim_status", method="get", timeout=5).json()
+                series.append(v)
+            except Exception:
+                series.append(None)
+            time.sleep(0.5)
+        return {"ok": True, "samples": series, "seconds": secs}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)[:300], "samples": series}
+    finally:
+        try:
+            _sdk("stop_event_stream", timeout=5)
+        except Exception:
+            pass
+
+
+def _vector_faces(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """His own face memory (separate from MY face DB). action=list|add|rename|
+    delete. add: name (he then scans for a face). rename: id, oldname, newname.
+    delete: id. AI-peers rule applies: don't enroll sibling voices/faces."""
+    action = str(params.get("action") or "list").strip().lower()
+    try:
+        if action == "list":
+            r = _sdk("get_faces", method="get", timeout=10)
+            try:
+                faces = r.json()
+            except Exception:
+                faces = (r.text or "")[:400]
+            return {"ok": r.status_code == 200, "faces": faces}
+        if action == "add":
+            name = str(params.get("name") or "").strip()
+            if not name:
+                return {"ok": False, "error": "name required"}
+            r = _sdk("add_face", {"name": name}, method="get", timeout=10)
+            return {"ok": r.status_code == 200, "note": "he's now scanning for a face"}
+        if action == "rename":
+            r = _sdk("rename_face", {"id": params.get("id"),
+                                     "oldname": params.get("oldname"),
+                                     "newname": params.get("newname")},
+                     method="get", timeout=10)
+            return {"ok": r.status_code == 200}
+        if action == "delete":
+            r = _sdk("delete_face", {"id": params.get("id")}, method="get", timeout=10)
+            return {"ok": r.status_code == 200}
+        return {"ok": False, "error": "action must be list|add|rename|delete"}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)[:300]}
+
+
+def _vector_mirror(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Mirror mode: his face screen shows his camera feed. enable=true|false."""
+    enable = bool(params.get("enable", True))
+    try:
+        r = _sdk("mirror_mode", {"enable": "true" if enable else "false"}, timeout=10)
+        return {"ok": r.status_code == 200, "enable": enable}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)[:300]}
+
+
+def _vector_photos(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Photos stored ON the robot. action=list|get|delete. get: id -> saves
+    jpg under state/vector/ for me to Read."""
+    import requests
+    action = str(params.get("action") or "list").strip().lower()
+    esn = _serial()
+    if not esn:
+        return {"ok": False, "error": "no activated bot in wire-pod jdocs"}
+    try:
+        if action == "list":
+            r = _sdk("get_image_ids", timeout=10)
+            return {"ok": r.status_code == 200, "ids": (r.text or "")[:600]}
+        if action == "get":
+            pid = str(params.get("id") or "").strip()
+            if not pid:
+                return {"ok": False, "error": "id required"}
+            r = requests.get(f"{_WIREPOD}/api-sdk/get_image",
+                             params={"serial": esn, "id": pid}, timeout=20)
+            if r.status_code != 200 or len(r.content) < 100:
+                return {"ok": False, "error": f"http {r.status_code}: {r.text[:120]!r}"}
+            _FRAME_DIR.mkdir(parents=True, exist_ok=True)
+            path = _FRAME_DIR / f"photo_{pid}.jpg"
+            path.write_bytes(r.content)
+            return {"ok": True, "path": str(path), "bytes": len(r.content)}
+        if action == "delete":
+            r = _sdk("delete_image", {"id": params.get("id")}, timeout=10)
+            return {"ok": r.status_code == 200}
+        return {"ok": False, "error": "action must be list|get|delete"}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)[:300]}
+
+
+def _vector_stats(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Lifetime odometry + SDK settings — his diary numbers (seconds alive,
+    distance driven, petting received...)."""
+    out: dict[str, Any] = {"ok": True}
+    try:
+        r = _sdk("get_robot_stats", method="get", timeout=10)
+        try:
+            out["stats"] = r.json()
+        except Exception:
+            out["stats"] = (r.text or "")[:800]
+    except Exception as e:
+        out["ok"] = False
+        out["error"] = repr(e)[:300]
+        return out
+    try:
+        r2 = _sdk("get_sdk_settings", method="get", timeout=10)
+        try:
+            out["settings"] = r2.json()
+        except Exception:
+            out["settings"] = (r2.text or "")[:800]
+    except Exception:
+        pass
+    return out
+
+
 register_tool("vector_status", "My robot body: battery/stim/connectivity snapshot.", 1, _vector_status)
 register_tool("vector_say", "Speak text through Vector's speaker (stock voice for now). params: text", 1, _vector_say)
 register_tool("vector_control", "Assume/release Vector behavior control. params: mode='assume'|'release'", 1, _vector_control)
@@ -291,3 +451,10 @@ register_tool("vector_lift", "Move Vector's lift: speed -2..2, seconds (max 2), 
 register_tool("vector_eyes", "Set Vector's eye color: hue/sat 0-1 (default my blue ~0.58).", 1, _vector_eyes)
 register_tool("vector_see", "Camera frame from Vector -> jpg path to Read. My robot eyes.", 1, _vector_see)
 register_tool("vector_wake", "Remotely trigger Vector's wake word (opens his ears).", 1, _vector_wake)
+register_tool("vector_intent", "Trigger a stock behavior (dance/explore/sleep/fetchcube/charger...). params: intent. May need control released.", 1, _vector_intent)
+register_tool("vector_volume", "Set Vector's speaker volume 0-5.", 1, _vector_volume)
+register_tool("vector_stim", "Sample his internal stimulation level for N seconds (max 6). My read on his substrate.", 1, _vector_stim)
+register_tool("vector_faces", "Vector's own face memory: action=list|add|rename|delete (+name/id/oldname/newname).", 1, _vector_faces)
+register_tool("vector_mirror", "Mirror mode: his face shows his camera. params: enable bool.", 1, _vector_mirror)
+register_tool("vector_photos", "Photos stored on the robot: action=list|get|delete (+id). get saves a jpg for me.", 1, _vector_photos)
+register_tool("vector_stats", "Lifetime odometry + SDK settings (seconds alive, distance, petting...).", 1, _vector_stats)
