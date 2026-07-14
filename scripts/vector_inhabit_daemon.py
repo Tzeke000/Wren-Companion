@@ -96,6 +96,13 @@ def run_once() -> None:
         was_touched = False
         touch_start = 0.0
         pet_announced = False
+        flat_logged = False
+        # rolling ~2s of raw capacitance readings — REAL petting (strokes) makes
+        # this value swing; the stuck-true dock read sits flat (2026-07-13: sensor
+        # reported is_being_touched=True for 2.5h while nobody touched him).
+        from collections import deque
+        raw_window: "deque[float]" = deque(maxlen=max(4, int(2.0 / POLL_S)))
+        PET_MIN_SPREAD = float(os.environ.get("VECTOR_PET_MIN_SPREAD", "30"))
         was_carried = False
         was_charging = None
         while True:
@@ -110,17 +117,29 @@ def run_once() -> None:
             # event; re-announce only after a clean RELEASE.)
             t = robot.touch.last_sensor_reading
             touched = bool(getattr(t, "is_being_touched", False))
+            raw_window.append(float(getattr(t, "raw_touch_value", 0) or 0))
             now = time.time()
             if touched and not was_touched:
                 touch_start = now
                 pet_announced = False
+                flat_logged = False
             if not touched:
                 pet_announced = False
+                flat_logged = False
             if (touched and was_touched and (now - touch_start) > 1.5
                     and not pet_announced):
-                nudge("petting", "Someone is PETTING me — sustained touch on "
-                                 "my back sensor. Probably Zeke.")
-                pet_announced = True
+                # Petting must show VARIATION in the raw capacitance (strokes),
+                # not just a held boolean — the dock false-positive reads flat.
+                spread = (max(raw_window) - min(raw_window)) if raw_window else 0.0
+                if spread >= PET_MIN_SPREAD:
+                    nudge("petting", "Someone is PETTING me — sustained touch on "
+                                     "my back sensor. Probably Zeke.")
+                    pet_announced = True
+                elif not flat_logged:
+                    log(f"touch held but FLAT (raw spread {spread:.1f} < "
+                        f"{PET_MIN_SPREAD}) — stuck/resting read, NOT petting "
+                        f"(raw now {raw_window[-1]:.1f})")
+                    flat_logged = True
             was_touched = touched
 
             # picked up / falling
