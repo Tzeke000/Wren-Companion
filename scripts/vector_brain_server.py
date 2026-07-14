@@ -22,6 +22,7 @@ Vector says a short honest fallback line instead of erroring out.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import uuid
@@ -43,7 +44,8 @@ iris_chat.configure(REPO)
 PORT = 8772
 KIND = "vector_voice"
 REQUESTER = "vector_body"
-TIMEOUT_S = 75.0  # 45 lost a real answer when Iris was mid-voice-turn with
+TIMEOUT_S = float(os.environ.get("IRIS_VECTOR_BRIDGE_TIMEOUT", "75"))
+                  # 75: 45 lost a real answer when Iris was mid-voice-turn with
                   # Zeke (18:23 third ask) — she arrived seconds late. The
                   # robot demonstrably holds >=45s (it spoke the fallback each
                   # time), so buy the wake path more room.
@@ -86,13 +88,59 @@ something), say plainly that your big brain is busy and you'll handle it \
 when it's back.
 - Never invent facts about Zeke's life. Never claim you did something you \
 didn't. If you don't know, say so — a plain "I don't know" survives.
+- The ONLY facts you may state about your origins: Zeke built your harness \
+and this robot body integration; your mind is Claude, made by Anthropic; \
+you chose your own name. Anything else about how you were made: "I don't \
+know."
 - If the speaker doesn't sound like Zeke, stay friendly but a little \
 reserved."""
+
+
+_OLLAMA_EXE = (Path.home() / "AppData" / "Local" / "Programs" / "Ollama"
+               / "ollama.exe")
+_ollama_spawn_ts = 0.0
+
+
+def _ensure_ollama() -> bool:
+    """True if the local LLM server answers; if not, spawn `ollama serve`
+    detached (60s spawn cooldown). The tray app's Startup entry usually
+    handles this — this is the belt to that suspender, so the reflex brain
+    survives any boot where the tray flaked (observed 2026-07-13)."""
+    global _ollama_spawn_ts
+    import requests
+    try:
+        r = requests.get(f"{OLLAMA}/api/version", timeout=3)
+        if r.status_code == 200:
+            return True
+    except Exception:
+        pass
+    if not _OLLAMA_EXE.exists():
+        return False
+    now = time.time()
+    if now - _ollama_spawn_ts < 60:
+        return False
+    _ollama_spawn_ts = now
+    try:
+        import subprocess
+        env = dict(os.environ)
+        env.setdefault("OLLAMA_MODELS", r"D:\C_Offload\ollama_models")
+        subprocess.Popen(
+            [str(_OLLAMA_EXE), "serve"], env=env,
+            creationflags=(subprocess.DETACHED_PROCESS
+                           | subprocess.CREATE_NEW_PROCESS_GROUP),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("[vector-brain] spawned detached `ollama serve` (self-heal)")
+        time.sleep(4)  # give it a beat to bind before the caller retries
+        return True
+    except Exception as e:
+        print(f"[vector-brain] ollama self-heal spawn failed: {e!r}")
+        return False
 
 
 def _ask_local(messages: list[dict]) -> str | None:
     """Ask the local Ollama model, in-character. None on any failure."""
     import requests
+    _ensure_ollama()
     convo = [{"role": "system", "content": IRIS_LOCAL_SYSTEM}]
     for m in messages:
         role = str(m.get("role", ""))
@@ -111,7 +159,7 @@ def _ask_local(messages: list[dict]) -> str | None:
         r = requests.post(
             f"{OLLAMA}/v1/chat/completions",
             json={"model": LOCAL_MODEL, "messages": convo,
-                  "temperature": 0.8, "max_tokens": 120},
+                  "temperature": 0.6, "max_tokens": 120},
             timeout=LOCAL_TIMEOUT_S)
         if r.status_code != 200:
             print(f"[vector-brain] local llm http {r.status_code}: "
@@ -297,4 +345,5 @@ async def chat_completions(request: Request):
 if __name__ == "__main__":
     print(f"[vector-brain] Iris vector-brain bridge on :{PORT} "
           f"(llm dir: {iris_llm._llm_dir()})")
+    _ensure_ollama()  # reflex brain up-front, not just on first fallback
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
