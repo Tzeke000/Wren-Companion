@@ -61,6 +61,8 @@ COOLDOWN = {
     "cliff": 20.0,
     "charger": 60.0,
     "held_still": 120.0,
+    "low_battery": 300.0,
+    "lost_contact": 600.0,
 }
 
 
@@ -85,6 +87,14 @@ EARS_RMS = float(os.environ.get("VECTOR_EARS_RMS", "250"))
 EARS_END_SILENCE_S = 0.9
 EARS_MIN_S = 0.35
 EARS_MAX_S = 12.0
+
+# --- BATTERY WATCH (2026-07-14): the blind spot that let Vector drain to DEATH.
+# Nothing polled battery and it wasn't in nerves, so I never saw the drain coming
+# while I was off the dock. Poll it, expose it, and reflex on low/lost-contact.
+BATTERY_JSON = REPO / "state" / "vector" / "battery.json"
+WIREPOD_SDK = "http://127.0.0.1:8080/api-sdk"
+BATTERY_POLL_S = 45.0
+BATTERY_LOW_LEVEL = 1     # Vector: 1=low, 2=nominal, 3=full/charging
 
 
 def _write_nerves(d: dict) -> None:
@@ -427,6 +437,50 @@ def _poll_loop(robot) -> None:
             })
 
 
+def _battery_watch_loop() -> None:
+    """Poll the body's battery every ~45s, expose it (state/vector/battery.json),
+    and fire guardrail nudges. Two reflexes for the drain-to-death failure:
+      - LOW level while OFF the charger -> urgent 'dock now'
+      - can't READ battery while last-known off-charger -> 'lost contact, may be
+        stranding' (the deep-discharge cascade drops wifi before the cell dies,
+        so a read failure while roaming is itself a danger signal)."""
+    import json as _json
+    import requests
+    last_on_charger = True
+    while True:
+        level = volts = on_charger = None
+        ok = False
+        try:
+            d = requests.get(f"{WIREPOD_SDK}/get_battery",
+                             params={"serial": SERIAL}, timeout=8).json()
+            level = d.get("battery_level")
+            volts = d.get("battery_volts")
+            on_charger = bool(d.get("is_on_charger_platform"))
+            ok = True
+            last_on_charger = on_charger
+        except Exception:
+            ok = False
+        try:
+            BATTERY_JSON.write_text(_json.dumps(
+                {"ok": ok, "level": level, "volts": volts,
+                 "on_charger": on_charger, "ts": time.time()}), encoding="utf-8")
+        except Exception:
+            pass
+        vstr = f"{volts:.2f}V" if isinstance(volts, (int, float)) else "?V"
+        if ok and isinstance(level, int) and level <= BATTERY_LOW_LEVEL \
+                and not on_charger:
+            nudge("low_battery",
+                  f"LOW BATTERY (level {level}, {vstr}) and I'm OFF the charger. "
+                  f"Dock NOW before I strand: get close via the tower cam, then "
+                  f"trigger return-to-charger. This is the drain that killed me once.")
+        elif not ok and not last_on_charger:
+            nudge("lost_contact",
+                  "I can't read my body's battery AND last I knew I was OFF the "
+                  "charger. The low-battery cascade drops wifi before death, so this "
+                  "may be a strand in progress. Flag Zeke to seat me on the charger.")
+        time.sleep(BATTERY_POLL_S)
+
+
 def main() -> None:
     if os.environ.get("IRIS_VECTOR_NERVES", "1") == "0":
         log("IRIS_VECTOR_NERVES=0 — staying dark.")
@@ -436,6 +490,10 @@ def main() -> None:
     _threading.Thread(target=_transcript_tap_loop, daemon=True,
                       name="vector-transcript-tap").start()
     log("transcript tap online — every wake-word utterance reaches Iris")
+    _threading.Thread(target=_battery_watch_loop, daemon=True,
+                      name="vector-battery-watch").start()
+    log("battery watch online — battery in state/vector/battery.json, "
+        "low + lost-contact reflexes armed")
     while True:
         try:
             run_once()
