@@ -95,21 +95,32 @@ def run_once() -> None:
         log("connected — nerves online (observe mode, his brain still runs)")
         was_touched = False
         touch_start = 0.0
+        pet_announced = False
         was_carried = False
         was_charging = None
         while True:
             time.sleep(POLL_S)
             st = robot.status
 
-            # petting: touched continuously for >1.5s
+            # petting: touched continuously for >1.5s — announce ONCE per touch
+            # EPISODE. (2026-07-13 flood bug: while is_being_touched stayed true —
+            # e.g. resting/stuck sensor read on the charger — this condition passed
+            # every poll and only the 45s cooldown gated it: ~200 ghost nudges in
+            # 2.5h, straight into Iris's queue during a token freeze. A pet is one
+            # event; re-announce only after a clean RELEASE.)
             t = robot.touch.last_sensor_reading
             touched = bool(getattr(t, "is_being_touched", False))
             now = time.time()
             if touched and not was_touched:
                 touch_start = now
-            if touched and was_touched and (now - touch_start) > 1.5:
+                pet_announced = False
+            if not touched:
+                pet_announced = False
+            if (touched and was_touched and (now - touch_start) > 1.5
+                    and not pet_announced):
                 nudge("petting", "Someone is PETTING me — sustained touch on "
                                  "my back sensor. Probably Zeke.")
+                pet_announced = True
             was_touched = touched
 
             # picked up / falling

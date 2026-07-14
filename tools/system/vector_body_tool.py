@@ -241,6 +241,47 @@ def _vector_wake(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": repr(e)[:300]}
 
 
+_MOUTH_SYNTH = "http://127.0.0.1:8769/synth"   # StyleTTS2 mouth — WAV-bytes endpoint
+
+
+def _vector_say_iris(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """THE VOICE TRANSPLANT (2026-07-13): speak through Vector's speaker in MY
+    actual voice. Chain: StyleTTS2 mouth /synth (returns mono 16-bit WAV at 8kHz,
+    resampled server-side from 24kHz) -> wire-pod /api-sdk/play_sound (multipart
+    'sound' field — same contract the webroot play_audio.js uses). Falls back to
+    an explicit error, never silently to stock voice — Zeke should always know
+    which voice he's hearing."""
+    import requests
+    text = str(params.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "error": "text required"}
+    try:
+        r = requests.post(_MOUTH_SYNTH, json={"text": text[:600], "rate": 8000},
+                          timeout=60)
+        if r.status_code != 200 or not r.content[:4] == b"RIFF":
+            return {"ok": False, "error": f"mouth /synth failed: http "
+                    f"{r.status_code} {r.text[:120]!r}"}
+        wav = r.content
+    except Exception as e:
+        return {"ok": False, "error": f"mouth /synth unreachable: {e!r}"[:300]}
+    try:
+        esn = _serial()
+        if not esn:
+            return {"ok": False, "error": "no activated bot in wire-pod jdocs"}
+        # play_sound blocks while the robot plays; size ~16KB/s at 8kHz mono int16.
+        est_s = max(5.0, len(wav) / 16000.0 + 8.0)
+        r2 = requests.post(f"{_WIREPOD}/api-sdk/play_sound",
+                           params={"serial": esn},
+                           files={"sound": ("iris.wav", wav, "audio/wav")},
+                           timeout=est_s + 20)
+        return {"ok": r2.status_code == 200, "http": r2.status_code,
+                "wav_bytes": len(wav),
+                "note": "spoken on Vector in MY voice" if r2.status_code == 200
+                        else r2.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": f"play_sound failed: {e!r}"[:300]}
+
+
 register_tool("vector_status", "My robot body: battery/stim/connectivity snapshot.", 1, _vector_status)
 register_tool("vector_say", "Speak text through Vector's speaker (stock voice for now). params: text", 1, _vector_say)
 register_tool("vector_control", "Assume/release Vector behavior control. params: mode='assume'|'release'", 1, _vector_control)
