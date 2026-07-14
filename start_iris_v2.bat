@@ -88,6 +88,11 @@ REM Vector brain bridge (:8772) — Iris IS the robot's knowledge graph (2026-07
 REM Idempotent: port-probe skips the launch if :8772 already answers.
 start "iris-vector-brain" /B powershell -NoProfile -Command "try{ (New-Object Net.Sockets.TcpClient('127.0.0.1',8772)).Close() }catch{ Start-Process -WindowStyle Hidden 'D:\Wren-Companion\.venv\Scripts\python.exe' 'D:\Wren-Companion\scripts\vector_brain_server.py' }"
 
+REM Vector inhabit daemon (nerves: petting/cliff/pickup/charger -> stamped nudges).
+REM Added 2026-07-13 late: was in NO boot bat (handoff scar). Idempotent: skips if
+REM a vector_inhabit_daemon process already runs (duplicate daemons = double nudges).
+start "iris-vector-nerves" /B powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'vector_inhabit_daemon' })) { Start-Process -WindowStyle Hidden 'D:\Wren-Companion\.venv\Scripts\python.exe' -ArgumentList '-u','D:\Wren-Companion\scriptsector_inhabit_daemon.py' }"
+
 REM --- Relaunch the ORB APP once the body is READY (Zeke directive 2026-07-08):
 REM --- a detached waiter polls the operator port (5876) and starts iris-control
 REM --- the moment it answers, so the orb connects to a live body instead of racing
