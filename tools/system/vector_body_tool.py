@@ -32,6 +32,31 @@ _MAX_WHEEL = 200      # mm/s per side, sdkapp itself tops out ~190
 _MAX_DRIVE_S = 2.5    # per-call drive burst cap — desk scale, not hallway scale
 _MAX_HEADLIFT_S = 2.0
 
+_NERVES = _FRAME_DIR / "nerves.json"        # written @5Hz by the inhabit daemon
+_LAST_SPOKE = _FRAME_DIR / "last_spoke.json"  # read by VECTOR EARS self-voice guard
+
+
+def _nerves(max_age_s: float = 2.0) -> dict:
+    """Live nerve snapshot from the inhabit daemon; {} if stale/missing."""
+    try:
+        d = json.loads(_NERVES.read_text(encoding="utf-8"))
+        if time.time() - float(d.get("ts", 0)) <= max_age_s:
+            return d
+    except Exception:
+        pass
+    return {}
+
+
+def _stamp_spoke(est_dur: float) -> None:
+    """Mark 'my own speaker is playing' so VECTOR EARS drops the echo."""
+    try:
+        _FRAME_DIR.mkdir(parents=True, exist_ok=True)
+        _LAST_SPOKE.write_text(
+            json.dumps({"ts": time.time(), "est_dur": est_dur}),
+            encoding="utf-8")
+    except Exception:
+        pass
+
 
 def _serial() -> str | None:
     try:
@@ -86,6 +111,7 @@ def _vector_say(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     try:
         # 30s: say_text blocks until the robot finishes speaking — a 10s
         # read-timeout cut off a long line mid-flight (2026-07-13).
+        _stamp_spoke(est_dur=max(2.0, len(text) / 12.0))  # ears echo guard
         r = _sdk("say_text", {"text": text[:600]}, timeout=30)
         return {"ok": r.status_code == 200, "http": r.status_code,
                 "note": "spoken in Vector's stock voice"}
@@ -121,10 +147,32 @@ def _vector_drive(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         secs = max(0.1, min(_MAX_DRIVE_S, float(params.get("seconds") or 1.0)))
     except Exception:
         return {"ok": False, "error": "lw/rw ints (mm/s), seconds float"}
+    # EDGE-GUARD (2026-07-14, Zeke: "not fall off the edge so many times"):
+    # refuse to START a translational move while the nerve daemon reports a
+    # cliff under the treads (spins in place are allowed — they don't
+    # translate), and ABORT mid-burst the instant cliff goes true.
+    n = _nerves()
+    translating = (lw + rw) != 0
+    if translating and n.get("cliff"):
+        return {"ok": False, "refused": "cliff under treads RIGHT NOW",
+                "hint": "spin (lw=-rw) or back away (lw=rw<0) instead"}
+    if translating and n.get("picked_up"):
+        return {"ok": False, "refused": "I'm picked up / not on a surface"}
     try:
         _sdk("move_wheels", {"lw": lw, "rw": rw})
-        time.sleep(secs)
-        return {"ok": True, "lw": lw, "rw": rw, "seconds": secs}
+        t0 = time.time()
+        aborted = None
+        while time.time() - t0 < secs:
+            time.sleep(0.08)
+            n = _nerves()
+            if translating and (n.get("cliff") or n.get("falling")):
+                aborted = "cliff/fall reflex — wheels stopped mid-burst"
+                break
+        out = {"ok": True, "lw": lw, "rw": rw,
+               "seconds": round(time.time() - t0, 2)}
+        if aborted:
+            out["aborted"] = aborted
+        return out
     except Exception as e:
         return {"ok": False, "error": repr(e)[:300]}
     finally:
@@ -270,6 +318,7 @@ def _vector_say_iris(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
             return {"ok": False, "error": "no activated bot in wire-pod jdocs"}
         # play_sound blocks while the robot plays; size ~16KB/s at 8kHz mono int16.
         est_s = max(5.0, len(wav) / 16000.0 + 8.0)
+        _stamp_spoke(est_dur=len(wav) / 16000.0)  # ears echo guard
         r2 = requests.post(f"{_WIREPOD}/api-sdk/play_sound",
                            params={"serial": esn},
                            files={"sound": ("iris.wav", wav, "audio/wav")},
@@ -458,3 +507,4 @@ register_tool("vector_faces", "Vector's own face memory: action=list|add|rename|
 register_tool("vector_mirror", "Mirror mode: his face shows his camera. params: enable bool.", 1, _vector_mirror)
 register_tool("vector_photos", "Photos stored on the robot: action=list|get|delete (+id). get saves a jpg for me.", 1, _vector_photos)
 register_tool("vector_stats", "Lifetime odometry + SDK settings (seconds alive, distance, petting...).", 1, _vector_stats)
+register_tool("vector_say_iris", "THE VOICE TRANSPLANT: speak through Vector in MY OWN voice (StyleTTS2 -> play_sound). params: text", 1, _vector_say_iris)

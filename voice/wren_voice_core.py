@@ -2157,6 +2157,56 @@ def cmd_call_end(ctx, args: dict) -> dict:
     return result
 
 
+def cmd_transcribe_wav(ctx, args: dict) -> dict:
+    """Transcribe an arbitrary WAV file with the warm whisper singleton.
+
+    Built 2026-07-14 for VECTOR EARS: the inhabit daemon streams the robot's
+    mic (gRPC AudioFeed, 11025Hz mono int16), gates utterances, writes a wav,
+    and socket-calls this. Zero new VRAM — reuses the daemon's warm model.
+
+    args: {"path": str}   # wav file, any sample rate, mono int16/float
+    returns {"text": str, "seconds": float}
+    """
+    import wave as _wave
+    path = str(args.get("path") or "").strip()
+    if not path or not Path(path).exists():
+        return {"text": "", "error": f"no wav at {path!r}"}
+    with _wave.open(path, "rb") as w:
+        rate = w.getframerate()
+        nch = w.getnchannels()
+        sw = w.getsampwidth()
+        frames = w.readframes(w.getnframes())
+    if sw == 2:
+        audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sw == 4:
+        audio = np.frombuffer(frames, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        return {"text": "", "error": f"unsupported sample width {sw}"}
+    if nch > 1:
+        audio = audio.reshape(-1, nch).mean(axis=1)
+    if rate != SAMPLE_RATE:
+        # linear resample — fine for speech->whisper at 11k/22k/44k rates
+        n_out = int(round(audio.shape[0] * SAMPLE_RATE / float(rate)))
+        if n_out <= 0:
+            return {"text": "", "error": "empty audio"}
+        x_old = np.linspace(0.0, 1.0, num=audio.shape[0], endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+        audio = np.interp(x_new, x_old, audio).astype(np.float32)
+    secs = audio.shape[0] / float(SAMPLE_RATE)
+    if secs < 0.25:
+        return {"text": "", "seconds": secs}
+    with _WHISPER_LOCK:
+        text, _words = _prosody.transcribe(audio)
+    text = (text or "").strip()
+    # reuse the phantom gate — whisper hallucinates on hums/silence
+    try:
+        if text and _is_phantom(text, audio):
+            return {"text": "", "seconds": secs, "phantom": True}
+    except Exception:
+        pass
+    return {"text": text, "seconds": secs}
+
+
 def cmd_backend(ctx, args: dict) -> str:
     """Pick / cold-start / stop which TTS engine the mouth uses.
 
