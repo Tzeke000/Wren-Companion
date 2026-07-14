@@ -1664,6 +1664,24 @@ async def main():
                         + "\n\n" + text
                     )
                 elif source == "orb":
+                    # FIRE-TIME STALENESS CHECK (2026-07-14): orb requests ride
+                    # TWO paths — this host queue AND the Stop hook. Long turns
+                    # starve this queue, so by the time an item fires here the
+                    # Stop hook often answered it long ago (observed: a 23:57
+                    # cliff ghost re-delivered at 00:44 as a "fresh" turn).
+                    # Re-check pending-ness at fire time; drop answered ones.
+                    try:
+                        from brain import iris_chat as _ic
+                        if msg_id and not _ic.is_pending(str(msg_id)):
+                            print("\n[host] orb turn dropped at fire time - "
+                                  "request " + str(msg_id) + " already "
+                                  "answered (stop-hook beat the queue)",
+                                  flush=True)
+                            continue
+                    except AttributeError:
+                        pass  # iris_chat.is_pending not built yet — fire as before
+                    except Exception:
+                        pass
                     print("\n[orb <- Zeke] " + text, flush=True)
                     prompt = (
                         "[Zeke typed this in your body app / orb (chat request id " + str(msg_id) + "). "

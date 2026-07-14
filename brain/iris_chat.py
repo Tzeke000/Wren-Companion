@@ -150,6 +150,24 @@ def next_pending() -> Optional[dict[str, Any]]:
     return candidates[0][1]
 
 
+def is_pending(request_id: str) -> bool:
+    """True iff this request exists and is still status=pending.
+
+    2026-07-14: fire-time staleness check for the host's orb queue — orb
+    requests ride BOTH the host poller and the Stop hook; long host turns
+    starve the queue, so items fire here after the Stop hook already
+    answered them (a 23:57 cliff ghost re-fired at 00:44). The host drops
+    non-pending items at fire time instead of replaying them at me."""
+    try:
+        path = _request_path(request_id)
+        if not path.exists():
+            return False
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return isinstance(data, dict) and data.get("status") == "pending"
+    except Exception:
+        return False
+
+
 def mark_answered(request_id: str, reply: str) -> bool:
     """Flip the request to answered and write the reply. Atomic via tmp+rename.
 
