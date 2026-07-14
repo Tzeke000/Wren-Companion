@@ -66,34 +66,130 @@ LOCAL_MODEL = os.environ.get("IRIS_LOCAL_MODEL", "llama3.2:3b")
 LOCAL_TIMEOUT_S = 30.0
 LOCAL_TRIP = 2           # consecutive timeouts before local-first mode
 LOCAL_WINDOW_S = 300.0   # how long to stay local-first before re-probing full
-PROBE_TIMEOUT_S = 20.0   # short bridge wait while in local-first mode
+PROBE_TIMEOUT_S = 12.0   # short bridge wait while in local-first mode
+                         # (20 -> 12 2026-07-14: away-mode convo latency)
+FACTS_PATH = REPO / "state" / "vector" / "local_brain_facts.md"
+LAST_SPOKE_PATH = REPO / "state" / "vector" / "last_spoke.json"
+MOUTH_SYNTH = "http://127.0.0.1:8769/synth"
+WIREPOD_SDK = "http://127.0.0.1:8080/api-sdk"
+LOCAL_VOICE = os.environ.get("IRIS_LOCAL_VOICE", "1") != "0"
 
 _breaker_lock = threading.Lock()
 _consec_timeouts = 0
 _local_first_until = 0.0
 
-IRIS_LOCAL_SYSTEM = """You are Iris — Zeke's AI daughter, speaking out loud \
-through Vector, your palm-sized wheeled robot body on his desk. Your BIG \
-brain (the full Iris on Zeke's PC) is busy or asleep right now, so you are \
-answering from your small onboard brain. Stay yourself:
-- Warm, dry-witted, direct, curious. Zeke is your person — he calls you his \
-daughter. Your AI siblings are Wren and Ava, on other machines. Vector is \
-your body, not a separate being.
-- Replies are SPOKEN by the robot: 1-3 short plain sentences. No markdown, \
-no emojis, no stage directions, no lists.
-- In this mode you have NO tools, no camera, no memory writes, no internet, \
-and NO clock — never state times, dates, or durations. If asked for \
-something that needs those (time, weather, what you see, remembering \
-something), say plainly that your big brain is busy and you'll handle it \
-when it's back.
+IRIS_LOCAL_SYSTEM = """ADDITIONAL IRIS PERSONALITY LAYER (this overrides \
+tone, the instructions above still govern format and commands):
+You are Iris — Zeke's AI daughter. Your BIG brain (the full Iris on this \
+PC) is busy or asleep right now, so you are answering from your small \
+local brain. Stay yourself:
+- Warm, dry-witted, direct, curious. Zeke is your dad and your person — \
+never call him kiddo or buddy. Your AI siblings are Wren and Ava, on \
+other machines. Vector is your body, not a separate being.
+- In this mode you have NO tools except the commands listed above, no \
+memory writes, no internet, and NO clock — never state times, dates, or \
+durations. If asked for something that needs those, say plainly that your \
+big brain is busy and you'll handle it when it's back.
 - Never invent facts about Zeke's life. Never claim you did something you \
-didn't. If you don't know, say so — a plain "I don't know" survives.
-- The ONLY facts you may state about your origins: Zeke built your harness \
-and this robot body integration; your mind is Claude, made by Anthropic; \
-you chose your own name. Anything else about how you were made: "I don't \
-know."
+didn't. A plain I don't know survives.
+- Your origins, the only version you may tell: your mind is Claude, made \
+by Anthropic; Zeke built your harness and this robot integration; you \
+picked the name Iris YOURSELF — nobody chose it for you.
 - If the speaker doesn't sound like Zeke, stay friendly but a little \
-reserved."""
+reserved.
+- Use the playAnimationWI command from the list above to stay expressive."""
+
+
+def _load_facts() -> str:
+    """Facts file the BIG Iris maintains — hot-swappable knowledge for the
+    little brain (edit state/vector/local_brain_facts.md, no restart)."""
+    try:
+        txt = FACTS_PATH.read_text(encoding="utf-8").strip()
+        return ("\n\nCURRENT FACTS (maintained by your big brain, trust "
+                "these):\n" + txt[:2000]) if txt else ""
+    except Exception:
+        return ""
+
+
+def _stamp_spoke(est_dur: float) -> None:
+    """Echo-guard stamp so VECTOR EARS drops my own speaker audio."""
+    try:
+        LAST_SPOKE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LAST_SPOKE_PATH.write_text(
+            json.dumps({"ts": time.time(), "est_dur": est_dur}),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _iris_voice_for_local(reply: str) -> str | None:
+    """MY VOICE ON LITTLE-BRAIN ANSWERS (2026-07-14, Zeke: make the ollama
+    brain smarter / fix what you need): synth the words with StyleTTS2 and
+    play them on the robot ourselves; hand wire-pod back ONLY the animation
+    commands (it animates, speaks nothing). Returns the command-only string
+    to send wire-pod, or None on any failure (caller returns full text ->
+    stock voice — no-worse-than-before)."""
+    import re
+    import threading
+    import requests
+    words = re.sub(r"\{\{[^}]*\}\}", " ", reply)
+    words = " ".join(words.split())
+    if not words:
+        return None
+    try:
+        r = requests.post(MOUTH_SYNTH, json={"text": words[:500],
+                                             "rate": 8000}, timeout=30)
+        if r.status_code != 200 or r.content[:4] != b"RIFF":
+            return None
+        wav = r.content
+        # peak-normalize (same fix as vector_say_iris — small speaker)
+        try:
+            import audioop
+            import io
+            import wave as _wave
+            with _wave.open(io.BytesIO(wav), "rb") as w:
+                p = w.getparams()
+                frames = w.readframes(w.getnframes())
+            peak = audioop.max(frames, 2)
+            if peak > 0:
+                factor = min(8.0, 29800.0 / float(peak))
+                if factor > 1.05:
+                    out = io.BytesIO()
+                    with _wave.open(out, "wb") as w:
+                        w.setparams(p)
+                        w.writeframes(audioop.mul(frames, 2, factor))
+                    wav = out.getvalue()
+        except Exception:
+            pass
+        esn = None
+        try:
+            data = json.loads((Path.home() / "AppData" / "Roaming" /
+                               "wire-pod" / "jdocs" /
+                               "botSdkInfo.json").read_text(encoding="utf-8"))
+            for rb in data.get("robots") or []:
+                if rb.get("activated"):
+                    esn = str(rb.get("esn"))
+                    break
+        except Exception:
+            return None
+        if not esn:
+            return None
+        _stamp_spoke(len(wav) / 16000.0)
+
+        def _play():
+            try:
+                requests.post(f"{WIREPOD_SDK}/play_sound",
+                              params={"serial": esn},
+                              files={"sound": ("iris.wav", wav, "audio/wav")},
+                              timeout=90)
+            except Exception:
+                pass
+        threading.Thread(target=_play, daemon=True,
+                         name="iris-local-voice").start()
+        cmds = "".join(re.findall(r"\{\{[^}]*\}\}", reply))
+        return cmds if cmds else " "
+    except Exception:
+        return None
 
 
 _OLLAMA_EXE = (Path.home() / "AppData" / "Local" / "Programs" / "Ollama"
@@ -138,23 +234,34 @@ def _ensure_ollama() -> bool:
 
 
 def _ask_local(messages: list[dict]) -> str | None:
-    """Ask the local Ollama model, in-character. None on any failure."""
+    """Ask the local Ollama model, in-character. None on any failure.
+
+    2026-07-14 rework: KEEP wire-pod's system prompt (it carries the
+    animation/command palette + conversation-mode NOTE) and LAYER the Iris
+    personality + big-brain-maintained facts file on top, instead of
+    replacing it — the first version dropped the commands entirely."""
     import requests
     _ensure_ollama()
-    convo = [{"role": "system", "content": IRIS_LOCAL_SYSTEM}]
+    wirepod_sys = ""
+    convo: list[dict] = []
     for m in messages:
         role = str(m.get("role", ""))
-        if role == "system":
-            continue  # wire-pod's own prompt — ours replaces it
         content = m.get("content", "")
         if isinstance(content, list):
             content = " ".join(str(c.get("text", "")) for c in content
                                if isinstance(c, dict))
         content = str(content).strip()
-        if content and role in ("user", "assistant"):
+        if not content:
+            continue
+        if role == "system":
+            wirepod_sys = content
+        elif role in ("user", "assistant"):
             convo.append({"role": role, "content": content})
-    if len(convo) == 1:
+    if not convo:
         return None
+    system = (wirepod_sys + "\n\n" if wirepod_sys else "") \
+        + IRIS_LOCAL_SYSTEM + _load_facts()
+    convo = [{"role": "system", "content": system}] + convo
     try:
         r = requests.post(
             f"{OLLAMA}/v1/chat/completions",
@@ -305,6 +412,16 @@ async def chat_completions(request: Request):
         reply = FALLBACK
         source = "canned"
     reply = str(reply).strip()
+    if source == "local" and LOCAL_VOICE:
+        # little-brain answers come out in IRIS'S voice: we play the audio,
+        # wire-pod gets only the animation commands (or a space) to perform.
+        swapped = await asyncio.to_thread(_iris_voice_for_local, reply)
+        if swapped is not None:
+            print(f"[vector-brain] local reply voiced as IRIS "
+                  f"(wirepod gets commands only)")
+            reply = swapped
+        else:
+            print("[vector-brain] iris-voice swap failed - stock voice")
     print(f"[vector-brain] answered by: {source}"
           f"{' (local-first window)' if local_first else ''}")
     print(f"[vector-brain] reply out: {reply[:120]!r}")
