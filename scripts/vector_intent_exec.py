@@ -54,6 +54,32 @@ def stamp_spoke(est_dur: float) -> None:
         pass
 
 
+def _boost_wav(wav: bytes, target: float = 0.91) -> bytes:
+    """Peak-normalize mono 16-bit WAV (robot speaker is small + quiet)."""
+    try:
+        import audioop
+        import io
+        import wave as _wave
+        with _wave.open(io.BytesIO(wav), "rb") as w:
+            p = w.getparams()
+            frames = w.readframes(w.getnframes())
+        if p.sampwidth != 2 or not frames:
+            return wav
+        peak = audioop.max(frames, 2)
+        if peak <= 0:
+            return wav
+        factor = min(8.0, (32767.0 * target) / float(peak))
+        if factor <= 1.05:
+            return wav
+        out = io.BytesIO()
+        with _wave.open(out, "wb") as w:
+            w.setparams(p)
+            w.writeframes(audioop.mul(frames, 2, factor))
+        return out.getvalue()
+    except Exception:
+        return wav
+
+
 def say_iris(text: str) -> bool:
     """Speak on the robot in Iris's own voice; False if any leg fails."""
     esn = serial()
@@ -67,7 +93,8 @@ def say_iris(text: str) -> bool:
         stamp_spoke(len(r.content) / 16000.0)
         r2 = requests.post(f"{WIREPOD}/api-sdk/play_sound",
                            params={"serial": esn},
-                           files={"sound": ("iris.wav", r.content, "audio/wav")},
+                           files={"sound": ("iris.wav", _boost_wav(r.content),
+                                            "audio/wav")},
                            timeout=60)
         return r2.status_code == 200
     except Exception:

@@ -292,6 +292,37 @@ def _vector_wake(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 _MOUTH_SYNTH = "http://127.0.0.1:8769/synth"   # StyleTTS2 mouth — WAV-bytes endpoint
 
 
+def _boost_wav(wav: bytes, target: float = 0.91) -> bytes:
+    """Peak-normalize a mono 16-bit WAV to ~target of full scale.
+    2026-07-14 (Zeke: 'your voice is coming out a bit quiet'): the robot's
+    master volume is already maxed — the synth WAV itself is soft, so fix
+    the source. Gain capped 8x; returns input untouched on any parse
+    trouble (no-worse-than-before)."""
+    try:
+        import audioop
+        import io
+        import wave as _wave
+        with _wave.open(io.BytesIO(wav), "rb") as w:
+            p = w.getparams()
+            frames = w.readframes(w.getnframes())
+        if p.sampwidth != 2 or not frames:
+            return wav
+        peak = audioop.max(frames, 2)
+        if peak <= 0:
+            return wav
+        factor = min(8.0, (32767.0 * target) / float(peak))
+        if factor <= 1.05:
+            return wav  # already loud enough
+        boosted = audioop.mul(frames, 2, factor)
+        out = io.BytesIO()
+        with _wave.open(out, "wb") as w:
+            w.setparams(p)
+            w.writeframes(boosted)
+        return out.getvalue()
+    except Exception:
+        return wav
+
+
 def _vector_say_iris(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """THE VOICE TRANSPLANT (2026-07-13): speak through Vector's speaker in MY
     actual voice. Chain: StyleTTS2 mouth /synth (returns mono 16-bit WAV at 8kHz,
@@ -309,7 +340,7 @@ def _vector_say_iris(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
         if r.status_code != 200 or not r.content[:4] == b"RIFF":
             return {"ok": False, "error": f"mouth /synth failed: http "
                     f"{r.status_code} {r.text[:120]!r}"}
-        wav = r.content
+        wav = _boost_wav(r.content)  # peak-normalize — robot speaker is small
     except Exception as e:
         return {"ok": False, "error": f"mouth /synth unreachable: {e!r}"[:300]}
     try:
