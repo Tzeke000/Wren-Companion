@@ -531,6 +531,74 @@ def _vector_stats(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _grab_onboard_bgr(timeout: float = 12.0, retries: int = 2):
+    """Grab one BGR frame from Vector's onboard MJPEG cam-stream (my robot eyes),
+    with retry — the stream can stall while he's idle/docked."""
+    import cv2
+    import numpy as np
+    import requests
+    esn = _serial()
+    if not esn:
+        return None
+    for _ in range(retries + 1):
+        try:
+            buf = b""
+            with requests.get(f"{_WIREPOD}/cam-stream", params={"serial": esn},
+                              stream=True, timeout=timeout) as r:
+                if r.status_code != 200:
+                    continue
+                for ch in r.iter_content(8192):
+                    buf += ch
+                    s = buf.find(b"\xff\xd8")
+                    if s != -1:
+                        e = buf.find(b"\xff\xd9", s + 2)
+                        if e != -1:
+                            return cv2.imdecode(
+                                np.frombuffer(buf[s:e + 2], np.uint8),
+                                cv2.IMREAD_COLOR)
+                    if len(buf) > 4_000_000:
+                        break
+        except Exception:
+            pass
+        finally:
+            try:
+                _sdk("stop_cam_stream")
+            except Exception:
+                pass
+    return None
+
+
+def _grab_tower_bgr():
+    """Grab one BGR frame from the room's tower/ceiling cam (:5876)."""
+    import cv2
+    import numpy as np
+    import requests
+    try:
+        r = requests.get("http://127.0.0.1:5876/api/v1/vision/latest_frame",
+                         timeout=8)
+        if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+            return cv2.imdecode(np.frombuffer(r.content, np.uint8),
+                                cv2.IMREAD_COLOR)
+    except Exception:
+        pass
+    return None
+
+
+def _vector_detect(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """OBJECT DETECTION on my body's camera feed (mediapipe EfficientDet-Lite2).
+    source='onboard' (my robot eyes, default) or 'tower' (the room ceiling cam).
+    Returns labeled objects each with where(left|center|right) + band(near|mid|far)
+    + box, so I can perceive and navigate on my own instead of guessing in the dark."""
+    from brain import vector_vision
+    source = str(params.get("source") or "onboard").strip().lower()
+    bgr = _grab_tower_bgr() if source == "tower" else _grab_onboard_bgr()
+    if bgr is None:
+        return {"ok": False, "source": source,
+                "error": f"no frame from {source} camera (stream timeout / idle?)"}
+    dets = vector_vision.detect_frame(bgr)
+    return {"ok": True, "source": source, "count": len(dets), "objects": dets}
+
+
 def _vector_heading(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """My dead-reckoning HEADING/position estimate (integrates every drive burst),
     so I know which way I face between camera fixes — the gap that stranded me
@@ -552,6 +620,7 @@ def _vector_heading(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
         return {"ok": False, "error": repr(e)[:200]}
 
 
+register_tool("vector_detect", "OBJECT DETECTION on my body's camera (mediapipe EfficientDet). source=onboard|tower. Returns labeled objects + where/band for navigation.", 1, _vector_detect)
 register_tool("vector_heading", "My dead-reckoning heading/pose estimate. action=get|set(deg,x,y)|reset. Degree scale provisional until spin-calibration.", 1, _vector_heading)
 register_tool("vector_status", "My robot body: battery/stim/connectivity snapshot.", 1, _vector_status)
 register_tool("vector_say", "Speak text through Vector's speaker (stock voice for now). params: text", 1, _vector_say)
