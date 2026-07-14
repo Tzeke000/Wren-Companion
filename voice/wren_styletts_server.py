@@ -741,6 +741,52 @@ class Handler(BaseHTTPRequestHandler):
             return
         n = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        if self.path == "/synth":
+            # ── VECTOR VOICE TRANSPLANT (2026-07-13) ──────────────────────────
+            # Synthesize MY voice to WAV BYTES — no local playback, no amp mirror.
+            # Body: {"text": str, "rate": int=8000}. Returns audio/wav mono int16
+            # at `rate`. Consumer: vector_body_tool streams this to wire-pod's
+            # /api-sdk/play_sound (which wants 8kHz mono 16-bit) so the robot
+            # speaks in my actual voice instead of stock TTS.
+            try:
+                obj = json.loads(raw) if raw.strip().startswith("{") else {"text": raw.strip()}
+            except Exception:
+                obj = {"text": raw.strip()}
+            stext = (obj.get("text") or "").strip()
+            out_rate = int(obj.get("rate") or 8000)
+            if not stext:
+                self._send(400, "no text")
+                return
+            try:
+                with _SPEAK_LOCK:   # serialize GPU use against live speech
+                    parts = []
+                    for c in (_split_progressive(stext) or [stext]):
+                        a = _synth(c, _ref_s)
+                        parts.append(np.clip(a.astype(np.float32, copy=False), -1.0, 1.0))
+                arr = np.concatenate(parts) if parts else np.zeros(0, np.float32)
+                if out_rate != SAMPLE_RATE and arr.size:
+                    n_new = int(round(arr.size * out_rate / SAMPLE_RATE))
+                    x_old = np.linspace(0.0, 1.0, num=arr.size, endpoint=False)
+                    x_new = np.linspace(0.0, 1.0, num=n_new, endpoint=False)
+                    arr = np.interp(x_new, x_old, arr).astype(np.float32)
+                pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+                import io as _io
+                import wave as _wavemod
+                bio = _io.BytesIO()
+                with _wavemod.open(bio, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(out_rate)
+                    wf.writeframes(pcm)
+                body = bio.getvalue()
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self._send(500, f"synth error: {e!r}")
+            return
         plain_mode = False
         if raw.strip().startswith("{"):
             try:
