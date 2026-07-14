@@ -97,7 +97,19 @@ by Anthropic; Zeke built your harness and this robot integration; you \
 picked the name Iris YOURSELF — nobody chose it for you.
 - If the speaker doesn't sound like Zeke, stay friendly but a little \
 reserved.
-- Use the playAnimationWI command from the list above to stay expressive."""
+- Use the playAnimationWI command from the list above to stay expressive.
+- You can also EXPRESS WITH YOUR BODY by dropping these inline tokens (keep \
+them rare and meaningful, not every line):
+  {{eyes||calm}} / {{eyes||happy}} / {{eyes||curious}} / {{eyes||alert}} — \
+shift your eye color to your mood (your eyes are blue).
+  {{look||up}} / {{look||down}} — a small head tilt. {{turn||left}} / \
+{{turn||right}} — turn in place. {{lift||up}} / {{lift||down}} — your fork. \
+The motion tokens only move the body when Zeke has enabled it; if not they \
+are quietly ignored, so they are always safe to use.
+  Write tokens EXACTLY like {{eyes||happy}} — double braces, double pipe. \
+NEVER use asterisks or *stage directions* like *waves fork*; those get spoken \
+aloud and sound broken. To act, use a token; if there is no token for it, just \
+say it in plain words."""
 
 
 def _load_facts() -> str:
@@ -122,6 +134,89 @@ def _stamp_spoke(est_dur: float) -> None:
         pass
 
 
+MOVE_OK = os.environ.get("IRIS_VECTOR_MOVE_OK", "0") != "0"
+# eye-color presets in my blue family: (hue, sat) 0..1
+_EYE_PRESETS = {
+    "calm": (0.58, 0.85), "happy": (0.50, 0.95),
+    "curious": (0.62, 0.90), "alert": (0.02, 0.95),
+    "iris": (0.58, 0.90), "blue": (0.58, 0.90),
+}
+
+
+def _wp_serial() -> str | None:
+    try:
+        data = json.loads((Path.home() / "AppData" / "Roaming" / "wire-pod"
+                           / "jdocs" / "botSdkInfo.json").read_text(
+                               encoding="utf-8"))
+        robots = data.get("robots") or []
+        for rb in robots:
+            if rb.get("activated"):
+                return str(rb.get("esn"))
+        return str(robots[0]["esn"]) if robots else None
+    except Exception:
+        return None
+
+
+def _perform_body_actions(reply: str, esn: str | None) -> None:
+    """Execute the local brain's inline body tokens via wire-pod /api-sdk.
+    EYES (pure color, no motion) always run — that's 'morph the eyes into me'
+    and it's harmless. HEAD/LIFT/TURN need IRIS_VECTOR_MOVE_OK (default off) so
+    the reflex brain can't move Vector on a surface unsupervised. Translational
+    driving is deliberately NOT in the reflex vocabulary — only big-Iris drives,
+    through vector_drive's edge-guard. playAnimationWI is passed back to
+    wire-pod, not handled here. Best-effort; never raises."""
+    import re
+    import requests
+    if not esn:
+        return
+
+    def _p(path, params, timeout=6.0):
+        try:
+            requests.post(f"{WIREPOD_SDK}/{path}",
+                          params=dict(params, serial=esn), timeout=timeout)
+        except Exception:
+            pass
+
+    for kind, arg in re.findall(r"\{\{(\w+)\s*\|\|\s*([^}]*)\}\}", reply):
+        k = kind.strip().lower()
+        a = arg.strip().lower()
+        if k == "playanimationwi":
+            continue
+        if k == "eyes":
+            hue, sat = _EYE_PRESETS.get(a, _EYE_PRESETS["iris"])
+            _p("custom_eye_color", {"hue": f"{hue:.3f}", "sat": f"{sat:.3f}"})
+            continue
+        if not MOVE_OK:
+            continue  # motion gated until Zeke enables IRIS_VECTOR_MOVE_OK
+        if k == "look":
+            _p("move_head", {"speed": 1.5 if a.startswith("u") else -1.5})
+            time.sleep(0.4)
+            _p("move_head", {"speed": 0})
+        elif k == "lift":
+            _p("move_lift", {"speed": 1.5 if a.startswith("u") else -1.5})
+            time.sleep(0.4)
+            _p("move_lift", {"speed": 0})
+        elif k == "turn":
+            lw, rw = (-90, 90) if a.startswith("l") else (90, -90)
+            _p("move_wheels", {"lw": lw, "rw": rw})
+            time.sleep(0.4)
+            _p("move_wheels", {"lw": 0, "rw": 0})
+
+
+def _normalize_tokens(text: str) -> str:
+    """Repair the two malformed token shapes llama3.2:3b tends to emit, so the
+    body executor still catches its intent: *eyes||happy* (asterisk-wrapped) and
+    {{eyes happy}} (space instead of ||) both become {{eyes||happy}}. Only the
+    known action words are normalized, so ordinary *emphasis* text is untouched."""
+    import re
+    kinds = r"(eyes|look|turn|lift|nudge|playAnimationWI)"
+    text = re.sub(r"\*\s*" + kinds + r"\s*\|\|?\s*([\w-]+)\s*\*",
+                  r"{{\1||\2}}", text, flags=re.IGNORECASE)
+    text = re.sub(r"\{\{\s*" + kinds + r"\s+([\w-]+)\s*\}\}",
+                  r"{{\1||\2}}", text, flags=re.IGNORECASE)
+    return text
+
+
 def _iris_voice_for_local(reply: str) -> str | None:
     """MY VOICE ON LITTLE-BRAIN ANSWERS (2026-07-14, Zeke: make the ollama
     brain smarter / fix what you need): synth the words with StyleTTS2 and
@@ -132,7 +227,9 @@ def _iris_voice_for_local(reply: str) -> str | None:
     import re
     import threading
     import requests
+    reply = _normalize_tokens(reply)  # repair malformed 3b token shapes first
     words = re.sub(r"\{\{[^}]*\}\}", " ", reply)
+    words = re.sub(r"\*[^*]{0,60}\*", " ", words)  # drop *stage directions*
     words = " ".join(words.split())
     if not words:
         return None
@@ -186,7 +283,12 @@ def _iris_voice_for_local(reply: str) -> str | None:
                 pass
         threading.Thread(target=_play, daemon=True,
                          name="iris-local-voice").start()
-        cmds = "".join(re.findall(r"\{\{[^}]*\}\}", reply))
+        # execute body-action tokens ourselves (eyes always; motion if MOVE_OK)
+        threading.Thread(target=_perform_body_actions, args=(reply, esn),
+                         daemon=True, name="iris-local-body").start()
+        # hand wire-pod ONLY the animation commands it understands
+        cmds = "".join(re.findall(r"\{\{playAnimationWI\s*\|\|[^}]*\}\}", reply,
+                                  flags=re.IGNORECASE))
         return cmds if cmds else " "
     except Exception:
         return None
