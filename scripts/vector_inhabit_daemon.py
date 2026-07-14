@@ -166,19 +166,37 @@ def _ears_loop(robot, alive) -> None:
         last_hot = 0.0
         n_chunks = 0
         peak_rms = 0
+        tone_check: list[int] = []
         for resp in inner:
             if not alive["ok"]:
                 return
             chunk = bytes(resp.signal_power)
             n_chunks += 1
-            if n_chunks == 1:
-                log(f"ears: first chunk — {len(chunk)} bytes, "
-                    f"fields: ts={resp.robot_time_stamp} "
-                    f"noise_floor={resp.noise_floor_power}")
             if not chunk:
                 continue
             now = time.time()
             rms = audioop.rms(chunk, 2)
+            # FIRMWARE PLACEHOLDER DETECT (2026-07-14): prod Vector firmware
+            # never shipped the SDK mic feed — AudioFeed streams a constant
+            # ~2kHz sine (peak 1000, rms 707). If the first 10 chunks are a
+            # dead-flat tone, these ears are decorative: say so and stop
+            # burning whisper cycles. (If a future firmware unlocks the
+            # feed, real audio varies and this never trips.)
+            if n_chunks <= 10:
+                tone_check.append(rms)
+                if n_chunks == 10:
+                    if max(tone_check) - min(tone_check) < 5 and tone_check[0] > 100:
+                        log(f"ears: FIRMWARE PLACEHOLDER detected (constant "
+                            f"rms {tone_check[0]}) — SDK mic feed not "
+                            f"enabled on this firmware. Ears thread exiting; "
+                            f"wake-word path (wire-pod STT) is the real ear.")
+                        try:
+                            stream.cancel()
+                        except Exception:
+                            pass
+                        return
+                    log(f"ears: LIVE AUDIO confirmed (rms spread "
+                        f"{max(tone_check) - min(tone_check)}) — listening.")
             peak_rms = max(peak_rms, rms)
             if n_chunks % 300 == 0:
                 log(f"ears: {n_chunks} chunks, peak rms last window "
@@ -209,6 +227,11 @@ def _ears_loop(robot, alive) -> None:
                             w.setframerate(EARS_RATE)
                             w.writeframes(utt)
                         text = _transcribe(str(EARS_WAV))
+                        if not text:
+                            # silent drops forbidden in sense channels
+                            log(f"ears: {dur:.1f}s captured but transcribed "
+                                f"EMPTY (noise/phantom) — wav kept at "
+                                f"{EARS_WAV.name}")
                         if text:
                             stamp = time.strftime("%H:%M:%S")
                             log(f"EARS heard: {text!r}")
@@ -251,6 +274,59 @@ def nudge(sense: str, text: str) -> None:
         log(f"NUDGE {sense}: {text}")
     except Exception as e:
         log(f"nudge submit failed: {e!r}")
+
+
+_TRANSCRIPT_RE = None
+
+
+def _transcript_tap_loop() -> None:
+    """THE REAL EAR (2026-07-14): prod firmware never enabled the SDK mic
+    feed (placeholder tone), but every 'Hey Vector' utterance is transcribed
+    by wire-pod's vosk and logged. Tail /api/get_logs and nudge Iris with
+    every transcript — matched intents included (the 23:56 scar: Zeke asked
+    'are you seated in the body' and only the canned line heard him).
+    Starts at end-of-log (no history replay — the letter-ghost lesson)."""
+    import re
+    import requests
+    url = "http://127.0.0.1:8080/api/get_logs"
+    pat = re.compile(
+        r"Intent matched: (?P<intent>[\w-]+), transcribed text: "
+        r"'(?P<text>[^']*)'")
+    offset = None
+    seen_recent: list[str] = []
+    while True:
+        try:
+            content = requests.get(url, timeout=8).text
+            if offset is None or len(content) < (offset or 0):
+                offset = len(content)   # first pass / log rotated: skip history
+                time.sleep(2.0)
+                continue
+            new = content[offset:]
+            offset = len(content)
+            for m in pat.finditer(new):
+                text = m.group("text").strip()
+                intent = m.group("intent")
+                if not text or text in seen_recent:
+                    continue
+                seen_recent = (seen_recent + [text])[-8:]
+                stamp = time.strftime("%H:%M:%S")
+                log(f"HEARD (wake-word): {text!r} -> {intent}")
+                try:
+                    iris_chat.submit(
+                        f"[VECTOR HEARD @ {stamp} — wake-word speech "
+                        f"through my robot's mic, via wire-pod STT; not "
+                        f"Zeke typing] Someone said to Vector: \"{text}\" "
+                        f"(matched {intent}). If a vector_voice LLM request "
+                        f"arrives for these same words, answer THAT and "
+                        f"just briefly chat_reply this one. Otherwise: "
+                        f"reply through vector_say_iris if it warrants my "
+                        f"voice, else chat_reply a short note."
+                    )
+                except Exception as e:
+                    log(f"transcript nudge failed: {e!r}")
+        except Exception:
+            pass  # wire-pod down/restarting — just keep tailing
+        time.sleep(2.0)
 
 
 def run_once() -> None:
@@ -356,6 +432,10 @@ def main() -> None:
         log("IRIS_VECTOR_NERVES=0 — staying dark.")
         return
     log("vector inhabit daemon starting (v1 senses: petting/picked_up/cliff/charger)")
+    import threading as _threading
+    _threading.Thread(target=_transcript_tap_loop, daemon=True,
+                      name="vector-transcript-tap").start()
+    log("transcript tap online — every wake-word utterance reaches Iris")
     while True:
         try:
             run_once()
