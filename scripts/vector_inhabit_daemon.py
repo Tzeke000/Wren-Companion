@@ -108,6 +108,44 @@ def _write_nerves(d: dict) -> None:
         pass
 
 
+def _proprioception(robot) -> dict:
+    """Vector's NATIVE body sensors (Zeke 2026-07-14: use the gyro/proximity/etc
+    the body actually has). The REAL heading from the robot's own pose (gyro +
+    wheel encoders) beats my dead-reckoning odometry; front proximity (laser ToF)
+    = obstacle distance for the closed loop. Each best-effort — a missing/unsupported
+    reading is just omitted, never raises."""
+    out: dict = {}
+    # REAL heading — the robot's own orientation estimate (deg, gyro-fused)
+    try:
+        out["heading_deg"] = round(float(robot.pose.rotation.angle_z.degrees) % 360.0, 1)
+    except Exception:
+        pass
+    # front proximity (laser ToF): distance to what's in front + is the path clear
+    try:
+        p = robot.proximity.last_sensor_reading
+        if p is not None:
+            try:
+                out["prox_mm"] = int(p.distance.distance_mm)
+            except Exception:
+                out["prox_mm"] = int(getattr(p, "distance_mm", -1))
+            out["prox_clear"] = bool(getattr(p, "unobstructed", False))
+            out["prox_found"] = bool(getattr(p, "found_object", False))
+    except Exception:
+        pass
+    # gyro (angular velocity rad/s) + accel (mm/s^2) — motion / balance / falling
+    try:
+        g = robot.gyro
+        out["gyro"] = [round(float(g.x), 3), round(float(g.y), 3), round(float(g.z), 3)]
+    except Exception:
+        pass
+    try:
+        a = robot.accel
+        out["accel"] = [round(float(a.x), 1), round(float(a.y), 1), round(float(a.z), 1)]
+    except Exception:
+        pass
+    return out
+
+
 def _speaking_window() -> tuple[float, float]:
     """(start_ts, end_ts) of the robot's most recent own-speaker playback."""
     try:
@@ -428,13 +466,15 @@ def _poll_loop(robot) -> None:
 
             # nerves export — reflexes for the stateless body tools
             # (vector_drive reads cliff to refuse/abort — the edge-guard)
-            _write_nerves({
+            nerves = {
                 "cliff": bool(getattr(st, "is_cliff_detected", False)),
                 "picked_up": carried,
                 "on_charger": charging,
                 "touched": touched,
                 "falling": bool(getattr(st, "is_falling", False)),
-            })
+            }
+            nerves.update(_proprioception(robot))  # real heading + proximity + gyro/accel
+            _write_nerves(nerves)
 
 
 def _battery_watch_loop() -> None:
