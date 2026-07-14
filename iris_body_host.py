@@ -1607,6 +1607,30 @@ async def main():
                 # inputs are already waiting behind this one.
                 if source == "voice" and enq_ts is not None:
                     _age = time.time() - enq_ts
+                    # ── Stale-voice FLUSH lever (2026-07-13, echo-storm follow-up) ──
+                    # Before this, "restart IS the flush": a backlog of stale voice
+                    # captures (16 deep after the echo storm) could only drain by
+                    # waking me once per ghost. scratch/voice_control.json
+                    # {"flush_stale_voice_s": N} → a voice item older than N seconds
+                    # is DROPPED with a console log instead of becoming a turn. The
+                    # raw text is already durable in scratch/voice_in.txt, so the
+                    # drop loses nothing (no silent drops in a sense channel — the
+                    # console line + transcript file are the record). 0/absent = off
+                    # (no-worse-than-before). Voice items ONLY — orb/discord/letters
+                    # always wake me.
+                    try:
+                        with open(r"D:\Wren-Companion\scratch\voice_control.json",
+                                  encoding="utf-8") as _vcf:
+                            _flush_s = float((json.load(_vcf) or {}).get(
+                                "flush_stale_voice_s", 0) or 0)
+                    except Exception:
+                        _flush_s = 0.0
+                    if _flush_s > 0 and _age >= _flush_s:
+                        print("\n[host] stale voice input DROPPED (age "
+                              + str(int(_age)) + "s >= flush_stale_voice_s "
+                              + str(int(_flush_s)) + "s): " + repr(text[:100]),
+                              flush=True)
+                        continue
                     _backlog = queue.qsize()
                     _stale_bits = []
                     if _age >= 30.0:
