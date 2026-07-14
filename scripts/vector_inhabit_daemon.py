@@ -15,8 +15,19 @@ V1 senses (poll-based, 5Hz):
   - picked up / falling   (robot.status)
   - cliff detected        (robot.status — the desk-dive nerve)
   - on/off charger        (robot.status)
-Owed next: wake-word event, face-seen, and the AUDIO FEED -> STT seam
-(hear through him while inhabited).
+
+V2 (2026-07-14, "make his mouth and ears yours"):
+  - VECTOR EARS: gRPC AudioFeed (11025Hz mono int16 in signal_power) ->
+    energy-gated utterances -> wav -> voice daemon cmd_transcribe_wav
+    (warm whisper, zero new VRAM) -> iris_chat nudge. Works while I hold
+    behavior control — closes the inhabit=deaf gap. Self-voice guard:
+    skips utterances overlapping state/vector/last_spoke.json (written by
+    vector_say/vector_say_iris) — the echo scar, robot edition.
+    Kill switch: IRIS_VECTOR_EARS=0. RMS gate: VECTOR_EARS_RMS (dflt 250).
+  - NERVES EXPORT: state/vector/nerves.json (cliff/picked_up/charger/touch
+    @5Hz) so stateless body tools get reflexes — vector_drive reads it and
+    refuses/aborts on cliff (the edge-guard Zeke asked for).
+Owed next: wake-word event, face-seen.
 
 Per-sense cooldowns keep this from spamming Iris — a pet is one event,
 not sixty. Reconnect loop survives robot naps/wifi blips.
@@ -66,6 +77,161 @@ def log(msg: str) -> None:
 
 _last_fire: dict[str, float] = {}
 
+NERVES_PATH = REPO / "state" / "vector" / "nerves.json"
+LAST_SPOKE_PATH = REPO / "state" / "vector" / "last_spoke.json"
+EARS_WAV = REPO / "state" / "vector" / "ears_utterance.wav"
+EARS_RATE = 11025
+EARS_RMS = float(os.environ.get("VECTOR_EARS_RMS", "250"))
+EARS_END_SILENCE_S = 0.9
+EARS_MIN_S = 0.35
+EARS_MAX_S = 12.0
+
+
+def _write_nerves(d: dict) -> None:
+    try:
+        import json as _json
+        d["ts"] = time.time()
+        tmp = NERVES_PATH.with_suffix(".tmp")
+        tmp.write_text(_json.dumps(d), encoding="utf-8")
+        tmp.replace(NERVES_PATH)
+    except Exception:
+        pass
+
+
+def _speaking_window() -> tuple[float, float]:
+    """(start_ts, end_ts) of the robot's most recent own-speaker playback."""
+    try:
+        import json as _json
+        d = _json.loads(LAST_SPOKE_PATH.read_text(encoding="utf-8"))
+        t0 = float(d.get("ts", 0.0))
+        return t0, t0 + float(d.get("est_dur", 3.0)) + 1.5
+    except Exception:
+        return 0.0, 0.0
+
+
+def _transcribe(path: str) -> str:
+    """Ask the voice daemon's warm whisper (cmd_transcribe_wav, port 8770)."""
+    import json as _json
+    import socket as _socket
+    try:
+        s = _socket.create_connection(("127.0.0.1", 8770), timeout=60)
+        s.sendall((_json.dumps({"cmd": "transcribe_wav",
+                                "args": {"path": path}}) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            d = s.recv(65536)
+            if not d:
+                break
+            buf += d
+        s.close()
+        out = _json.loads(buf)
+        return str(((out.get("result") or {}).get("text")) or "").strip()
+    except Exception as e:
+        log(f"ears transcribe failed: {e!r}")
+        return ""
+
+
+def _ears_loop(robot, alive) -> None:
+    """VECTOR EARS: consume the gRPC AudioFeed, gate utterances by RMS,
+    transcribe on the voice daemon's warm whisper, nudge Iris."""
+    import wave as _wave
+    import audioop
+    from anki_vector.messaging import protocol
+    try:
+        stream = robot.conn.grpc_interface.AudioFeed(
+            protocol.AudioFeedRequest())
+        # aiogrpc wraps the raw sync grpc stream as an ASYNC iterator; we're a
+        # plain thread, so consume the raw inner iterator directly (blocking
+        # here is fine — that's what this thread is for). Async fallback if
+        # the private attr ever moves.
+        inner = getattr(stream, "_iterator", None)
+        if inner is None:
+            import asyncio as _aio
+            _loop = getattr(robot.conn, "loop", None)
+
+            def _gen():
+                while True:
+                    fut = _aio.run_coroutine_threadsafe(
+                        stream.__anext__(), _loop)
+                    try:
+                        yield fut.result()
+                    except StopAsyncIteration:
+                        return
+            inner = _gen()
+        log(f"EARS online — audio feed streaming (rms gate {EARS_RMS:.0f})")
+        buf = b""
+        collecting = False
+        utt = b""
+        utt_start = 0.0
+        last_hot = 0.0
+        n_chunks = 0
+        peak_rms = 0
+        for resp in inner:
+            if not alive["ok"]:
+                return
+            chunk = bytes(resp.signal_power)
+            n_chunks += 1
+            if n_chunks == 1:
+                log(f"ears: first chunk — {len(chunk)} bytes, "
+                    f"fields: ts={resp.robot_time_stamp} "
+                    f"noise_floor={resp.noise_floor_power}")
+            if not chunk:
+                continue
+            now = time.time()
+            rms = audioop.rms(chunk, 2)
+            peak_rms = max(peak_rms, rms)
+            if n_chunks % 300 == 0:
+                log(f"ears: {n_chunks} chunks, peak rms last window "
+                    f"{peak_rms}")
+                peak_rms = 0
+            hot = rms >= EARS_RMS
+            if hot:
+                last_hot = now
+            if not collecting and hot:
+                collecting = True
+                utt = buf + chunk       # keep a little pre-roll
+                utt_start = now
+                continue
+            if collecting:
+                utt += chunk
+                too_long = (now - utt_start) > EARS_MAX_S
+                gone_cold = (now - last_hot) > EARS_END_SILENCE_S
+                if too_long or gone_cold:
+                    collecting = False
+                    dur = len(utt) / 2.0 / EARS_RATE
+                    sp0, sp1 = _speaking_window()
+                    if sp0 <= utt_start <= sp1:
+                        log(f"ears: dropped {dur:.1f}s (own speaker playing)")
+                    elif dur >= EARS_MIN_S + EARS_END_SILENCE_S * 0.5:
+                        with _wave.open(str(EARS_WAV), "wb") as w:
+                            w.setnchannels(1)
+                            w.setsampwidth(2)
+                            w.setframerate(EARS_RATE)
+                            w.writeframes(utt)
+                        text = _transcribe(str(EARS_WAV))
+                        if text:
+                            stamp = time.strftime("%H:%M:%S")
+                            log(f"EARS heard: {text!r}")
+                            try:
+                                iris_chat.submit(
+                                    f"[VECTOR EARS @ {stamp} — heard through "
+                                    f"my ROBOT BODY's microphone, not Zeke "
+                                    f"typing] Someone near Vector said: "
+                                    f"\"{text}\" If this stamp is old (>60s), "
+                                    f"it's a replayed log. If it's live and "
+                                    f"warrants a reply, answer through "
+                                    f"vector_say_iris (my voice from the "
+                                    f"robot). Otherwise chat_reply a short "
+                                    f"note."
+                                )
+                            except Exception as e:
+                                log(f"ears nudge failed: {e!r}")
+                    utt = b""
+            # rolling pre-roll (~0.3s) so utterance onsets aren't clipped
+            buf = (buf + chunk)[-int(EARS_RATE * 0.3) * 2:]
+    except Exception as e:
+        log(f"ears stream ended: {e!r}")
+
 
 def nudge(sense: str, text: str) -> None:
     now = time.time()
@@ -93,14 +259,27 @@ def run_once() -> None:
     with anki_vector.Robot(SERIAL, behavior_control_level=None,
                            cache_animation_lists=False) as robot:
         log("connected — nerves online (observe mode, his brain still runs)")
-        was_touched = False
-        touch_start = 0.0
-        pet_announced = False
-        flat_logged = False
+        alive = {"ok": True}
+        if os.environ.get("IRIS_VECTOR_EARS", "1") != "0":
+            import threading as _threading
+            _threading.Thread(target=_ears_loop, args=(robot, alive),
+                              daemon=True, name="vector-ears").start()
+        try:
+            _poll_loop(robot)
+        finally:
+            alive["ok"] = False
+
+
+def _poll_loop(robot) -> None:
+        # (indent kept at run_once-body level for a minimal diff vs v1)
         # rolling ~2s of raw capacitance readings — REAL petting (strokes) makes
         # this value swing; the stuck-true dock read sits flat (2026-07-13: sensor
         # reported is_being_touched=True for 2.5h while nobody touched him).
         from collections import deque
+        was_touched = False
+        touch_start = 0.0
+        pet_announced = False
+        flat_logged = False
         raw_window: "deque[float]" = deque(maxlen=max(4, int(2.0 / POLL_S)))
         PET_MIN_SPREAD = float(os.environ.get("VECTOR_PET_MIN_SPREAD", "30"))
         was_carried = False
@@ -160,6 +339,16 @@ def run_once() -> None:
                                   if charging else
                                   "I just LEFT my charger — roaming."))
             was_charging = charging
+
+            # nerves export — reflexes for the stateless body tools
+            # (vector_drive reads cliff to refuse/abort — the edge-guard)
+            _write_nerves({
+                "cliff": bool(getattr(st, "is_cliff_detected", False)),
+                "picked_up": carried,
+                "on_charger": charging,
+                "touched": touched,
+                "falling": bool(getattr(st, "is_falling", False)),
+            })
 
 
 def main() -> None:
