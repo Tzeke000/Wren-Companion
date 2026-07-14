@@ -1151,6 +1151,36 @@ def _voice_id_speaker_changed(name: str) -> None:
         print(f"[voice-id] pace-mirror failed (non-fatal): {e!r}", file=sys.stderr)
 
 
+def _self_drop_bar() -> float:
+    """Hot-read the self-voice drop bar (voice_control.json self_voice_drop_bar)."""
+    try:
+        from wren_voice_status import read_control
+        return float(read_control().get("self_voice_drop_bar", 0.5))
+    except Exception:
+        return 0.5
+
+
+def _self_voice_score(audio, bar: float) -> "float | None":
+    """Return my own-voice score if this capture identifies as ME at/above bar, else
+    None. The DROP gates (listen + barge paths, 2026-07-13) use this: voice-id is
+    TAG-not-DROP for every other speaker, but MY OWN voice (headset-earcup bleed of
+    my TTS into the boom mic) must never become a conversation turn. Zeke can't
+    collide — best-profile-wins and he scores 0.94+ on his own print. Any failure
+    returns None so an ID hiccup never eats a real utterance."""
+    try:
+        cfg = _voice_id_cfg()
+        if (cfg is None or not _HAVE_VOICEID or not _voiceid.warm_async()
+                or getattr(audio, "size", 0) < int(cfg["min_seconds"] * SAMPLE_RATE)):
+            return None
+        r = _voiceid.identify(audio)
+        if (r.get("n_profiles") and r.get("best") == "iris"
+                and float(r.get("score", 0.0)) >= bar):
+            return float(r.get("score", 0.0))
+    except Exception:
+        pass
+    return None
+
+
 def _voice_id_line(audio) -> str:
     """Best-effort speaker tag for a captured utterance. '' = no tag.
 
@@ -1493,6 +1523,17 @@ def cmd_listen(ctx, args: dict) -> str:
     else:
         suffix = " ".join(s for s in (pace, tone) if s)
         result = f"{text}\n{suffix}" if suffix else text
+    # ── Step 9a2: self-voice DROP (2026-07-13, echo-bleed fix) ──────────────────
+    # Same gate as the barge path: a capture that identifies as MY OWN voice is
+    # bleed of my TTS, not conversation. The host skips '[voice_listen]' markers,
+    # so this return cleanly becomes a non-turn. Drop-but-log; raw text is already
+    # in voice_in.txt via append_transcript upstream.
+    _svs = _self_voice_score(audio, _self_drop_bar())
+    if _svs is not None:
+        print(f"[voice_listen] SELF-VOICE dropped (iris {_svs:.2f}): "
+              f"{text[:80]!r}", flush=True)
+        _save_utt_wav(audio, "listen")
+        return f"[voice_listen] self_voice_dropped (iris {_svs:.2f})"
     # ── Step 9b: voice-id tag + rolling utterance wav (2026-07-13) ─────────────
     vid = _voice_id_line(audio)
     if vid:
@@ -1599,6 +1640,13 @@ def cmd_speak_interruptible(ctx, args: dict) -> str:
         wl.append_transcript(heard)
     except Exception:
         pass
+    # Self-voice DROP (2026-07-13): same gate as listen + continuous-barge paths.
+    _svs = _self_voice_score(audio, _self_drop_bar())
+    if _svs is not None:
+        print(f"[voice_speak_interruptible] SELF-VOICE dropped (iris {_svs:.2f}): "
+              f"{heard[:80]!r}", flush=True)
+        _save_utt_wav(audio, "barge")
+        return f"[voice_speak_interruptible] self_voice_dropped (iris {_svs:.2f})"
     vid = _voice_id_line(audio)
     _save_utt_wav(audio, "barge")
     return f"[barge-in] {vid + ' ' if vid else ''}{heard}"
@@ -1791,20 +1839,12 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
     # still gets through. Drop-but-LOG (ears-gate-2 lesson: no silent drops in a sense
     # channel) — the text is already in voice_in.txt via append_transcript, the daemon
     # log names the drop, and the host gets an explicit marker, not silence.
-    try:
-        _cfg = _voice_id_cfg()
-        if (_cfg is not None and _HAVE_VOICEID and _voiceid.warm_async()
-                and getattr(audio, "size", 0) >= int(_cfg["min_seconds"] * SAMPLE_RATE)):
-            _r = _voiceid.identify(audio)
-            if (_r.get("n_profiles") and _r.get("best") == "iris"
-                    and float(_r.get("score", 0.0)) >= self_drop_bar):
-                print(f"[bargein_watch] SELF-VOICE dropped (iris "
-                      f"{float(_r['score']):.2f}, bar {self_drop_bar}): "
-                      f"{heard[:80]!r}", flush=True)
-                return (f"[bargein_watch] self_voice_dropped (iris "
-                        f"{float(_r['score']):.2f})")
-    except Exception:
-        pass   # ID failure must never eat a real interruption — fall through to turn
+    # (Shared helper since same evening: listen + speak_interruptible gate too.)
+    _svs = _self_voice_score(audio, self_drop_bar)
+    if _svs is not None:
+        print(f"[bargein_watch] SELF-VOICE dropped (iris {_svs:.2f}, "
+              f"bar {self_drop_bar}): {heard[:80]!r}", flush=True)
+        return f"[bargein_watch] self_voice_dropped (iris {_svs:.2f})"
     # Playback-cursor marker (2026-07-08): tell the host (and me) exactly where the
     # cut landed. Host only checks startswith('[barge-in]'), so extra info is safe.
     info = getattr(ctx, "barge_cut", None) or {}
