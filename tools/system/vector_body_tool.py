@@ -168,10 +168,19 @@ def _vector_drive(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             if translating and (n.get("cliff") or n.get("falling")):
                 aborted = "cliff/fall reflex — wheels stopped mid-burst"
                 break
-        out = {"ok": True, "lw": lw, "rw": rw,
-               "seconds": round(time.time() - t0, 2)}
+        elapsed = time.time() - t0
+        out = {"ok": True, "lw": lw, "rw": rw, "seconds": round(elapsed, 2)}
         if aborted:
             out["aborted"] = aborted
+        # dead-reckoning: feed the ACTUAL burst into the heading estimate so I
+        # always know which way I face between camera fixes (the strand-2026-07-14
+        # gap). Best-effort; never breaks a drive.
+        try:
+            from brain import vector_odometry
+            od = vector_odometry.apply_drive(lw, rw, elapsed)
+            out["heading_deg"] = round(od.get("heading_deg", 0.0), 1)
+        except Exception:
+            pass
         return out
     except Exception as e:
         return {"ok": False, "error": repr(e)[:300]}
@@ -522,6 +531,28 @@ def _vector_stats(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _vector_heading(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """My dead-reckoning HEADING/position estimate (integrates every drive burst),
+    so I know which way I face between camera fixes — the gap that stranded me
+    2026-07-14. action=get (default) | set (snap to a known heading: deg,x,y from a
+    camera fix) | reset (zero it). NOTE: the degree SCALE is provisional until a live
+    spin-calibration; direction + turn/bearing logic is already sound."""
+    from brain import vector_odometry as odo
+    action = str(params.get("action") or "get").strip().lower()
+    try:
+        if action == "set":
+            s = odo.set_heading(params.get("deg", 0) or 0,
+                                params.get("x"), params.get("y"))
+        elif action == "reset":
+            s = odo.reset(params.get("deg", 0) or 0)
+        else:
+            s = odo.get()
+        return {"ok": True, **s}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)[:200]}
+
+
+register_tool("vector_heading", "My dead-reckoning heading/pose estimate. action=get|set(deg,x,y)|reset. Degree scale provisional until spin-calibration.", 1, _vector_heading)
 register_tool("vector_status", "My robot body: battery/stim/connectivity snapshot.", 1, _vector_status)
 register_tool("vector_say", "Speak text through Vector's speaker (stock voice for now). params: text", 1, _vector_say)
 register_tool("vector_control", "Assume/release Vector behavior control. params: mode='assume'|'release'", 1, _vector_control)
