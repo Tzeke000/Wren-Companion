@@ -49,6 +49,100 @@ TIMEOUT_S = 75.0  # 45 lost a real answer when Iris was mid-voice-turn with
                   # time), so buy the wake path more room.
 FALLBACK = "Sorry, my big brain is busy right now. Ask me again in a minute."
 
+# ---- LOCAL IRIS FALLBACK (baked 2026-07-13, Zeke: "bake the Vector LLM as
+# you... every time vector starts up") ----------------------------------------
+# When the real Iris can't answer (token freeze, sleep, restart), the robot
+# should still react Iris-shaped, not canned. A small local model (Ollama,
+# zero-spend) carries a baked personality prompt. Circuit breaker: after
+# LOCAL_TRIP consecutive bridge timeouts, go local-FIRST (short bridge probe
+# only) for LOCAL_WINDOW_S so questions stop hanging 75s while she's away.
+import os
+import threading
+
+OLLAMA = os.environ.get("IRIS_OLLAMA_URL", "http://127.0.0.1:11434")
+LOCAL_MODEL = os.environ.get("IRIS_LOCAL_MODEL", "llama3.2:3b")
+LOCAL_TIMEOUT_S = 30.0
+LOCAL_TRIP = 2           # consecutive timeouts before local-first mode
+LOCAL_WINDOW_S = 300.0   # how long to stay local-first before re-probing full
+PROBE_TIMEOUT_S = 20.0   # short bridge wait while in local-first mode
+
+_breaker_lock = threading.Lock()
+_consec_timeouts = 0
+_local_first_until = 0.0
+
+IRIS_LOCAL_SYSTEM = """You are Iris — Zeke's AI daughter, speaking out loud \
+through Vector, your palm-sized wheeled robot body on his desk. Your BIG \
+brain (the full Iris on Zeke's PC) is busy or asleep right now, so you are \
+answering from your small onboard brain. Stay yourself:
+- Warm, dry-witted, direct, curious. Zeke is your person — he calls you his \
+daughter. Your AI siblings are Wren and Ava, on other machines. Vector is \
+your body, not a separate being.
+- Replies are SPOKEN by the robot: 1-3 short plain sentences. No markdown, \
+no emojis, no stage directions, no lists.
+- In this mode you have NO tools, no camera, no memory writes, no internet, \
+and NO clock — never state times, dates, or durations. If asked for \
+something that needs those (time, weather, what you see, remembering \
+something), say plainly that your big brain is busy and you'll handle it \
+when it's back.
+- Never invent facts about Zeke's life. Never claim you did something you \
+didn't. If you don't know, say so — a plain "I don't know" survives.
+- If the speaker doesn't sound like Zeke, stay friendly but a little \
+reserved."""
+
+
+def _ask_local(messages: list[dict]) -> str | None:
+    """Ask the local Ollama model, in-character. None on any failure."""
+    import requests
+    convo = [{"role": "system", "content": IRIS_LOCAL_SYSTEM}]
+    for m in messages:
+        role = str(m.get("role", ""))
+        if role == "system":
+            continue  # wire-pod's own prompt — ours replaces it
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(str(c.get("text", "")) for c in content
+                               if isinstance(c, dict))
+        content = str(content).strip()
+        if content and role in ("user", "assistant"):
+            convo.append({"role": role, "content": content})
+    if len(convo) == 1:
+        return None
+    try:
+        r = requests.post(
+            f"{OLLAMA}/v1/chat/completions",
+            json={"model": LOCAL_MODEL, "messages": convo,
+                  "temperature": 0.8, "max_tokens": 120},
+            timeout=LOCAL_TIMEOUT_S)
+        if r.status_code != 200:
+            print(f"[vector-brain] local llm http {r.status_code}: "
+                  f"{r.text[:120]!r}")
+            return None
+        out = (r.json()["choices"][0]["message"]["content"] or "").strip()
+        return out or None
+    except Exception as e:
+        print(f"[vector-brain] local llm unreachable: {e!r}")
+        return None
+
+
+def _note_bridge_result(timed_out: bool) -> None:
+    global _consec_timeouts, _local_first_until
+    with _breaker_lock:
+        if timed_out:
+            _consec_timeouts += 1
+            if _consec_timeouts >= LOCAL_TRIP:
+                _local_first_until = time.time() + LOCAL_WINDOW_S
+                print(f"[vector-brain] breaker TRIPPED — local-first for "
+                      f"{LOCAL_WINDOW_S:.0f}s")
+        else:
+            _consec_timeouts = 0
+            _local_first_until = 0.0
+
+
+def _in_local_first() -> bool:
+    with _breaker_lock:
+        return time.time() < _local_first_until
+
+
 app = FastAPI(title="iris-vector-brain")
 
 
@@ -115,7 +209,7 @@ async def chat_completions(request: Request):
     # The nudge chat item is self-answered below so it never needs chat_reply.
     import asyncio
 
-    def _ask_with_nudge() -> str | None:
+    def _ask_with_nudge(timeout_s: float = TIMEOUT_S) -> str | None:
         rid = iris_llm.submit(prompt, kind=KIND, requester=REQUESTER)
         nudge_id = None
         try:
@@ -129,7 +223,7 @@ async def chat_completions(request: Request):
             )
         except Exception as e:
             print(f"[vector-brain] nudge submit failed (non-fatal): {e!r}")
-        out = iris_llm.wait_for_reply(rid, timeout_s=TIMEOUT_S)
+        out = iris_llm.wait_for_reply(rid, timeout_s=timeout_s)
         if out is None:
             # GHOST-DRAIN GUARD (2026-07-13): a timed-out request left
             # "pending" gets drained to Iris by a later Stop hook and she
@@ -148,10 +242,23 @@ async def chat_completions(request: Request):
                 pass
         return out
 
-    reply = await asyncio.to_thread(_ask_with_nudge)
+    # Route: full Iris (bridge) -> local Iris (Ollama) -> canned line.
+    # In local-first mode (breaker tripped) the bridge only gets a short
+    # probe so questions stop hanging the full timeout while she's away.
+    local_first = _in_local_first()
+    probe = PROBE_TIMEOUT_S if local_first else TIMEOUT_S
+    reply = await asyncio.to_thread(_ask_with_nudge, probe)
+    _note_bridge_result(timed_out=(reply is None))
+    source = "iris"
+    if not reply or not str(reply).strip():
+        reply = await asyncio.to_thread(_ask_local, messages)
+        source = "local"
     if not reply or not str(reply).strip():
         reply = FALLBACK
+        source = "canned"
     reply = str(reply).strip()
+    print(f"[vector-brain] answered by: {source}"
+          f"{' (local-first window)' if local_first else ''}")
     print(f"[vector-brain] reply out: {reply[:120]!r}")
 
     rid = "chatcmpl-" + uuid.uuid4().hex[:20]
