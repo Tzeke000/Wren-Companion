@@ -39,6 +39,14 @@ _CONTENT_RGB = {
 }
 _DEFAULT_RGB = (60, 60, 66)
 
+# NavNodeContentType is stored as an INT on the node (0..9) — map to names.
+_INT_TO_NAME = {
+    0: "Unknown", 1: "ClearOfObstacle", 2: "ClearOfCliff", 3: "ObstacleCube",
+    4: "ObstacleProximity", 5: "ObstacleProximityExplored",
+    6: "ObstacleUnrecognized", 7: "Cliff", 8: "InterestingEdge",
+    9: "NonInterestingEdge",
+}
+
 
 def _leaves(node, out: list) -> None:
     """Recurse the quad-tree into leaf cells: {cx, cy, size, content}."""
@@ -51,7 +59,14 @@ def _leaves(node, out: list) -> None:
         return
     try:
         content = getattr(node, "content", None)
-        name = getattr(content, "name", str(content))
+        if hasattr(content, "value"):
+            content = content.value
+        if hasattr(content, "name"):
+            name = content.name
+        elif content is None:
+            name = "Unknown"
+        else:
+            name = _INT_TO_NAME.get(int(content), str(content))
         center = node.center
         out.append({
             "cx": round(float(center.x), 1),
