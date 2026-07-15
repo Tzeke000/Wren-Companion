@@ -131,7 +131,7 @@ class BodySession:
         try:
             import anki_vector
             self.robot = anki_vector.Robot(
-                SERIAL, cache_animation_lists=False, default_logging=False)
+                SERIAL, cache_animation_lists=True, default_logging=False)
             t0 = time.time()
             self.robot.connect(timeout=timeout)
             connect_s = round(time.time() - t0, 2)
