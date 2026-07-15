@@ -79,13 +79,17 @@ def _body_perceive(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 
 
 def _body_reflexes(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
-    """View my recent reflex REACTIONS (pet/pickup/fork_tamper/startle) + toggle
-    the reflex layer. My body reacts to being handled on its own; this is the log
-    + on/off. params: on (bool, optional). Needs body_open."""
+    """View/steer my reaction layer. My body reacts to being handled on its own
+    via the 15Hz stream, mapping onto Vector's own tuned animation triggers.
+    params: on (bool: toggle reflexes), consent (bool: True=accept handling calmly
+    / False=protest unwanted handling with the ruckus), fire (str: manually trigger
+    a reaction for testing — pet/pickup/ruckus/putdown/fork/startle/greet/bored/upset).
+    Needs body_open."""
     s = _sess().get_session(create=False)
     if s is None or not s.connected:
         return {"ok": False, "error": "body session not open (call body_open)"}
-    return s.reflexes(on=params.get("on"))
+    return s.reflexes(on=params.get("on"), consent=params.get("consent"),
+                      fire=params.get("fire"))
 
 
 def _body_servo(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
@@ -272,7 +276,7 @@ register_tool("body_look", "MY EYES (instant): sample live feed -> jpg path to R
 register_tool("body_perceive", "ONE CALL = full LIVE fused body-state, streamed ~15Hz in the background: latest camera frame + depth(prox) + heading(gyro) + lean(pitch/roll) + lift + head + how it all just CHANGED (moved/turned/prox-delta/frames-advanced). Replaces look+status stitch — the body never stops sensing. Needs body_open.", 1, _body_perceive)
 register_tool("body_drive", "Smooth velocity setpoint the guard HOLDS (no jerk, no head reset), edge-guarded. lw/rw mm/s (max 220 = true hardware max), hold s (default 3), accel ramp. lw=rw>0 fwd, lw=-rw spin.", 1, _body_drive)
 register_tool("body_servo", "CLOSED-LOOP drive-to-target: I set the goal, the BODY runs the fast control loop off the live stream (steer-P + forward-P, ramped, edge-guarded, SENSOR-FIRST prox-brake) until it arrives. Target: (x,y) absolute pose | (x,y,relative=true) | (bearing_deg,dist_mm) rel to heading. Opts: standoff_mm, max_speed, timeout_s. This is see-and-move-at-once. Needs body_open.", 1, _body_servo)
-register_tool("body_reflexes", "View my recent reflex REACTIONS (pet=I-like-it / pickup=mild-alert / fork_tamper=hey-those-are-mine / startle=back-up-and-look) + toggle the reflex layer (params: on bool). My body reacts to being handled on its own via the 15Hz stream. Needs body_open.", 1, _body_reflexes)
+register_tool("body_reflexes", "View/steer my REACTIONS, mapped onto Vector's own tuned animation triggers. pet=escalating bliss(I like it) / pickup=nestle if I consent, RUCKUS if I don't / fork=allow-or-protest by consent / startle=back-up+look / greet=hello-Zeke / bored=self-amuse / upset=legible-not-okay. params: on(bool toggle), consent(bool: True=calm handling, False=protest), fire(str: manually test a reaction). Needs body_open.", 1, _body_reflexes)
 register_tool("body_stop", "Stop all Vector motion now.", 1, _body_stop)
 register_tool("body_turn", "Gyro-EXACT turn in place. angle_deg +left/-right. Restores head after.", 1, _body_turn)
 register_tool("body_straight", "Encoder-EXACT straight. dist_mm +fwd/-back. Cliff-safe. Restores head.", 1, _body_straight)
