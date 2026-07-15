@@ -56,7 +56,9 @@ HEAD_MIN_DEG, HEAD_MAX_DEG = -22.0, 45.0
 LIFT_MIN, LIFT_MAX = 0.0, 1.0
 
 # driving safety + smooth-motion (ROS slow-planner/fast-loop split, 2026-07-15 research)
-MAX_WHEEL = 120.0        # mm/s per side cap — gentle room cruise, not hallway
+MAX_WHEEL = 220.0        # mm/s per side cap — Vector's true hardware max (Zeke
+                         # 2026-07-15: "go real max speed the 240"). Edge-guard +
+                         # hardware cliff reflex (DEFAULT priority) are the backstop.
 DRIVE_ACCEL = 300.0      # mm/s^2 default ramp — trapezoidal smoothing, no jerk
 HOLD_DEFAULT = 3.0       # a drive setpoint PERSISTS this long (guard re-streams it)
 MAX_HOLD = 6.0           # ceiling on a single hold window
@@ -383,6 +385,75 @@ class BodySession:
                 out["brightness"] = r.get("brightness")
                 out["frame_stale"] = r.get("stale")
         return out
+
+    # ---------------------------------------------------------------- servo
+    def servo_to(self, x=None, y=None, bearing_deg=None, dist_mm=None,
+                 standoff_mm: float = 25.0, max_speed: float = None,
+                 timeout_s: float = 12.0, relative: bool = False) -> dict:
+        """CLOSED-LOOP drive to a target — the FAST control loop runs HERE off the
+        live stream, not hand-stepped. Steer-P on heading error + forward-P on
+        remaining distance, ramped + edge-guarded, until within standoff or
+        timeout. Target: absolute pose (x,y); OR (x,y,relative=True); OR
+        bearing_deg + dist_mm relative to my current heading. This is
+        'see-and-move at once' — I set the goal, the body servos to it."""
+        self._require()
+        self._touch()
+        try:
+            st0 = self._latest or self._capture_fused()
+            cx = float(st0.get("x", 0.0)); cy = float(st0.get("y", 0.0))
+            ch = float(st0.get("heading", 0.0))
+            if bearing_deg is not None and dist_mm is not None:
+                th = math.radians(ch + float(bearing_deg))
+                tx = cx + float(dist_mm) * math.cos(th)
+                ty = cy + float(dist_mm) * math.sin(th)
+            elif x is not None and y is not None:
+                tx = cx + float(x) if relative else float(x)
+                ty = cy + float(y) if relative else float(y)
+            else:
+                return {"ok": False, "error": "give (x,y) [relative?] or (bearing_deg, dist_mm)"}
+        except Exception:
+            return {"ok": False, "error": "bad target args"}
+        vmax = min(MAX_WHEEL, float(max_speed) if max_speed else MAX_WHEEL)
+        standoff = max(5.0, float(standoff_mm))
+        t_end = time.time() + max(1.0, float(timeout_s))
+        steps = 0
+        try:
+            while time.time() < t_end:
+                st = self._latest or {}
+                x0 = float(st.get("x", cx)); y0 = float(st.get("y", cy))
+                h0 = float(st.get("heading", ch))
+                dx = tx - x0; dy = ty - y0
+                dist = math.hypot(dx, dy)
+                if dist <= standoff:
+                    break
+                danger = self._edge_danger()
+                if danger:
+                    self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
+                    self._reflex = f"SERVO edge-guard: {danger}"
+                    return {"ok": False, "refused": danger,
+                            "final_dist_mm": round(dist, 0), "steps": steps}
+                bearing = math.degrees(math.atan2(dy, dx))
+                herr = ((bearing - h0 + 180.0) % 360.0) - 180.0   # [-180,180]
+                fwd = 0.0 if abs(herr) > 55.0 else max(25.0, min(vmax, dist * 2.0))
+                turn = max(-vmax, min(vmax, herr * 4.0))          # steer P
+                lw = max(-vmax, min(vmax, fwd - turn))
+                rw = max(-vmax, min(vmax, fwd + turn))
+                self._wheels = (lw, rw)
+                self._drive_until = time.time() + 0.4
+                self._raw_wheels(lw, rw, DRIVE_ACCEL)
+                steps += 1
+                time.sleep(0.05)                                  # ~20Hz loop
+            self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
+            st = self._latest or {}
+            fdist = round(math.hypot(tx - float(st.get("x", cx)),
+                                     ty - float(st.get("y", cy))), 0)
+            arrived = fdist <= standoff + 25.0
+            return {"ok": arrived, "arrived": arrived, "final_dist_mm": fdist,
+                    "target": [round(tx), round(ty)], "steps": steps,
+                    "timed_out": (not arrived) and time.time() >= t_end}
+        except Exception as e:
+            self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
+            return {"ok": False, "error": repr(e)[:300]}
 
     # ---------------------------------------------------------------- perception
     def look(self, name: str = "body_view", bright: bool = False) -> dict:
