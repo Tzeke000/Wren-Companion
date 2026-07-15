@@ -53,10 +53,12 @@ NERVES = FRAME_DIR / "nerves.json"
 HEAD_MIN_DEG, HEAD_MAX_DEG = -22.0, 45.0
 LIFT_MIN, LIFT_MAX = 0.0, 1.0
 
-# driving safety
+# driving safety + smooth-motion (ROS slow-planner/fast-loop split, 2026-07-15 research)
 MAX_WHEEL = 120.0        # mm/s per side cap — gentle room cruise, not hallway
-DRIVE_TTL = 0.8          # deadman: raw wheels auto-zero this long after last cmd
-GUARD_HZ = 0.06          # guard loop period (~16 Hz) for prompt deadman/edge stop
+DRIVE_ACCEL = 300.0      # mm/s^2 default ramp — trapezoidal smoothing, no jerk
+HOLD_DEFAULT = 3.0       # a drive setpoint PERSISTS this long (guard re-streams it)
+MAX_HOLD = 6.0           # ceiling on a single hold window
+GUARD_HZ = 0.06          # guard loop period (~16 Hz): fast layer re-streams + edge-stops
 IDLE_RELEASE_S = 420.0   # auto-close the held session after this much inactivity
 
 _lock = threading.RLock()
@@ -71,6 +73,20 @@ def _read_nerves(max_age_s: float = 2.5) -> dict:
     except Exception:
         pass
     return {}
+
+
+def _gamma_brighten(pil, gamma: float = 0.6):
+    """Mild gamma<1 lift for MY reading of a dim frame. Low-light research
+    (2026-07-15): this is COSMETIC (helps a human read), NOT a detection gain —
+    physical light is the real fix. Clamped, LUT-fast, safe fallback."""
+    try:
+        import numpy as np
+        g = max(0.35, min(1.0, float(gamma)))
+        lut = (((np.arange(256) / 255.0) ** g) * 255).astype("uint8")
+        arr = np.asarray(pil)
+        return type(pil).fromarray(lut[arr]) if arr.ndim else pil
+    except Exception:
+        return pil
 
 
 def _behavior_result(res) -> dict:
@@ -98,10 +114,11 @@ class BodySession:
         self.last_activity = 0.0
         self.feed_ok = False
         # driving state (shared with the guard thread)
-        self._wheels = (0.0, 0.0)
-        self._drive_deadline = 0.0
+        self._wheels = (0.0, 0.0)       # held velocity setpoint (mm/s per side)
+        self._drive_until = 0.0         # safety-stop time if setpoint not refreshed
         self._last_head_deg = None      # restored after each behavior
         self._reflex = None             # last safety intervention note
+        self._last_image_id = None      # for stale-feed detection
         # guard thread
         self._stop = threading.Event()
         self._guard = None
@@ -168,32 +185,63 @@ class BodySession:
             raise RuntimeError("body session not open (call body_open first)")
 
     # ---------------------------------------------------------------- guard
+    def _edge_danger(self):
+        """Authoritative danger check: SDK robot.status first (truer + faster than
+        the @5Hz nerves file), nerves as fallback. Returns a reason str or None."""
+        try:
+            st = self.robot.status
+            if st.is_cliff_detected:
+                return "cliff (SDK)"
+            if st.is_picked_up:
+                return "picked up (SDK)"
+            if st.is_falling:
+                return "falling (SDK)"
+        except Exception:
+            pass
+        n = _read_nerves()
+        if n.get("cliff"):
+            return "cliff (nerves)"
+        if n.get("falling"):
+            return "falling (nerves)"
+        if n.get("picked_up"):
+            return "picked up (nerves)"
+        return None
+
     def _guard_loop(self):
-        """Deadman + edge-guard + control-lost recovery + idle release.
-        Runs ~16 Hz on its own thread; all SDK calls marshal onto the conn loop."""
+        """The fast local control layer (ROS slow-planner/fast-loop split): holds
+        the velocity setpoint smoothly between my slow tool calls, edge-guards off
+        the SDK status flags, recovers lost control, and auto-releases when idle.
+        Runs ~16 Hz; all SDK calls marshal onto the connection loop."""
         while not self._stop.is_set() and self.connected:
             try:
                 now = time.time()
                 l, r = self._wheels
                 translating = (l + r) != 0
 
-                # 1) deadman — raw wheels run forever; zero them if the caller
-                #    stopped issuing drive commands.
-                if translating and now >= self._drive_deadline:
+                # a) EDGE-GUARD FIRST — stop instantly on a real cliff/fall/pickup.
+                if translating:
+                    danger = self._edge_danger()
+                    if danger:
+                        self._raw_wheels(0.0, 0.0)
+                        self._wheels = (0.0, 0.0)
+                        self._drive_until = 0.0
+                        self._reflex = f"EDGE-GUARD: {danger} — wheels stopped"
+                        translating = False
+
+                # b) SAFETY WINDOW (watchdog) — a setpoint expires if I don't refresh
+                #    it, so a stalled cognition loop can't leave him driving forever.
+                if translating and now >= self._drive_until:
                     self._raw_wheels(0.0, 0.0)
                     self._wheels = (0.0, 0.0)
                     translating = False
 
-                # 2) edge-guard — stop instantly on a cliff/fall under the treads.
+                # c) HOLD the setpoint — re-stream it (accel=0, no re-ramp) so a brief
+                #    control blip never stalls smooth continuous motion.
                 if translating:
-                    n = _read_nerves()
-                    if n.get("cliff") or n.get("falling"):
-                        self._raw_wheels(0.0, 0.0)
-                        self._wheels = (0.0, 0.0)
-                        self._reflex = "EDGE-GUARD: cliff/fall — wheels stopped"
+                    self._raw_wheels(l, r)
 
-                # 3) control-lost recovery — DEFAULT_PRIORITY yanks control on a
-                #    hardware reflex; stop and try to reclaim.
+                # d) control-lost recovery — DEFAULT_PRIORITY yanks control on a
+                #    hardware reflex or a higher-priority behavior; stop + reclaim.
                 try:
                     cle = getattr(self.robot.conn, "control_lost_event", None)
                     if cle is not None and cle.is_set():
@@ -205,7 +253,7 @@ class BodySession:
                 except Exception:
                     pass
 
-                # 4) idle auto-release — don't hold his body hostage forever.
+                # e) idle auto-release — don't hold his body hostage forever.
                 if now - self.last_activity > IDLE_RELEASE_S:
                     self.close(reason="idle auto-release")
                     return
@@ -213,9 +261,12 @@ class BodySession:
                 pass
             self._stop.wait(GUARD_HZ)
 
-    def _raw_wheels(self, l, r):
+    def _raw_wheels(self, l, r, accel=0.0):
+        """Direct wheel command (bypasses the behavior engine → no head reset).
+        accel>0 = trapezoidal ramp for smooth starts; accel=0 = hold/instant."""
         with contextlib.suppress(Exception):
-            self.robot.motors.set_wheel_motors(float(l), float(r))
+            self.robot.motors.set_wheel_motors(float(l), float(r),
+                                               float(accel), float(accel))
 
     def _restore_head(self):
         """Behaviors reset the head up; put it back where I set it."""
@@ -226,8 +277,10 @@ class BodySession:
             self.robot.behavior.set_head_angle(degrees(float(self._last_head_deg)))
 
     # ---------------------------------------------------------------- perception
-    def look(self, name: str = "body_view") -> dict:
-        """Instant frame from the live feed -> jpg path to Read. Non-blocking."""
+    def look(self, name: str = "body_view", bright: bool = False) -> dict:
+        """Instant frame from the live feed -> jpg path to Read. Non-blocking.
+        Reports image_id/age/stale so I can tell a LIVE feed from a frozen one
+        (image_id repeating = stale). bright=True applies a mild cosmetic lift."""
         self._require()
         self._touch()
         try:
@@ -235,46 +288,57 @@ class BodySession:
             if not img or not getattr(img, "raw_image", None):
                 return {"ok": False, "error": "no frame yet (feed warming?)",
                         "feed_ok": self.feed_ok}
-            FRAME_DIR.mkdir(parents=True, exist_ok=True)
-            path = FRAME_DIR / f"{name}.jpg"
-            img.raw_image.save(str(path))
+            iid = getattr(img, "image_id", None)
+            recv = getattr(img, "image_recv_time", None)
+            stale = (iid is not None and iid == self._last_image_id)
+            self._last_image_id = iid
+            pil = img.raw_image
             mean = None
             try:
                 import numpy as np
-                mean = round(float(
-                    np.asarray(img.raw_image.convert("L")).mean()), 1)
+                mean = round(float(np.asarray(pil.convert("L")).mean()), 1)
             except Exception:
                 pass
+            if bright:
+                pil = _gamma_brighten(pil)
+            FRAME_DIR.mkdir(parents=True, exist_ok=True)
+            path = FRAME_DIR / f"{name}.jpg"
+            pil.save(str(path))
+            age = round(time.time() - float(recv), 2) if recv else None
             return {"ok": True, "path": str(path), "brightness": mean,
+                    "image_id": iid, "age_s": age, "stale": stale,
                     "hint": "Read the path to see through Vector's eyes"}
         except Exception as e:
             return {"ok": False, "error": repr(e)[:300]}
 
     # ---------------------------------------------------------------- driving
-    def drive(self, lw: float, rw: float, ttl: float = DRIVE_TTL) -> dict:
-        """Continuous raw wheel drive (NO head reset). Auto-stops after `ttl`s
-        unless re-issued (deadman). Edge-guarded. lw=rw>0 fwd; lw=-rw spins."""
+    def drive(self, lw: float, rw: float, hold: float = HOLD_DEFAULT,
+              accel: float = DRIVE_ACCEL) -> dict:
+        """Set a velocity setpoint the guard HOLDS smoothly for `hold` seconds
+        (refresh to keep going, change it, or body_stop). Ramped start via `accel`
+        (no jerk), NO head reset. Edge-guarded. lw=rw>0 fwd; lw=rw<0 back; lw=-rw spins."""
         self._require()
         self._touch()
         try:
             lw = max(-MAX_WHEEL, min(MAX_WHEEL, float(lw)))
             rw = max(-MAX_WHEEL, min(MAX_WHEEL, float(rw)))
-            ttl = max(0.15, min(3.0, float(ttl)))
+            hold = max(0.3, min(MAX_HOLD, float(hold)))
+            accel = max(0.0, min(2000.0, float(accel)))
         except Exception:
-            return {"ok": False, "error": "lw/rw mm/s floats, ttl seconds"}
+            return {"ok": False, "error": "lw/rw mm/s, hold s, accel mm/s^2 (floats)"}
         translating = (lw + rw) != 0
-        n = _read_nerves()
-        if translating and n.get("cliff"):
-            return {"ok": False, "refused": "cliff under treads right now",
-                    "hint": "spin (lw=-rw) or back up (lw=rw<0)"}
-        if translating and n.get("picked_up"):
-            return {"ok": False, "refused": "picked up / no surface under treads"}
+        if translating:
+            danger = self._edge_danger()
+            if danger:
+                return {"ok": False, "refused": f"{danger} right now",
+                        "hint": "spin (lw=-rw) or back up (lw=rw<0)"}
         self._reflex = None
         self._wheels = (lw, rw)
-        self._drive_deadline = time.time() + ttl
-        self._raw_wheels(lw, rw)
-        return {"ok": True, "lw": lw, "rw": rw, "ttl": ttl,
-                "note": "auto-stops after ttl unless re-issued"}
+        self._drive_until = time.time() + hold
+        # ramp on the initiating command; the guard then holds it (accel=0, no re-ramp)
+        self._raw_wheels(lw, rw, accel if translating else 0.0)
+        return {"ok": True, "lw": lw, "rw": rw, "hold_s": hold, "accel": accel,
+                "note": "guard holds this setpoint smoothly; refresh within hold to continue"}
 
     def stop(self) -> dict:
         self._require()
@@ -317,8 +381,11 @@ class BodySession:
         try:
             from anki_vector.util import distance_mm, speed_mmps
             with self._sdk_lock:
+                # should_play_anim=False suppresses the head-tilt idle animation at
+                # the source (research 2026-07-15); _restore_head is belt+suspenders.
                 res = self.robot.behavior.drive_straight(
-                    distance_mm(float(dist_mm)), speed_mmps(abs(float(speed_mm_s))))
+                    distance_mm(float(dist_mm)), speed_mmps(abs(float(speed_mm_s))),
+                    should_play_anim=False)
                 out = _behavior_result(res)
                 self._restore_head()
             out["dist_mm"] = dist_mm
@@ -415,17 +482,58 @@ class BodySession:
         if not self.connected:
             return out
         self._touch()
+        # battery — real is_charging + unambiguous full-ness (volts>=4.05 & no
+        # suggested charge time; is_charging alone flickers near full).
         try:
             with self._sdk_lock:
                 bs = self.robot.get_battery_state()
+            volts = round(float(getattr(bs, "battery_volts", 0.0)), 3)
+            sec = float(getattr(bs, "suggested_charger_sec", 0.0) or 0.0)
             out["battery"] = {
-                "volts": round(float(getattr(bs, "battery_volts", 0.0)), 3),
+                "volts": volts,
                 "level": getattr(bs, "battery_level", None),
                 "is_charging": bool(getattr(bs, "is_charging", False)),
                 "is_on_charger_platform": bool(getattr(bs, "is_on_charger_platform", False)),
+                "suggested_charger_sec": sec,
+                "full": volts >= 4.05 and sec == 0.0,
             }
         except Exception as e:
             out["battery_error"] = repr(e)[:200]
+        # authoritative SDK status flags
+        try:
+            with self._sdk_lock:
+                st = self.robot.status
+            out["flags"] = {k: bool(getattr(st, k)) for k in (
+                "is_cliff_detected", "is_picked_up", "is_being_held",
+                "are_wheels_moving", "is_on_charger", "is_charging", "is_falling")}
+        except Exception:
+            pass
+        # SDK pose — gyro/tread-fused heading (retires my odometry hack within a
+        # session). origin_id changes = pose was thrown away (pickup/cliff) → re-anchor.
+        try:
+            with self._sdk_lock:
+                p = self.robot.pose
+            out["pose"] = {
+                "x_mm": round(float(p.position.x), 1),
+                "y_mm": round(float(p.position.y), 1),
+                "heading_deg": round(float(p.rotation.angle_z.degrees), 1),
+                "valid": bool(getattr(p, "is_valid", True)),
+                "origin_id": getattr(p, "origin_id", None),
+            }
+        except Exception:
+            pass
+        # front time-of-flight proximity
+        try:
+            with self._sdk_lock:
+                pr = self.robot.proximity.last_sensor_reading
+            out["proximity"] = {
+                "distance_mm": round(float(pr.distance.distance_mm), 0),
+                "found_object": bool(pr.found_object),
+                "signal_quality": round(float(pr.signal_quality), 3),
+                "unobstructed": bool(pr.unobstructed),
+            }
+        except Exception:
+            pass
         out["nerves"] = _read_nerves()
         return out
 
