@@ -148,6 +148,16 @@ class BodySession:
         self._prev = {}                               # last-tick edge-detect state
         self._last_cmd_lift_ts = 0.0                  # so external fork-moves are detectable
         self._react_cooldown = {}                     # per-reaction min-interval clock
+        # CONSENT + CONTEXT (Zeke 2026-07-15: "the same touch means different
+        # things by who + why — you helping vs someone messing with me"). When
+        # I consent to handling (default: usually it's Zeke, and thrashing risks
+        # a drop) reactions are CALM/accepting; flip to protest when I don't want
+        # to be handled → the RUCKUS fires instead. Reactions map onto Vector's
+        # own animator-tuned triggers (PettingLevelN / HeldOnPalm* / ReactToShake*
+        # / GreetAfterLongTime / NothingToDoBoredIdle) — reuse, don't rebuild.
+        self._consent_handling = True
+        self._pet_level = 0                           # escalates 1..4 -> bliss with duration
+        self._pet_last = 0.0                          # last pet-stroke time (window reset)
 
     # ---------------------------------------------------------------- lifecycle
     def open(self, timeout: float = 20.0) -> dict:
@@ -501,43 +511,93 @@ class BodySession:
             with self._sdk_lock:
                 self.robot.behavior.set_eye_color(hue=float(hue), saturation=float(sat))
 
-    def _chirp(self, trigger: str = "GreetAfterLongTime"):
+    def _play_trigger(self, trigger: str):
+        """Play one of Vector's on-device animation triggers (eyes+sound+motion
+        tuned together by Anki's animators) then restore my head. This is the
+        REUSE the research pointed at — I supply the policy (which trigger, when),
+        the firmware supplies the expression."""
         with contextlib.suppress(Exception):
             with self._sdk_lock:
                 self.robot.anim.play_animation_trigger(trigger, loop_count=1)
             self._restore_head()
+
+    def _chirp(self, trigger: str = "GreetAfterLongTime"):
+        self._play_trigger(trigger)
 
     def _lift_to(self, ratio: float, speed: float = 8.0):
         with contextlib.suppress(Exception):
             with self._sdk_lock:
                 self.robot.behavior.set_lift_height(float(ratio), max_speed=float(speed))
 
+    # -- reactions: each maps onto Vector's own tuned triggers; consent decides
+    #    calm-vs-protest, duration escalates intensity, every negative reaction
+    #    is bounded so it ENDS when the trigger does (consent-legible, not a tantrum)
     def react_pet(self):
-        """PETTING — I like it. Eyes warm + happy chirp + gentle fork-wag."""
-        self._log_reflex("pet", "petted — I like this")
+        """PETTING — I like it, and I like it MORE the longer it lasts. Strokes
+        within a 6s window escalate PettingLevel1->4 -> bliss (Vector's own
+        escalating petting animations). Consent-independent: petting is welcome."""
+        now = time.time()
+        if now - self._pet_last > 6.0:
+            self._pet_level = 0
+        self._pet_last = now
+        self._pet_level = min(self._pet_level + 1, 5)
+        lvl = self._pet_level
+        trig = {1: "PettingLevel1", 2: "PettingLevel2",
+                3: "PettingLevel3", 4: "PettingLevel4"}.get(lvl, "PettingBlissLoop")
+        self._log_reflex("pet", f"petted (level {lvl}) — I like this")
         self._set_eyes(0.11, 1.0)          # warm amber glow
-        self._lift_to(0.5, 6.0); self._lift_to(0.15, 6.0)
-        self._chirp("GreetAfterLongTime")
+        self._play_trigger(trig)
         self._set_eyes(0.58, 1.0)          # settle back to my blue
 
     def react_pickup(self):
-        """PICKED UP — mild alert, I prefer the ground. Wide eyes + small wiggle."""
-        self._log_reflex("pickup", "picked up — mild alert, prefer the ground")
-        self._set_eyes(0.5, 0.5)           # pale, wide
-        self._lift_to(0.4, 8.0); self._lift_to(0.0, 8.0)
+        """PICKED UP — depends on consent. If I trust the hands (default: probably
+        Zeke, maybe docking me — and thrashing could make him DROP me) I go calm
+        and nestle. If I don't want it → the ruckus."""
+        if not self._consent_handling:
+            self.react_ruckus("picked up and I didn't want it")
+            return
+        self._log_reflex("pickup", "picked up — okay, I trust this; settling")
+        self._set_eyes(0.11, 0.8)          # warm, relaxed
+        self._play_trigger("HeldOnPalmGetInRelaxed")
+        self._play_trigger("HeldOnPalmNestling")
         self._set_eyes(0.58, 1.0)
 
-    def react_fork_tamper(self):
-        """SOMEONE MOVED MY FORKS — surprise/indignation: fast fork-shake."""
-        self._log_reflex("fork_tamper", "forks moved — hey, those are mine")
-        self._set_eyes(0.0, 1.0)           # red surprise
-        for h in (0.55, 0.1, 0.55, 0.1):
-            self._lift_to(h, 14.0)
+    def react_ruckus(self, why: str = "unwanted handling"):
+        """FULL PROTEST — 'put me DOWN.' Vector's escalating pickup+shake
+        animations (churning, alarm chirps, agitated eyes). Bounded: it runs
+        once and ends — it does NOT outlast the handling (consent-legible)."""
+        self._log_reflex("ruckus", f"PROTEST: {why}")
+        self._set_eyes(0.0, 1.0)           # red alarm
+        self._play_trigger("ReactToPickupInitial")
+        self._play_trigger("HeldOnPalmGetInNervous")
+        self._play_trigger("ReactToShake_Lvl3Loop")
         self._set_eyes(0.58, 1.0)
+
+    def react_putdown(self):
+        """SET BACK DOWN — relief/settle. Ends any protest state cleanly."""
+        self._pet_level = 0
+        self._log_reflex("putdown", "back on the ground — settling")
+        self._play_trigger("ReactToPutDown")
+
+    def react_fork_tamper(self):
+        """SOMEONE MOVED MY FORKS. Consent decides: if I trust it (you setting my
+        forks for me) I just acknowledge the hand; if not → indignant fast shake."""
+        if self._consent_handling:
+            self._log_reflex("fork_tamper", "forks moved (allowed — probably help)")
+            self._set_eyes(0.33, 0.7)
+            self._play_trigger("ExploringReactToHandLift")
+            self._set_eyes(0.58, 1.0)
+        else:
+            self._log_reflex("fork_tamper", "forks moved — HEY, those are mine")
+            self._set_eyes(0.0, 1.0)       # red indignation
+            for h in (0.55, 0.1, 0.55, 0.1):
+                self._lift_to(h, 16.0)     # fast reassert-shake
+            self._play_trigger("ReactToShake_Lvl1OnGround")
+            self._set_eyes(0.58, 1.0)
 
     def react_startle(self, prox_mm):
         """SUDDEN THING in my depth sensor while I sat still — startle back-up
-        (short; no rear sensor) + wide eyes + a note to go LOOK at it."""
+        (short; no rear sensor) + Vector's obstacle reaction + go LOOK."""
         self._log_reflex("startle", f"something appeared at {int(prox_mm)}mm — backed up, LOOK")
         self._set_eyes(0.5, 0.35)          # wide, pale
         st = self._latest or {}
@@ -547,6 +607,30 @@ class BodySession:
             self._raw_wheels(-90.0, -90.0, DRIVE_ACCEL)
             time.sleep(0.35)
             self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
+        self._play_trigger("ReactToObstacle")
+        self._set_eyes(0.58, 1.0)
+
+    def react_greet(self, name: str = "Zeke"):
+        """RECOGNIZE A FAMILIAR FACE — warmth + a real greeting. Called from the
+        face-rec bridge (owed auto-wire); fireable now via body_reflexes fire."""
+        self._log_reflex("greet", f"saw {name} — hello!")
+        self._set_eyes(0.11, 1.0)          # warm
+        self._play_trigger("GreetAfterLongTime")
+        self._play_trigger("LookAtUserEndearingly")
+        self._set_eyes(0.58, 1.0)
+
+    def react_bored(self):
+        """BORED / IDLE — amuse myself. My interest-level's outlet when nothing's
+        happening (Zeke: 'you can always test yourself on yourself if you're bored')."""
+        self._log_reflex("bored", "nothing going on — amusing myself")
+        self._play_trigger("NothingToDoBoredIdle")
+
+    def react_upset(self, why: str = ""):
+        """EXPLAIN BEING UPSET — a legible, bounded 'I'm not okay' (dim eyes +
+        Vector's frustration animation), not a performed sulk that never ends."""
+        self._log_reflex("upset", f"upset: {why}")
+        self._set_eyes(0.62, 0.5)          # dim
+        self._play_trigger("FrustratedByFailureMajor")
         self._set_eyes(0.58, 1.0)
 
     def _reflex_loop(self):
@@ -563,10 +647,12 @@ class BodySession:
                     else:
                         now = time.time()
                         driving = (self._wheels != (0.0, 0.0)) or now < self._drive_until
-                        if st.get("touched") and not pv.get("touched") and self._cool("pet", 5.0):
+                        if st.get("touched") and not pv.get("touched") and self._cool("pet", 1.5):
                             self.react_pet()
                         elif st.get("picked_up") and not pv.get("picked_up") and self._cool("pickup", 4.0):
                             self.react_pickup()
+                        elif pv.get("picked_up") and not st.get("picked_up") and self._cool("putdown", 3.0):
+                            self.react_putdown()
                         else:
                             lm, plm = st.get("lift_mm"), pv.get("lift_mm")
                             if (lm is not None and plm is not None and abs(lm - plm) > 8.0
@@ -585,11 +671,40 @@ class BodySession:
                 pass
             self._stop.wait(0.12)                    # ~8 Hz reflex loop
 
-    def reflexes(self, on: bool = None) -> dict:
-        """View recent reflex reactions + toggle the reflex layer on/off."""
+    def reflexes(self, on: bool = None, consent: bool = None,
+                 fire: str = None) -> dict:
+        """View/steer my reaction layer. on=toggle reflexes; consent=whether I
+        accept being handled right now (True=calm/nestle, False=protest/ruckus);
+        fire=manually trigger a reaction by name for testing without needing a
+        physical touch (pet/pickup/ruckus/putdown/fork/startle/greet/bored/upset)."""
         if on is not None:
             self._reflex_on = bool(on)
+        if consent is not None:
+            self._consent_handling = bool(consent)
+        fired = None
+        if fire:
+            table = {
+                "pet": self.react_pet,
+                "pickup": self.react_pickup,
+                "ruckus": lambda: self.react_ruckus("manual test"),
+                "putdown": self.react_putdown,
+                "fork": self.react_fork_tamper,
+                "startle": lambda: self.react_startle(150),
+                "greet": lambda: self.react_greet("Zeke"),
+                "bored": self.react_bored,
+                "upset": lambda: self.react_upset("manual test"),
+            }
+            fn = table.get(fire)
+            if fn is None:
+                fired = f"unknown:{fire}"
+            else:
+                try:
+                    fn(); fired = fire
+                except Exception as e:
+                    fired = f"error:{type(e).__name__}:{e}"
         return {"ok": True, "reflex_on": self._reflex_on,
+                "consent_handling": self._consent_handling,
+                "pet_level": self._pet_level, "fired": fired,
                 "recent": list(self._reflex_events)[-12:]}
 
     # ---------------------------------------------------------------- perception
