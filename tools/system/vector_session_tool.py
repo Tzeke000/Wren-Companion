@@ -67,6 +67,17 @@ def _body_look(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return s.look(name=name, bright=bool(params.get("bright", False)))
 
 
+def _body_perceive(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """ONE call = full LIVE fused body awareness (camera + depth + heading +
+    lean + lift + head), streamed continuously in the background + how it just
+    changed. Replaces the look-then-status stitch. Needs body_open."""
+    s = _sess().get_session(create=False)
+    if s is None or not s.connected:
+        return {"ok": False, "error": "body session not open (call body_open)"}
+    return s.perceive(name=str(params.get("name") or "perceive_view"),
+                      save_frame=bool(params.get("frame", True)))
+
+
 def _body_drive(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """Smooth velocity setpoint the guard HOLDS between my tool calls (no jerk,
     no head reset), edge-guarded. lw/rw mm/s (max 120); hold secs (default 3,
@@ -231,6 +242,7 @@ register_tool("body_open", "SEAT myself in Vector: open ONE held control session
 register_tool("body_close", "Un-seat: stop, release control, disconnect. Stock brain resumes.", 1, _body_close)
 register_tool("body_status", "Body session status + REAL battery (SDK is_charging) + wheels/head/reflex + nerves.", 1, _body_status)
 register_tool("body_look", "MY EYES (instant): sample live feed -> jpg path to Read. Reports image_id/age/stale (feed-frozen check). bright=true = mild lift. Needs body_open.", 1, _body_look)
+register_tool("body_perceive", "ONE CALL = full LIVE fused body-state, streamed ~15Hz in the background: latest camera frame + depth(prox) + heading(gyro) + lean(pitch/roll) + lift + head + how it all just CHANGED (moved/turned/prox-delta/frames-advanced). Replaces look+status stitch — the body never stops sensing. Needs body_open.", 1, _body_perceive)
 register_tool("body_drive", "Smooth velocity setpoint the guard HOLDS (no jerk, no head reset), edge-guarded. lw/rw mm/s (max120), hold s (default 3), accel ramp. lw=rw>0 fwd, lw=-rw spin.", 1, _body_drive)
 register_tool("body_stop", "Stop all Vector motion now.", 1, _body_stop)
 register_tool("body_turn", "Gyro-EXACT turn in place. angle_deg +left/-right. Restores head after.", 1, _body_turn)

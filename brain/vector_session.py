@@ -38,8 +38,10 @@ behavior, so a head-down floor view survives precise moves.
 """
 from __future__ import annotations
 
+import collections
 import contextlib
 import json
+import math
 import threading
 import time
 from pathlib import Path
@@ -123,6 +125,16 @@ class BodySession:
         self._stop = threading.Event()
         self._guard = None
         self._sdk_lock = threading.Lock()  # serialize our own SDK behavior calls
+        # FUSED SENSOR STREAM (Zeke 2026-07-15: "seeing should auto-stream to you
+        # when you're in the body, and all the other senses too, ~camera rate").
+        # A background thread samples EVERY sense continuously into a rolling
+        # buffer, so perceive() reads a LIVE stream + recent history instead of
+        # a stale one-off snapshot. Reads are lock-free cached-property reads
+        # (SDK connection thread updates them; safe to read from here).
+        self._stream = collections.deque(maxlen=48)   # ~3s of fused states @ ~15Hz
+        self._latest = {}                             # freshest fused state
+        self._streamer = None
+        self._stream_hz = 0.0                         # measured actual stream rate
 
     # ---------------------------------------------------------------- lifecycle
     def open(self, timeout: float = 20.0) -> dict:
@@ -150,6 +162,9 @@ class BodySession:
             self._guard = threading.Thread(
                 target=self._guard_loop, name="body-guard", daemon=True)
             self._guard.start()
+            self._streamer = threading.Thread(
+                target=self._stream_loop, name="body-stream", daemon=True)
+            self._streamer.start()
             return {"ok": True, "connect_s": connect_s, "feed_ok": self.feed_ok,
                     **self.snapshot()}
         except Exception as e:
@@ -275,6 +290,99 @@ class BodySession:
         with contextlib.suppress(Exception):
             from anki_vector.util import degrees
             self.robot.behavior.set_head_angle(degrees(float(self._last_head_deg)))
+
+    # ------------------------------------------------------- fused sensor stream
+    def _capture_fused(self) -> dict:
+        """Sample EVERY sense at once (lock-free cached-property reads). One
+        complete instantaneous body-state: vision-freshness + depth + heading +
+        lean(pitch/roll) + lift + head + wheels/flags."""
+        r = self.robot
+        s = {"t": round(time.time(), 3)}
+        with contextlib.suppress(Exception):
+            s["image_id"] = getattr(r.camera.latest_image, "image_id", None)
+        with contextlib.suppress(Exception):
+            pr = r.proximity.last_sensor_reading
+            s["prox_mm"] = round(float(pr.distance.distance_mm), 0)
+            s["prox_found"] = bool(pr.found_object)
+            s["prox_q"] = round(float(pr.signal_quality), 3)
+        with contextlib.suppress(Exception):
+            p = r.pose
+            s["x"] = round(float(p.position.x), 1)
+            s["y"] = round(float(p.position.y), 1)
+            s["heading"] = round(float(p.rotation.angle_z.degrees), 1)
+        with contextlib.suppress(Exception):
+            a = r.accel  # mm/s^2; ~9810 on z when level
+            ax, ay, az = float(a.x), float(a.y), float(a.z)
+            s["pitch"] = round(math.degrees(math.atan2(-ax, az)), 1)  # nose up/down
+            s["roll"] = round(math.degrees(math.atan2(ay, az)), 1)    # lean L/R
+        with contextlib.suppress(Exception):
+            s["lift_mm"] = round(float(r.lift_height_mm), 1)
+        with contextlib.suppress(Exception):
+            s["head_deg"] = round(math.degrees(float(r.head_angle_rad)), 1)
+        with contextlib.suppress(Exception):
+            st = r.status
+            s["moving"] = bool(st.are_wheels_moving)
+            s["cliff"] = bool(st.is_cliff_detected)
+            s["picked_up"] = bool(st.is_picked_up)
+        s["wheels"] = list(self._wheels)
+        return s
+
+    def _stream_loop(self):
+        """Continuously sample the fused body-state at ~camera rate into a
+        rolling buffer, so cognition reads a LIVE stream + history instead of
+        triggering a fresh stale snapshot each glance. The body never stops
+        sensing while I think or move."""
+        period = 1.0 / 15.0  # ~15 Hz target (camera rate)
+        last = time.time()
+        n = 0
+        while not self._stop.is_set() and self.connected:
+            try:
+                st = self._capture_fused()
+                self._latest = st
+                self._stream.append(st)
+                n += 1
+                now = time.time()
+                if now - last >= 1.0:
+                    self._stream_hz = round(n / (now - last), 1)
+                    n = 0
+                    last = now
+            except Exception:
+                pass
+            self._stop.wait(period)
+
+    def perceive(self, name: str = "perceive_view", save_frame: bool = True) -> dict:
+        """ONE call = full LIVE body awareness. The freshest fused sense-state +
+        how it has CHANGED across the recent buffer (so I read motion, not a
+        still) + optionally the latest camera frame to Read. Replaces the
+        look-then-status stitch — the body kept sensing while I thought/moved."""
+        self._require()
+        self._touch()
+        latest = dict(self._latest)
+        buf = list(self._stream)
+        out = {"ok": True, "now": latest, "stream_hz": self._stream_hz,
+               "buffer_len": len(buf)}
+        if len(buf) >= 2:
+            old, new = buf[0], buf[-1]
+            trend = {"window_s": round(new.get("t", 0) - old.get("t", 0), 2)}
+            with contextlib.suppress(Exception):
+                trend["moved_mm"] = round(math.hypot(
+                    new["x"] - old["x"], new["y"] - old["y"]), 1)
+            with contextlib.suppress(Exception):
+                trend["turned_deg"] = round(new["heading"] - old["heading"], 1)
+            with contextlib.suppress(Exception):
+                trend["prox_delta_mm"] = round(new["prox_mm"] - old["prox_mm"], 0)
+            with contextlib.suppress(Exception):
+                trend["frames_advanced"] = sum(
+                    1 for i in range(1, len(buf))
+                    if buf[i].get("image_id") != buf[i - 1].get("image_id"))
+            out["trend"] = trend
+        if save_frame:
+            r = self.look(name=name)
+            if r.get("ok"):
+                out["frame"] = r.get("path")
+                out["brightness"] = r.get("brightness")
+                out["frame_stale"] = r.get("stale")
+        return out
 
     # ---------------------------------------------------------------- perception
     def look(self, name: str = "body_view", bright: bool = False) -> dict:
