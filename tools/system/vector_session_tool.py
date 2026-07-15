@@ -64,18 +64,20 @@ def _body_look(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     if s is None or not s.connected:
         return {"ok": False, "error": "body session not open (call body_open)"}
     name = str(params.get("name") or "body_view").strip() or "body_view"
-    return s.look(name=name)
+    return s.look(name=name, bright=bool(params.get("bright", False)))
 
 
 def _body_drive(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
-    """Continuous raw wheel drive (NO head reset), deadman + edge guarded.
-    lw/rw mm/s (max 120), ttl secs (default 0.8, auto-stops unless re-issued).
+    """Smooth velocity setpoint the guard HOLDS between my tool calls (no jerk,
+    no head reset), edge-guarded. lw/rw mm/s (max 120); hold secs (default 3,
+    guard keeps driving that long, refresh to continue); accel mm/s^2 ramp.
     lw=rw>0 forward; lw=rw<0 back; lw=-rw spins in place."""
     s = _sess().get_session(create=False)
     if s is None or not s.connected:
         return {"ok": False, "error": "body session not open (call body_open)"}
     return s.drive(lw=params.get("lw") or 0, rw=params.get("rw") or 0,
-                   ttl=params.get("ttl") or 0.8)
+                   hold=params.get("hold") or 3.0,
+                   accel=params.get("accel") if params.get("accel") is not None else 300.0)
 
 
 def _body_stop(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
@@ -166,8 +168,8 @@ def _body_undock(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 register_tool("body_open", "SEAT myself in Vector: open ONE held control session + live camera feed (coexists with observe daemon). Idempotent. Then use body_look/drive/turn/... without jumping out.", 1, _body_open)
 register_tool("body_close", "Un-seat: stop, release control, disconnect. Stock brain resumes.", 1, _body_close)
 register_tool("body_status", "Body session status + REAL battery (SDK is_charging) + wheels/head/reflex + nerves.", 1, _body_status)
-register_tool("body_look", "MY EYES (instant): sample the live camera feed -> jpg path to Read. No stream open/close. Needs body_open.", 1, _body_look)
-register_tool("body_drive", "Continuous raw drive (NO head reset), deadman+edge guarded. lw/rw mm/s (max120), ttl s (auto-stops). lw=rw>0 fwd, lw=-rw spin.", 1, _body_drive)
+register_tool("body_look", "MY EYES (instant): sample live feed -> jpg path to Read. Reports image_id/age/stale (feed-frozen check). bright=true = mild lift. Needs body_open.", 1, _body_look)
+register_tool("body_drive", "Smooth velocity setpoint the guard HOLDS (no jerk, no head reset), edge-guarded. lw/rw mm/s (max120), hold s (default 3), accel ramp. lw=rw>0 fwd, lw=-rw spin.", 1, _body_drive)
 register_tool("body_stop", "Stop all Vector motion now.", 1, _body_stop)
 register_tool("body_turn", "Gyro-EXACT turn in place. angle_deg +left/-right. Restores head after.", 1, _body_turn)
 register_tool("body_straight", "Encoder-EXACT straight. dist_mm +fwd/-back. Cliff-safe. Restores head.", 1, _body_straight)
