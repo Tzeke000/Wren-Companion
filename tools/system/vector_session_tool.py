@@ -134,7 +134,8 @@ def _body_head(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         a = float(params.get("angle_deg"))
     except Exception:
         return {"ok": False, "error": "angle_deg (-22..45) required"}
-    return s.head(a)
+    return s.head(a, speed_deg_s=params.get("speed_deg_s"),
+                  accel_deg_s2=params.get("accel_deg_s2"))
 
 
 def _body_lift(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
@@ -146,7 +147,7 @@ def _body_lift(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         r = float(params.get("ratio"))
     except Exception:
         return {"ok": False, "error": "ratio (0.0..1.0) required"}
-    return s.lift(r)
+    return s.lift(r, speed=params.get("speed"), accel=params.get("accel"))
 
 
 def _body_dock(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
@@ -191,6 +192,41 @@ def _body_detect(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _body_eyes(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Set Vector's eye color — SDK-NATIVE (no wire-pod). hue/sat 0..1 (my blue ~0.58)."""
+    s = _sess().get_session(create=False)
+    if s is None or not s.connected:
+        return {"ok": False, "error": "body session not open (call body_open)"}
+    try:
+        hue = float(params.get("hue") if params.get("hue") is not None else 0.58)
+    except Exception:
+        return {"ok": False, "error": "hue (0..1) required"}
+    return s.eyes(hue, sat=float(params.get("sat") if params.get("sat") is not None else 1.0))
+
+
+def _body_say(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Speak text through Vector's own speaker — SDK-NATIVE (no wire-pod). Stock Vector voice."""
+    s = _sess().get_session(create=False)
+    if s is None or not s.connected:
+        return {"ok": False, "error": "body session not open (call body_open)"}
+    text = params.get("text")
+    if not text:
+        return {"ok": False, "error": "text required"}
+    return s.say(str(text), vector_voice=bool(params.get("vector_voice", True)))
+
+
+def _body_anim(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Play a built-in animation/trigger by name (chirps, expressions) — SDK-NATIVE.
+    Best-effort (may need the anim list). E.g. 'GreetAfterLongTime', 'anim_pounce_success_02'."""
+    s = _sess().get_session(create=False)
+    if s is None or not s.connected:
+        return {"ok": False, "error": "body session not open (call body_open)"}
+    name = params.get("name")
+    if not name:
+        return {"ok": False, "error": "name required (animation trigger or anim name)"}
+    return s.anim(str(name), loops=int(params.get("loops") or 1))
+
+
 register_tool("body_open", "SEAT myself in Vector: open ONE held control session + live camera feed (coexists with observe daemon). Idempotent. Then use body_look/drive/turn/... without jumping out.", 1, _body_open)
 register_tool("body_close", "Un-seat: stop, release control, disconnect. Stock brain resumes.", 1, _body_close)
 register_tool("body_status", "Body session status + REAL battery (SDK is_charging) + wheels/head/reflex + nerves.", 1, _body_status)
@@ -200,8 +236,11 @@ register_tool("body_stop", "Stop all Vector motion now.", 1, _body_stop)
 register_tool("body_turn", "Gyro-EXACT turn in place. angle_deg +left/-right. Restores head after.", 1, _body_turn)
 register_tool("body_straight", "Encoder-EXACT straight. dist_mm +fwd/-back. Cliff-safe. Restores head.", 1, _body_straight)
 register_tool("body_pose", "Drive to a pose (x,y mm, angle_deg heading), relative to current by default.", 1, _body_pose)
-register_tool("body_head", "Set Vector head pitch (-22 down..45 up); remembered + restored after behaviors.", 1, _body_head)
-register_tool("body_lift", "Set Vector fork lift 0.0 (down)..1.0 (up).", 1, _body_lift)
+register_tool("body_head", "Set Vector head pitch (-22 down..45 up); remembered + restored after behaviors. Optional speed_deg_s (SDK-native VARIABLE speed: omit=fast default, ~30=slow) + accel_deg_s2.", 1, _body_head)
+register_tool("body_lift", "Set Vector fork lift 0.0 (down)..1.0 (up). Optional speed (rad/s, SDK-native variable speed: omit=fast ~10, ~2=slow) + accel.", 1, _body_lift)
 register_tool("body_dock", "NATIVE dock seat (drive_on_charger). Reliable. ~55s from distance.", 1, _body_dock)
 register_tool("body_undock", "Drive Vector off the charger.", 1, _body_undock)
 register_tool("body_detect", "OPEN-VOCAB detection on my Vector eyes (OWL-ViT, no TensorRT). prompts=list/comma-string of TEXT queries. Live feed if seated else last frame. threshold/bright. ~0.7s on 3060; best in good light.", 1, _body_detect)
+register_tool("body_eyes", "Set Vector's EYE COLOR — SDK-native (NO wire-pod). hue/sat 0..1 (my blue ~0.58). Replaces the wire-pod vector_eyes path.", 1, _body_eyes)
+register_tool("body_say", "SPEAK text through Vector's own speaker — SDK-native (NO wire-pod), stock Vector voice. params: text. Replaces the wire-pod vector_say path.", 1, _body_say)
+register_tool("body_anim", "Play a built-in ANIMATION/chirp/expression by name — SDK-native (NO wire-pod). params: name (trigger or anim), loops. Best-effort (may need anim list).", 1, _body_anim)
