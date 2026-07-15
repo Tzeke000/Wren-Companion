@@ -414,31 +414,105 @@ class BodySession:
         except Exception as e:
             return {"ok": False, "error": repr(e)[:300]}
 
-    def head(self, angle_deg: float) -> dict:
-        """Set head pitch (-22 down .. +45 up) and REMEMBER it for restore."""
+    def head(self, angle_deg: float, speed_deg_s: float = None,
+             accel_deg_s2: float = None) -> dict:
+        """Set head pitch (-22 down .. +45 up) and REMEMBER it for restore.
+        Optional speed_deg_s / accel_deg_s2 (SDK-native, no wire-pod): omit for
+        the fast default, small values (e.g. 30) for a slow deliberate tilt."""
         self._require()
         self._touch()
         try:
+            import math
             from anki_vector.util import degrees
             a = max(HEAD_MIN_DEG, min(HEAD_MAX_DEG, float(angle_deg)))
+            kw = {}
+            if speed_deg_s is not None:
+                kw["max_speed"] = max(1.0, float(speed_deg_s)) * math.pi / 180.0
+            if accel_deg_s2 is not None:
+                kw["accel"] = max(1.0, float(accel_deg_s2)) * math.pi / 180.0
             with self._sdk_lock:
-                res = self.robot.behavior.set_head_angle(degrees(a))
+                res = self.robot.behavior.set_head_angle(degrees(a), **kw)
             self._last_head_deg = a
             out = _behavior_result(res)
             out["head_deg"] = a
+            if speed_deg_s is not None:
+                out["speed_deg_s"] = float(speed_deg_s)
             return out
         except Exception as e:
             return {"ok": False, "error": repr(e)[:300]}
 
-    def lift(self, ratio: float) -> dict:
+    def lift(self, ratio: float, speed: float = None, accel: float = None) -> dict:
+        """Set fork lift 0.0 (down) .. 1.0 (up). Optional speed/accel (rad/s,
+        SDK-native) — omit for fast default (~10), small (e.g. 2) for a slow raise."""
         self._require()
         self._touch()
         try:
             r = max(LIFT_MIN, min(LIFT_MAX, float(ratio)))
+            kw = {}
+            if speed is not None:
+                kw["max_speed"] = max(0.1, float(speed))
+            if accel is not None:
+                kw["accel"] = max(0.1, float(accel))
             with self._sdk_lock:
-                res = self.robot.behavior.set_lift_height(r)
+                res = self.robot.behavior.set_lift_height(r, **kw)
             out = _behavior_result(res)
             out["lift_ratio"] = r
+            if speed is not None:
+                out["speed"] = float(speed)
+            return out
+        except Exception as e:
+            return {"ok": False, "error": repr(e)[:300]}
+
+    # ---------------------------------------------------------- expression (SDK-native)
+    def eyes(self, hue: float, sat: float = 1.0) -> dict:
+        """Set Vector's eye color — SDK-native (NO wire-pod). hue/sat 0..1
+        (my blue ~0.58). This replaces the wire-pod vector_eyes path."""
+        self._require()
+        self._touch()
+        try:
+            h = max(0.0, min(1.0, float(hue)))
+            s = max(0.0, min(1.0, float(sat)))
+            with self._sdk_lock:
+                self.robot.behavior.set_eye_color(hue=h, saturation=s)
+            return {"ok": True, "hue": h, "sat": s}
+        except Exception as e:
+            return {"ok": False, "error": repr(e)[:300]}
+
+    def say(self, text: str, vector_voice: bool = True) -> dict:
+        """Speak text through Vector's own speaker (SDK-native TTS). Restores head.
+        Replaces the wire-pod vector_say path (stock Vector voice)."""
+        self._require()
+        self._touch()
+        try:
+            txt = str(text)[:600]
+            with self._sdk_lock:
+                res = self.robot.behavior.say_text(
+                    txt, use_vector_voice=bool(vector_voice))
+                self._restore_head()
+            out = _behavior_result(res)
+            out["said"] = txt
+            return out
+        except Exception as e:
+            return {"ok": False, "error": repr(e)[:300]}
+
+    def anim(self, name: str, loops: int = 1) -> dict:
+        """Play a built-in animation/trigger by name (chirps, expressions) —
+        SDK-native. Tries a trigger then a raw animation. Best-effort: may need
+        the anim list cached (Robot inits with cache off for fast connect).
+        Restores head after."""
+        self._require()
+        self._touch()
+        try:
+            nm = str(name)
+            lc = max(1, int(loops))
+            with self._sdk_lock:
+                try:
+                    res = self.robot.anim.play_animation_trigger(nm, loop_count=lc)
+                except Exception:
+                    res = self.robot.anim.play_animation(nm, loop_count=lc)
+                self._restore_head()
+            out = _behavior_result(res)
+            out["anim"] = nm
             return out
         except Exception as e:
             return {"ok": False, "error": repr(e)[:300]}
