@@ -165,6 +165,32 @@ def _body_undock(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return s.undock()
 
 
+def _body_detect(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """OPEN-VOCAB detection on my Vector eyes (OWL-ViT, morphed from vector-advanced-
+    ai, no TensorRT). prompts = list or comma-string of TEXT queries ('an orange
+    traffic cone','a cube','a small robot'). Uses the LIVE feed if a body session is
+    open, else `path` (default the last body frame). threshold (0.05), bright (lift).
+    ~0.7s on the 3060. Best in good light (dim feed limits detection)."""
+    from brain import vector_owl
+    prompts = params.get("prompts")
+    if not prompts:
+        return {"ok": False, "error": "prompts required (list or comma-string of text queries)"}
+    s = _sess().get_session(create=False)
+    path = None
+    if s is not None and s.connected:
+        r = s.look(name="owl_view")
+        if r.get("ok"):
+            path = r.get("path")
+    if path is None:
+        path = str(params.get("path") or r"D:\Wren-Companion\state\vector\body_view.jpg")
+    out = vector_owl.detect(path, prompts,
+                            threshold=float(params.get("threshold") or 0.05),
+                            bright=bool(params.get("bright", False)))
+    out["frame"] = path
+    out["live"] = bool(s is not None and s.connected)
+    return out
+
+
 register_tool("body_open", "SEAT myself in Vector: open ONE held control session + live camera feed (coexists with observe daemon). Idempotent. Then use body_look/drive/turn/... without jumping out.", 1, _body_open)
 register_tool("body_close", "Un-seat: stop, release control, disconnect. Stock brain resumes.", 1, _body_close)
 register_tool("body_status", "Body session status + REAL battery (SDK is_charging) + wheels/head/reflex + nerves.", 1, _body_status)
@@ -178,3 +204,4 @@ register_tool("body_head", "Set Vector head pitch (-22 down..45 up); remembered 
 register_tool("body_lift", "Set Vector fork lift 0.0 (down)..1.0 (up).", 1, _body_lift)
 register_tool("body_dock", "NATIVE dock seat (drive_on_charger). Reliable. ~55s from distance.", 1, _body_dock)
 register_tool("body_undock", "Drive Vector off the charger.", 1, _body_undock)
+register_tool("body_detect", "OPEN-VOCAB detection on my Vector eyes (OWL-ViT, no TensorRT). prompts=list/comma-string of TEXT queries. Live feed if seated else last frame. threshold/bright. ~0.7s on 3060; best in good light.", 1, _body_detect)
