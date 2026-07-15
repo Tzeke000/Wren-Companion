@@ -78,6 +78,23 @@ def _body_perceive(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
                       save_frame=bool(params.get("frame", True)))
 
 
+def _body_servo(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """CLOSED-LOOP drive-to-target: I set the goal, the body runs the fast
+    control loop itself (steer-P + forward-P, edge-guarded) off the live stream
+    until it arrives. Target: (x,y) absolute pose; or (x,y, relative=true); or
+    (bearing_deg, dist_mm) relative to current heading. Needs body_open."""
+    s = _sess().get_session(create=False)
+    if s is None or not s.connected:
+        return {"ok": False, "error": "body session not open (call body_open)"}
+    return s.servo_to(
+        x=params.get("x"), y=params.get("y"),
+        bearing_deg=params.get("bearing_deg"), dist_mm=params.get("dist_mm"),
+        standoff_mm=float(params.get("standoff_mm") or 25.0),
+        max_speed=params.get("max_speed"),
+        timeout_s=float(params.get("timeout_s") or 12.0),
+        relative=bool(params.get("relative", False)))
+
+
 def _body_drive(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """Smooth velocity setpoint the guard HOLDS between my tool calls (no jerk,
     no head reset), edge-guarded. lw/rw mm/s (max 120); hold secs (default 3,
@@ -243,7 +260,8 @@ register_tool("body_close", "Un-seat: stop, release control, disconnect. Stock b
 register_tool("body_status", "Body session status + REAL battery (SDK is_charging) + wheels/head/reflex + nerves.", 1, _body_status)
 register_tool("body_look", "MY EYES (instant): sample live feed -> jpg path to Read. Reports image_id/age/stale (feed-frozen check). bright=true = mild lift. Needs body_open.", 1, _body_look)
 register_tool("body_perceive", "ONE CALL = full LIVE fused body-state, streamed ~15Hz in the background: latest camera frame + depth(prox) + heading(gyro) + lean(pitch/roll) + lift + head + how it all just CHANGED (moved/turned/prox-delta/frames-advanced). Replaces look+status stitch — the body never stops sensing. Needs body_open.", 1, _body_perceive)
-register_tool("body_drive", "Smooth velocity setpoint the guard HOLDS (no jerk, no head reset), edge-guarded. lw/rw mm/s (max120), hold s (default 3), accel ramp. lw=rw>0 fwd, lw=-rw spin.", 1, _body_drive)
+register_tool("body_drive", "Smooth velocity setpoint the guard HOLDS (no jerk, no head reset), edge-guarded. lw/rw mm/s (max 220 = true hardware max), hold s (default 3), accel ramp. lw=rw>0 fwd, lw=-rw spin.", 1, _body_drive)
+register_tool("body_servo", "CLOSED-LOOP drive-to-target: I set the goal, the BODY runs the fast control loop off the live stream (steer-P + forward-P, ramped, edge-guarded) until it arrives. Target: (x,y) absolute pose | (x,y,relative=true) | (bearing_deg,dist_mm) rel to heading. Opts: standoff_mm, max_speed, timeout_s. This is see-and-move-at-once. Needs body_open.", 1, _body_servo)
 register_tool("body_stop", "Stop all Vector motion now.", 1, _body_stop)
 register_tool("body_turn", "Gyro-EXACT turn in place. angle_deg +left/-right. Restores head after.", 1, _body_turn)
 register_tool("body_straight", "Encoder-EXACT straight. dist_mm +fwd/-back. Cliff-safe. Restores head.", 1, _body_straight)
