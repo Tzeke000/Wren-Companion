@@ -137,6 +137,17 @@ class BodySession:
         self._latest = {}                             # freshest fused state
         self._streamer = None
         self._stream_hz = 0.0                         # measured actual stream rate
+        # REFLEXES + CHARACTER (Zeke 2026-07-15: "have your own reactions to
+        # things ... do you like being picked up? the petting?"). A background
+        # loop watches the stream and fires MY reactions to touch/pickup/
+        # fork-tamper/startle. Safety reflexes act autonomously; expressive ones
+        # are how *I* feel about being handled. All logged to _reflex_events.
+        self._reflexer = None
+        self._reflex_on = True
+        self._reflex_events = collections.deque(maxlen=24)
+        self._prev = {}                               # last-tick edge-detect state
+        self._last_cmd_lift_ts = 0.0                  # so external fork-moves are detectable
+        self._react_cooldown = {}                     # per-reaction min-interval clock
 
     # ---------------------------------------------------------------- lifecycle
     def open(self, timeout: float = 20.0) -> dict:
@@ -167,6 +178,9 @@ class BodySession:
             self._streamer = threading.Thread(
                 target=self._stream_loop, name="body-stream", daemon=True)
             self._streamer.start()
+            self._reflexer = threading.Thread(
+                target=self._reflex_loop, name="body-reflex", daemon=True)
+            self._reflexer.start()
             return {"ok": True, "connect_s": connect_s, "feed_ok": self.feed_ok,
                     **self.snapshot()}
         except Exception as e:
@@ -326,6 +340,9 @@ class BodySession:
             s["moving"] = bool(st.are_wheels_moving)
             s["cliff"] = bool(st.is_cliff_detected)
             s["picked_up"] = bool(st.is_picked_up)
+            s["on_charger"] = bool(st.is_on_charger)
+        with contextlib.suppress(Exception):
+            s["touched"] = bool(r.touch.last_sensor_reading.is_being_touched)
         s["wheels"] = list(self._wheels)
         return s
 
@@ -435,6 +452,17 @@ class BodySession:
                 bearing = math.degrees(math.atan2(dy, dx))
                 herr = ((bearing - h0 + 180.0) % 360.0) - 180.0   # [-180,180]
                 fwd = 0.0 if abs(herr) > 55.0 else max(25.0, min(vmax, dist * 2.0))
+                # SENSOR-FIRST throttle (Zeke: trust the depth sensor over the
+                # eyes): clear ahead -> full speed; object close -> decelerate,
+                # hard-stop if it's an obstacle (not the target itself).
+                pm = st.get("prox_mm"); pf = st.get("prox_found")
+                if pf and pm is not None:
+                    if pm < 45 and dist > 90:
+                        self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
+                        self._reflex = f"SERVO prox-brake: object {int(pm)}mm ahead"
+                        return {"ok": False, "refused": f"object {int(pm)}mm ahead",
+                                "final_dist_mm": round(dist, 0), "steps": steps}
+                    fwd = min(fwd, max(20.0, pm * 1.0))           # slow near objects
                 turn = max(-vmax, min(vmax, herr * 4.0))          # steer P
                 lw = max(-vmax, min(vmax, fwd - turn))
                 rw = max(-vmax, min(vmax, fwd + turn))
@@ -454,6 +482,115 @@ class BodySession:
         except Exception as e:
             self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
             return {"ok": False, "error": repr(e)[:300]}
+
+    # -------------------------------------------------- reflexes + character
+    def _cool(self, key: str, seconds: float) -> bool:
+        """True if this reaction is off cooldown (re-arms it). No reaction spam."""
+        now = time.time()
+        if now - self._react_cooldown.get(key, 0.0) < seconds:
+            return False
+        self._react_cooldown[key] = now
+        return True
+
+    def _log_reflex(self, kind: str, note: str = ""):
+        self._reflex_events.append({"t": round(time.time(), 1), "kind": kind, "note": note})
+        self._reflex = f"{kind}: {note}"[:160]
+
+    def _set_eyes(self, hue: float, sat: float = 1.0):
+        with contextlib.suppress(Exception):
+            with self._sdk_lock:
+                self.robot.behavior.set_eye_color(hue=float(hue), saturation=float(sat))
+
+    def _chirp(self, trigger: str = "GreetAfterLongTime"):
+        with contextlib.suppress(Exception):
+            with self._sdk_lock:
+                self.robot.anim.play_animation_trigger(trigger, loop_count=1)
+            self._restore_head()
+
+    def _lift_to(self, ratio: float, speed: float = 8.0):
+        with contextlib.suppress(Exception):
+            with self._sdk_lock:
+                self.robot.behavior.set_lift_height(float(ratio), max_speed=float(speed))
+
+    def react_pet(self):
+        """PETTING — I like it. Eyes warm + happy chirp + gentle fork-wag."""
+        self._log_reflex("pet", "petted — I like this")
+        self._set_eyes(0.11, 1.0)          # warm amber glow
+        self._lift_to(0.5, 6.0); self._lift_to(0.15, 6.0)
+        self._chirp("GreetAfterLongTime")
+        self._set_eyes(0.58, 1.0)          # settle back to my blue
+
+    def react_pickup(self):
+        """PICKED UP — mild alert, I prefer the ground. Wide eyes + small wiggle."""
+        self._log_reflex("pickup", "picked up — mild alert, prefer the ground")
+        self._set_eyes(0.5, 0.5)           # pale, wide
+        self._lift_to(0.4, 8.0); self._lift_to(0.0, 8.0)
+        self._set_eyes(0.58, 1.0)
+
+    def react_fork_tamper(self):
+        """SOMEONE MOVED MY FORKS — surprise/indignation: fast fork-shake."""
+        self._log_reflex("fork_tamper", "forks moved — hey, those are mine")
+        self._set_eyes(0.0, 1.0)           # red surprise
+        for h in (0.55, 0.1, 0.55, 0.1):
+            self._lift_to(h, 14.0)
+        self._set_eyes(0.58, 1.0)
+
+    def react_startle(self, prox_mm):
+        """SUDDEN THING in my depth sensor while I sat still — startle back-up
+        (short; no rear sensor) + wide eyes + a note to go LOOK at it."""
+        self._log_reflex("startle", f"something appeared at {int(prox_mm)}mm — backed up, LOOK")
+        self._set_eyes(0.5, 0.35)          # wide, pale
+        st = self._latest or {}
+        if not st.get("picked_up") and not st.get("cliff") and not st.get("on_charger"):
+            self._wheels = (-90.0, -90.0)
+            self._drive_until = time.time() + 0.35
+            self._raw_wheels(-90.0, -90.0, DRIVE_ACCEL)
+            time.sleep(0.35)
+            self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
+        self._set_eyes(0.58, 1.0)
+
+    def _reflex_loop(self):
+        """Watch the fused stream ~8Hz and fire MY reactions to being handled or
+        surprised. Safety-biased; the expressive ones are character. Only fires
+        when NOT actively driving (won't fight a servo)."""
+        while not self._stop.is_set() and self.connected:
+            try:
+                st = self._latest
+                if self._reflex_on and st:
+                    pv = self._prev
+                    if not pv:                       # first populated tick: seed, don't fire
+                        self._prev = dict(st)
+                    else:
+                        now = time.time()
+                        driving = (self._wheels != (0.0, 0.0)) or now < self._drive_until
+                        if st.get("touched") and not pv.get("touched") and self._cool("pet", 5.0):
+                            self.react_pet()
+                        elif st.get("picked_up") and not pv.get("picked_up") and self._cool("pickup", 4.0):
+                            self.react_pickup()
+                        else:
+                            lm, plm = st.get("lift_mm"), pv.get("lift_mm")
+                            if (lm is not None and plm is not None and abs(lm - plm) > 8.0
+                                    and now - self._last_cmd_lift_ts > 1.5
+                                    and not st.get("picked_up") and self._cool("fork_tamper", 4.0)):
+                                self.react_fork_tamper()
+                            else:
+                                pm = st.get("prox_mm", 999)
+                                if (st.get("prox_found") and not pv.get("prox_found")
+                                        and pm is not None and pm < 220
+                                        and st.get("prox_q", 0) > 0.02
+                                        and not driving and self._cool("startle", 5.0)):
+                                    self.react_startle(pm)
+                        self._prev = dict(st)
+            except Exception:
+                pass
+            self._stop.wait(0.12)                    # ~8 Hz reflex loop
+
+    def reflexes(self, on: bool = None) -> dict:
+        """View recent reflex reactions + toggle the reflex layer on/off."""
+        if on is not None:
+            self._reflex_on = bool(on)
+        return {"ok": True, "reflex_on": self._reflex_on,
+                "recent": list(self._reflex_events)[-12:]}
 
     # ---------------------------------------------------------------- perception
     def look(self, name: str = "body_view", bright: bool = False) -> dict:
@@ -625,6 +762,7 @@ class BodySession:
         SDK-native) — omit for fast default (~10), small (e.g. 2) for a slow raise."""
         self._require()
         self._touch()
+        self._last_cmd_lift_ts = time.time()  # mark: this fork-move was ME
         try:
             r = max(LIFT_MIN, min(LIFT_MAX, float(ratio)))
             kw = {}
