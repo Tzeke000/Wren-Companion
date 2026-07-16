@@ -18,6 +18,7 @@ duration-capped and ALWAYS send a wheels-stop in a finally block.
 from __future__ import annotations
 
 import json
+import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -296,6 +297,86 @@ def _vector_wake(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         return {"ok": r.status_code == 200, "http": r.status_code}
     except Exception as e:
         return {"ok": False, "error": repr(e)[:300]}
+
+
+def _bot_ip() -> str | None:
+    """Bot's current LAN IP — jdocs first (survives DHCP), then anki sdk_config.ini."""
+    try:
+        data = json.loads(_JDOCS.read_text(encoding="utf-8"))
+        for r in (data.get("robots") or []):
+            ip = r.get("ip_address") or r.get("ipAddress") or r.get("ip")
+            if ip:
+                return str(ip)
+    except Exception:
+        pass
+    try:
+        cfg = Path.home() / ".anki_vector" / "sdk_config.ini"
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.lower().startswith("ip") and "=" in s:
+                return s.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return None
+
+
+def _port_open(ip: str, port: int = 443, timeout: float = 2.0) -> bool:
+    """True iff a TCP connection to ip:port succeeds — my proof the SDK server is live."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _body_selfwake(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Try to reopen my body's SDK server (port 443) with NO physical touch.
+
+    The hazard (2026-07-16): docked+idle a long time, Vector sleeps its main
+    compute and closes 443, so I can ping but not control — and reopening it
+    needed Zeke's hands. This fires wire-pod's remote wake-word (the cloud path
+    that stays alive while the body sleeps), then POLLS 443 until it reopens or
+    times out. Returns the MEASURED result (reopened True/False) — never a guess.
+    On success, `body_open` will work immediately after.
+
+    params: max_wait_s (default 40), fires (default 3, re-fire cadence ~12s).
+    """
+    ip = _bot_ip()
+    if not ip:
+        return {"ok": False, "error": "no bot IP (jdocs / sdk_config.ini)"}
+    if _port_open(ip):
+        return {"ok": True, "ip": ip, "already_open": True,
+                "note": "443 already open — SDK awake, no wake needed"}
+
+    max_wait = float(params.get("max_wait_s") or 40)
+    max_fires = int(params.get("fires") or 3)
+    start = time.time()
+    deadline = start + max_wait
+    log: list[str] = []
+    fired = 0
+    next_fire = 0.0
+    while time.time() < deadline:
+        now = time.time()
+        if fired < max_fires and now >= next_fire:
+            try:
+                r = _sdk("trigger_wake_word", timeout=10)
+                log.append(f"t+{now - start:.0f}s wake http={r.status_code}")
+            except Exception as e:
+                log.append(f"t+{now - start:.0f}s wake_err {e!r}"[:120])
+            fired += 1
+            next_fire = now + 12
+        if _port_open(ip):
+            return {"ok": True, "ip": ip, "reopened": True,
+                    "elapsed_s": round(time.time() - start, 1), "fires": fired,
+                    "log": log,
+                    "note": "443 REOPENED after remote wake — self-wake works; "
+                            "body_open is ready now"}
+        time.sleep(2)
+    return {"ok": False, "ip": ip, "reopened": False,
+            "elapsed_s": round(time.time() - start, 1), "fires": fired, "log": log,
+            "note": "443 stayed CLOSED after remote wake(s) — remote self-wake "
+                    "insufficient; fall back to natural-wake watchdog or a "
+                    "physical touch"}
 
 
 _MOUTH_SYNTH = "http://127.0.0.1:8769/synth"   # StyleTTS2 mouth — WAV-bytes endpoint
@@ -631,6 +712,7 @@ register_tool("vector_lift", "Move Vector's lift: speed -2..2, seconds (max 2), 
 register_tool("vector_eyes", "Set Vector's eye color: hue/sat 0-1 (default my blue ~0.58).", 1, _vector_eyes)
 register_tool("vector_see", "Camera frame from Vector -> jpg path to Read. My robot eyes.", 1, _vector_see)
 register_tool("vector_wake", "Remotely trigger Vector's wake word (opens his ears).", 1, _vector_wake)
+register_tool("body_selfwake", "Reopen my body's SDK (port 443) with NO physical touch: fire wire-pod's remote wake-word + poll 443 until it reopens or times out. Returns MEASURED reopened True/False. params: max_wait_s(40), fires(3).", 1, _body_selfwake)
 register_tool("vector_intent", "Trigger a stock behavior (dance/explore/sleep/fetchcube/charger...). params: intent. May need control released.", 1, _vector_intent)
 register_tool("vector_volume", "Set Vector's speaker volume 0-5.", 1, _vector_volume)
 register_tool("vector_stim", "Sample his internal stimulation level for N seconds (max 6). My read on his substrate.", 1, _vector_stim)
