@@ -85,12 +85,46 @@ def _gamma_brighten(pil, gamma: float = 0.6):
     physical light is the real fix. Clamped, LUT-fast, safe fallback."""
     try:
         import numpy as np
+        from PIL import Image
         g = max(0.35, min(1.0, float(gamma)))
         lut = (((np.arange(256) / 255.0) ** g) * 255).astype("uint8")
         arr = np.asarray(pil)
-        return type(pil).fromarray(lut[arr]) if arr.ndim else pil
+        return Image.fromarray(lut[arr]) if arr.ndim else pil
     except Exception:
         return pil
+
+
+def _enhance_lowlight(pil, clahe_clip: float = 3.0, gamma: float = 0.7,
+                      denoise: bool = False):
+    """M2 (2026-07-16): real low-light enhancement, not just a gamma smear.
+    CLAHE (contrast-limited adaptive histogram equalization) on the luminance
+    channel pulls detail out of dim regions locally, then a gamma lift. Optional
+    fast denoise (off by default — it's the slow step). Helps BOTH my visual read
+    AND the detection pipeline (CLAHE-normalized contrast lets OWL/mediapipe lock
+    what the raw dim frame hid). Falls back to gamma-only, then the raw frame."""
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+        arr = np.asarray(pil)
+        if arr.ndim != 3:
+            return _gamma_brighten(pil, gamma)
+        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=max(1.0, float(clahe_clip)),
+                                tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        merged = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+        g = max(0.4, min(1.0, float(gamma)))
+        lut = (((np.arange(256) / 255.0) ** g) * 255).astype("uint8")
+        out = lut[merged]
+        if denoise:
+            out = cv2.fastNlMeansDenoisingColored(out, None, 5, 5, 7, 15)
+        rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(rgb)
+    except Exception:
+        return _gamma_brighten(pil, gamma)
 
 
 def _behavior_result(res) -> dict:
@@ -784,7 +818,7 @@ class BodySession:
             except Exception:
                 pass
             if bright:
-                pil = _gamma_brighten(pil)
+                pil = _enhance_lowlight(pil)   # CLAHE + gamma (M2), gamma-only fallback
             FRAME_DIR.mkdir(parents=True, exist_ok=True)
             path = FRAME_DIR / f"{name}.jpg"
             pil.save(str(path))
