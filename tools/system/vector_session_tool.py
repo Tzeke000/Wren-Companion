@@ -64,7 +64,41 @@ def _body_look(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     if s is None or not s.connected:
         return {"ok": False, "error": "body session not open (call body_open)"}
     name = str(params.get("name") or "body_view").strip() or "body_view"
-    return s.look(name=name, bright=bool(params.get("bright", False)))
+    # Grab the RAW frame (bright=False), then enhance HERE in the tool layer.
+    # The brain class-method reload is unreliable (brain_hot_swap swaps module
+    # funcs, not methods); the tool reloads cleanly via iris_tool_reload, so the
+    # low-light enhancement lives here where it actually activates. Default ON.
+    r = s.look(name=name, bright=False)
+    if r.get("ok") and params.get("enhance", True):
+        try:
+            r["enhanced_mean"] = _enhance_frame_file(
+                r.get("path"), clahe=float(params.get("clahe", 3.0)),
+                gamma=float(params.get("gamma", 0.7)))
+            r["enhanced"] = True
+        except Exception as e:
+            r["enhanced"] = False
+            r["enhance_err"] = repr(e)[:150]
+    return r
+
+
+def _enhance_frame_file(path: str, clahe: float = 3.0, gamma: float = 0.7) -> float:
+    """CLAHE (adaptive local contrast) + gamma low-light lift, applied IN PLACE to
+    the saved frame so my dim under-exposed eye is legible. Returns the enhanced
+    mean brightness. Self-contained (cv2) so it activates via iris_tool_reload."""
+    import cv2
+    import numpy as np
+    bgr = cv2.imread(path)
+    if bgr is None:
+        raise RuntimeError("frame not readable")
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = cv2.createCLAHE(clipLimit=max(1.0, clahe), tileGridSize=(8, 8)).apply(l)
+    merged = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+    g = max(0.4, min(1.0, gamma))
+    lut = (((np.arange(256) / 255.0) ** g) * 255).astype("uint8")
+    out = lut[merged]
+    cv2.imwrite(path, out)
+    return round(float(cv2.cvtColor(out, cv2.COLOR_BGR2GRAY).mean()), 1)
 
 
 def _body_perceive(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
