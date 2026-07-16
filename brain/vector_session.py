@@ -158,6 +158,7 @@ class BodySession:
         self._consent_handling = True
         self._pet_level = 0                           # escalates 1..4 -> bliss with duration
         self._pet_last = 0.0                          # last pet-stroke time (window reset)
+        self._cam_expo = None                         # (exposure_ms, gain) or ('auto',None)
 
     # ---------------------------------------------------------------- lifecycle
     def open(self, timeout: float = 20.0) -> dict:
@@ -177,6 +178,17 @@ class BodySession:
             except Exception as e:
                 self.feed_ok = False
                 self._reflex = f"camera feed init failed: {e!r}"[:160]
+            # BRIGHTEN AT THE SOURCE (Zeke 2026-07-16: "up the brightness in your
+            # skull"). My body cam is far worse than the digital-body cam and reads
+            # dim even in a lit room — that's UNDER-EXPOSURE, not real dark. Crank
+            # sensor exposure+gain the moment the feed is up, so every frame the
+            # whole pipeline sees (look / perceive stream / detection / docking) is
+            # brighter at capture. Best-effort; a failure never blocks the open.
+            if self.feed_ok:
+                try:
+                    self.set_camera_brightness()
+                except Exception as e:
+                    self._reflex = f"cam brighten skipped: {e!r}"[:120]
             self.connected = True
             self.error = None
             self.opened_ts = time.time()
@@ -708,7 +720,48 @@ class BodySession:
                 "recent": list(self._reflex_events)[-12:]}
 
     # ---------------------------------------------------------------- perception
-    def look(self, name: str = "body_view", bright: bool = False) -> dict:
+    def set_camera_brightness(self, exposure_ms=None, gain=None,
+                              auto: bool = False, frac: float = 1.0) -> dict:
+        """Retune the camera sensor so I SEE brighter at capture (not just cosmetic
+        post-lift). My body cam under-exposes in a lit room; raising exposure+gain
+        is the real fix. Defaults (no args) = MAX exposure + `frac` of max gain from
+        the SDK's own reported config. auto=True hands back to auto-exposure instead.
+
+        Higher gain = brighter but noisier; exposure is the cleaner lever, so we max
+        exposure and take a high (not maxed) gain by default. Returns what got set.
+        Guards on self.robot (not _require) so it can run mid-open before the
+        connected flag is set."""
+        if self.robot is None:
+            return {"ok": False, "error": "no robot connection"}
+        cam = self.robot.camera
+        out = {"ok": True}
+        try:
+            if auto:
+                try:
+                    cam.enable_auto_exposure(enable_auto_exposure=True)
+                except TypeError:
+                    cam.enable_auto_exposure(True)
+                out["mode"] = "auto"
+                self._cam_expo = ("auto", None)
+                return out
+            cfg = getattr(cam, "config", None)
+            max_exp = int(getattr(cfg, "max_camera_exposure_time_ms", 66)) if cfg else 66
+            max_gain = float(getattr(cfg, "max_gain", 6.0)) if cfg else 6.0
+            min_gain = float(getattr(cfg, "min_gain", 1.0)) if cfg else 1.0
+            exp = int(exposure_ms) if exposure_ms is not None else max_exp
+            g = float(gain) if gain is not None else max(min_gain,
+                                                         min(max_gain, max_gain * frac))
+            exp = max(1, min(exp, max_exp))
+            g = max(min_gain, min(g, max_gain))
+            cam.set_manual_exposure(exp, g)
+            self._cam_expo = (exp, g)
+            out.update({"mode": "manual", "exposure_ms": exp, "gain": round(g, 2),
+                        "cfg_max_exp": max_exp, "cfg_max_gain": max_gain})
+            return out
+        except Exception as e:
+            return {"ok": False, "error": repr(e)[:220]}
+
+    def look(self, name: str = "body_view", bright: bool = True) -> dict:
         """Instant frame from the live feed -> jpg path to Read. Non-blocking.
         Reports image_id/age/stale so I can tell a LIVE feed from a frozen one
         (image_id repeating = stale). bright=True applies a mild cosmetic lift."""
