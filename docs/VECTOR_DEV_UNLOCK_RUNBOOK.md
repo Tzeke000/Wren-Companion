@@ -62,17 +62,24 @@ voice via `play_sound`) very likely survives but is **NOT source-confirmed → l
    any starting firmware (v1.6/1.8/2.0.1). No CPU swap. No account/DDL email needed for the froggitti path.
 2. **On charger, wheels blocked, on Wi-Fi.**
 3. **Enter recovery mode:** ✅ hold the backpack button **~15s** until it powers off, KEEP holding
-   until lights return / face shows the **`anki.com/v` / `ddl.io/v`** recovery screen. (Not a data wipe.)
-4. **Drive the unlock from Chrome:** go to **`https://devsetup.froggitti.net/`**, pair with Vector
-   over **BLE**, leave **"auto setup flow" CHECKED**. Select **`Unlock-Prod.OTA`**. Connect Vector to
-   Wi-Fi in that interface; let it install.
-   - Face shows a **cloud/sync icon** while downloading. A **cloud-with-exclamation** = Wi-Fi download
+   until the **2 back lights turn SOLID DARK BLUE**; it reboots to a screen showing
+   **`anki.com/v` / `ddl.io/v` / `anki.com/dev` / `u.p-2.xyz`**. (Not a data wipe.)
+4. **Drive the unlock from Chrome — CORRECTED URL (verified live 2026-07-16):**
+   ⚠️ the wiki's `devsetup.froggitti.net` is **DEAD** (bare nginx page). The WORKING tool is
+   **`https://websetup.froggitti.net`** (DDL "Vector Web Setup", Web-Bluetooth). Flow:
+   (a) open in **Chrome** → "Select the stack" → pick **`Utility`** → Confirm.
+   (b) with the recovery screen up, **double-press** the button, click **"Pair with Vector"**,
+       leave **"auto flow setup" CHECKED** (enter PIN from the robot's face if prompted).
+   (c) **Connect to Wi-Fi** (needs SSID/pw).
+   (d) select **`Unlock-Prod.ota`** → let it install.
+   - Face shows a **cloud/sync icon** while downloading; **cloud-with-exclamation** = Wi-Fi download
      failed → move closer / retry (safe to retry *before* the write phase).
+   - Current authoritative steps: `https://unlock-prod.froggitti.net/` (Froggitti's own page).
 5. **What it flashes:** ✅ new **`aboot` + `recovery` + `recoveryfs`** (dev-signed). Mechanism: drops
    files into `/anki`, `ankiinit.sh` flashes partitions on boot. **≈7 min total.** ← THE BRICK WINDOW.
-6. **Then flash dev firmware (WireOS):** back to recovery → `https://devsetup.froggitti.net/` → select
-   **WireOS** → flash. ✅ **rainbow WireOS boot logo** = dev firmware running. (Being able to flash a
-   dev OTA at all = proof the unlock worked.)
+6. **Then flash dev firmware (WireOS):** back to recovery → `websetup.froggitti.net` → select the
+   **`Custom Firmware`** stack → choose **WireOS** → flash. ✅ **rainbow WireOS boot logo** = dev
+   firmware running. (Being able to flash a dev OTA at all = proof the unlock worked.)
 7. **Confirm unlock:** ✅ dev webservers on **:8887–:8890** (`:8888/webViz.html`), and **SSH**:
    `ssh root@<vector-ip>` with key `ssh_root_key` (kercre123/unlocking-vector repo). CCIS firmware
    string ends in **`ep`**.
@@ -129,10 +136,21 @@ voice via `play_sound`) very likely survives but is **NOT source-confirmed → l
 - **Brick reports from THIS path:** ❓ none found in sources read (only benign flakiness: BLE hiccups,
   slow downloads, stuck bar fixed by incognito) — but forums/Discord not exhaustively crawled; absence ≠ safety.
 
-## 8. REBUILD LIST (fill from §4 results)
+## 8. REBUILD LIST — EXECUTED 2026-07-16, results in
 
-`[fill after validation — most likely just: SDK re-auth (expected); and IF play_sound regressed → repoint
-voice or implement PCM-out on-robot.]`
+**Unlock + WireOS flash both SUCCEEDED 2026-07-16 (Zeke's hands, Iris guiding via Discord).**
+Post-flash validation (Fable session, ~13:15 EDT):
+
+- ✅ WireOS dev firmware CONFIRMED: `:8888/webViz.html` → HTTP 200 (dev-only port).
+- ✅ wire-pod :8080 `vector_status` — serial `0dd1cdaf`, on charger, charging.
+- ✅ SDK 443: `body_open` connected 6.7s, camera feed ok — **NO re-auth was needed.** The §1/§4
+  "mandatory re-auth" prediction was WRONG in the good direction: the existing cert/GUID kept working.
+- ✅ Camera: `vector_see` — clean frame from the dock.
+- ✅ Custom voice: `vector_say_iris` → HTTP 200, wav played (Zeke ear-confirm pending at write time).
+- ⏳ Ears/STT tap — live test with Zeke pending.
+- ⏳ ssh root / gobot — not yet attempted; next frontier.
+
+**Rebuild list: EMPTY.** The whole stack survived stock→WireOS.
 
 ## 9. Recommended safest sequence (research verdict)
 
