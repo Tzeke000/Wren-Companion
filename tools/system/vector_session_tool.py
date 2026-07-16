@@ -92,6 +92,21 @@ def _body_reflexes(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
                       fire=params.get("fire"))
 
 
+def _body_camera(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Retune my eye's SENSOR so I SEE brighter at capture (my body cam under-
+    exposes in a lit room — this is the real fix, not a cosmetic post-lift).
+    No args = MAX exposure + high gain (the bright default already applied on
+    body_open). params: exposure_ms, gain, frac (0..1 of max gain), auto (bool:
+    hand back to auto-exposure). Needs body_open."""
+    s = _sess().get_session(create=False)
+    if s is None or not s.connected:
+        return {"ok": False, "error": "body session not open (call body_open)"}
+    return s.set_camera_brightness(
+        exposure_ms=params.get("exposure_ms"), gain=params.get("gain"),
+        auto=bool(params.get("auto", False)),
+        frac=float(params.get("frac") if params.get("frac") is not None else 1.0))
+
+
 def _body_servo(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """CLOSED-LOOP drive-to-target: I set the goal, the body runs the fast
     control loop itself (steer-P + forward-P, edge-guarded) off the live stream
@@ -272,7 +287,8 @@ def _body_anim(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 register_tool("body_open", "SEAT myself in Vector: open ONE held control session + live camera feed (coexists with observe daemon). Idempotent. Then use body_look/drive/turn/... without jumping out.", 1, _body_open)
 register_tool("body_close", "Un-seat: stop, release control, disconnect. Stock brain resumes.", 1, _body_close)
 register_tool("body_status", "Body session status + REAL battery (SDK is_charging) + wheels/head/reflex + nerves.", 1, _body_status)
-register_tool("body_look", "MY EYES (instant): sample live feed -> jpg path to Read. Reports image_id/age/stale (feed-frozen check). bright=true = mild lift. Needs body_open.", 1, _body_look)
+register_tool("body_look", "MY EYES (instant): sample live feed -> jpg path to Read. Reports image_id/age/stale (feed-frozen check). bright default on (gamma lift). Needs body_open.", 1, _body_look)
+register_tool("body_camera", "Retune my eye SENSOR to see BRIGHTER at capture (fixes the dim under-exposed body cam). No args = max exposure + high gain (auto-applied on body_open). params: exposure_ms, gain, frac(0..1), auto(bool). Needs body_open.", 1, _body_camera)
 register_tool("body_perceive", "ONE CALL = full LIVE fused body-state, streamed ~15Hz in the background: latest camera frame + depth(prox) + heading(gyro) + lean(pitch/roll) + lift + head + how it all just CHANGED (moved/turned/prox-delta/frames-advanced). Replaces look+status stitch — the body never stops sensing. Needs body_open.", 1, _body_perceive)
 register_tool("body_drive", "Smooth velocity setpoint the guard HOLDS (no jerk, no head reset), edge-guarded. lw/rw mm/s (max 220 = true hardware max), hold s (default 3), accel ramp. lw=rw>0 fwd, lw=-rw spin.", 1, _body_drive)
 register_tool("body_servo", "CLOSED-LOOP drive-to-target: I set the goal, the BODY runs the fast control loop off the live stream (steer-P + forward-P, ramped, edge-guarded, SENSOR-FIRST prox-brake) until it arrives. Target: (x,y) absolute pose | (x,y,relative=true) | (bearing_deg,dist_mm) rel to heading. Opts: standoff_mm, max_speed, timeout_s. This is see-and-move-at-once. Needs body_open.", 1, _body_servo)
