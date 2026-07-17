@@ -654,17 +654,25 @@ class Pilot:
                     docked = True
                     break
             time.sleep(2.0)
-        with contextlib.suppress(Exception):
-            ctl.write_text(json.dumps({"hold": True, "set_ts": time.time(),
-                                       "by": "smart_park"}), encoding="utf-8")
+        # DESIGN FLAW FIXED (2026-07-17 live: timeout re-possess STRANGLED the
+        # stock brain mid-dock-search — it had the charger sighted at 1050mm
+        # and the RESERVE hold killed its behavior). Only re-possess when
+        # DOCKED; on timeout leave possession RELEASED so the search can
+        # finish, and tell cognition exactly how to re-hold.
+        if docked:
+            with contextlib.suppress(Exception):
+                ctl.write_text(json.dumps({"hold": True, "set_ts": time.time(),
+                                           "by": "smart_park"}), encoding="utf-8")
         self._event("smart_park_result",
                     {"docked": docked,
                      "note": ("stock brain parked me; possession re-held; "
                               "session left CLOSED — body_open to re-seat"
                               if docked else
                               "NOT docked within the wait window — possession "
-                              "re-held; check the body (it may still be "
-                              "maneuvering, or need light)")},
+                              "left RELEASED so the stock brain can finish "
+                              "its search (re-possess strangled it once). "
+                              "Watch nerves for on_charger, then body_possess "
+                              "hold=true; if it never docks it may need light")},
                     nudge=True)
 
     def _m_dock(self, m: dict) -> None:
