@@ -71,5 +71,16 @@ def _body_charger(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": repr(e)[:250]}
 
 
+def _body_overhead(params: dict, g: dict) -> dict:
+    """OVERHEAD-EYE PROBE (2026-07-17): one frame from the PC camera (shared
+    device path — no fight with perception) + ArUco marker detection. Answers
+    'can the PC cam localize my body on the desk?' Read the saved jpg to judge
+    the view. Markers appear once the tags are printed; px→mm needs the
+    stage-2 calibration (Zeke-present)."""
+    from brain import vector_overhead
+    return vector_overhead.probe(save=bool(params.get("save", True)))
+
+
 register_tool("body_marker_vision", "Enable firmware marker detection on the live session (charger/cube/custom fiducials)", 2, _body_marker_vision)
 register_tool("body_charger", "Engine's known charger pose — MUST be known before body_park (unseen charger = dock hang)", 1, _body_charger)
+register_tool("body_overhead", "OVERHEAD-EYE probe: PC-camera frame + ArUco marker detection (localization stage 1). Read the saved jpg to judge whether the view covers my driving area.", 1, _body_overhead)
