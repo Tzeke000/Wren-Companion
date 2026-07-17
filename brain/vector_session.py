@@ -462,7 +462,8 @@ class BodySession:
     # ---------------------------------------------------------------- servo
     def servo_to(self, x=None, y=None, bearing_deg=None, dist_mm=None,
                  standoff_mm: float = 25.0, max_speed: float = None,
-                 timeout_s: float = 12.0, relative: bool = False) -> dict:
+                 timeout_s: float = 12.0, relative: bool = False,
+                 abort_event: "threading.Event" = None) -> dict:
         """CLOSED-LOOP drive to a target — the FAST control loop runs HERE off the
         live stream, not hand-stepped. Steer-P on heading error + forward-P on
         remaining distance, ramped + edge-guarded, until within standoff or
@@ -492,6 +493,9 @@ class BodySession:
         steps = 0
         try:
             while time.time() < t_end:
+                if abort_event is not None and abort_event.is_set():
+                    self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
+                    return {"ok": False, "aborted": True, "steps": steps}
                 st = self._latest or {}
                 x0 = float(st.get("x", cx)); y0 = float(st.get("y", cy))
                 h0 = float(st.get("heading", ch))
