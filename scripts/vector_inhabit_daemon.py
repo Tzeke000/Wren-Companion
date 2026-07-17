@@ -157,6 +157,19 @@ def _possession_loop(alive) -> None:
         emergency = _battery_emergency()
         should = want and not emergency
         now = time.time()
+        # HEARTBEAT (2026-07-17 ~04:30 — the stale-hold edge): a silent gRPC
+        # death (robot reboot, wifi blip that only hits this channel) leaves
+        # rc non-None while the reservation is GONE server-side. The
+        # connection's own thread dying is the observable — rebuild on it.
+        if rc is not None:
+            th = getattr(getattr(rc, "_conn", None), "_thread", None)
+            if th is not None and not th.is_alive():
+                log("possession connection thread DEAD — rebuilding the hold")
+                try:
+                    rc.__exit__(None, None, None)
+                except Exception:
+                    pass
+                rc = None
         try:
             if should and rc is None and now >= backoff_until:
                 r = _vb.ReserveBehaviorControl(SERIAL)
