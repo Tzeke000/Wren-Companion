@@ -50,11 +50,23 @@ def _body_close(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 
 
 def _body_status(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
-    """Session + REAL battery (SDK is_charging) + wheels/head/reflex + nerves."""
+    """Session + fused sensor cache. WEDGE-PROOF (23:30 scar): reads ONLY the
+    stream cache + pure fields — a live get_battery_state gRPC during a hung
+    behavior call once wedged the ENTIRE MCP server. Pass live=true to accept
+    that risk deliberately (real battery volts/is_charging)."""
     s = _sess().get_session(create=False)
     if s is None or not s.connected:
         return {"ok": True, "connected": False, "note": "no body session open"}
-    return s.status()
+    if params.get("live"):
+        return s.status()                     # deliberate live-gRPC opt-in
+    out = {"ok": True, **s.snapshot()}
+    fused = dict(getattr(s, "_latest", {}) or {})
+    out["fused"] = fused                      # pose/prox/flags/pitch/roll/etc
+    out["stream_hz"] = getattr(s, "_stream_hz", 0.0)
+    out["cached"] = True
+    out["note"] = ("cached fused state (no live gRPC — wedge-proof); "
+                   "live=true for real battery")
+    return out
 
 
 def _body_look(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
