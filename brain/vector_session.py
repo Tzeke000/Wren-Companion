@@ -764,6 +764,48 @@ class BodySession:
             self._play_trigger("ReactToShake_Lvl1OnGround")
             self._set_eyes(0.58, 1.0)
 
+    def react_evade(self, prox_mm, closing_mm_s):
+        """SOMETHING APPROACHING ME (2026-07-17 mobility round 2: evasion, not
+        just braking). The startle covers sudden appearance; this covers a
+        SUSTAINED approach — prox closing fast while I sit still. Diff-drive
+        can't strafe, so the dodge is a bounded reverse-arc away from the
+        threat, then face it (ReactToObstacle look)."""
+        self._log_reflex("evade", f"incoming: {int(prox_mm)}mm closing "
+                                  f"{int(closing_mm_s)}mm/s — dodge arc")
+        self._set_eyes(0.5, 0.35)          # wide, pale
+        st = self._latest or {}
+        if not st.get("picked_up") and not st.get("cliff") and not st.get("on_charger"):
+            self._wheels = (-130.0, -50.0)     # reverse arc (back + swing aside)
+            self._drive_until = time.time() + 0.55
+            self._raw_wheels(-130.0, -50.0, DRIVE_ACCEL)
+            time.sleep(0.55)
+            self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
+        self._play_trigger("ReactToObstacle")
+        self._set_eyes(0.58, 1.0)
+
+    def _prox_closing_speed(self) -> tuple:
+        """(prox_mm_now, closing_mm_s) from the fused stream buffer (~0.6s
+        window). Positive closing = object getting NEARER. (None, 0) if the
+        depth read isn't trustworthy across the window."""
+        buf = list(self._stream)
+        if len(buf) < 4:
+            return None, 0.0
+        now_e = buf[-1]
+        base = None
+        for e in reversed(buf[:-1]):
+            if now_e.get("t", 0) - e.get("t", 0) >= 0.5:
+                base = e
+                break
+        if base is None:
+            base = buf[0]
+        for e in (base, now_e):
+            if (not e.get("prox_found") or e.get("prox_mm") is None
+                    or e.get("prox_q", 0) <= 0.02):
+                return None, 0.0
+        dt = max(0.1, now_e["t"] - base["t"])
+        closing = (float(base["prox_mm"]) - float(now_e["prox_mm"])) / dt
+        return float(now_e["prox_mm"]), closing
+
     def react_startle(self, prox_mm):
         """SUDDEN THING in my depth sensor while I sat still — startle back-up
         (short; no rear sensor) + Vector's obstacle reaction + go LOOK."""
@@ -830,7 +872,13 @@ class BodySession:
                                 self.react_fork_tamper()
                             else:
                                 pm = st.get("prox_mm", 999)
-                                if (st.get("prox_found") and not pv.get("prox_found")
+                                pnow, closing = (self._prox_closing_speed()
+                                                 if not driving else (None, 0.0))
+                                if (pnow is not None and pnow < 350
+                                        and closing > 120.0
+                                        and self._cool("evade", 6.0)):
+                                    self.react_evade(pnow, closing)
+                                elif (st.get("prox_found") and not pv.get("prox_found")
                                         and pm is not None and pm < 220
                                         and st.get("prox_q", 0) > 0.02
                                         and not driving and self._cool("startle", 5.0)):
@@ -859,6 +907,7 @@ class BodySession:
                 "putdown": self.react_putdown,
                 "fork": self.react_fork_tamper,
                 "startle": lambda: self.react_startle(150),
+                "evade": lambda: self.react_evade(200, 150),
                 "greet": lambda: self.react_greet("Zeke"),
                 "bored": self.react_bored,
                 "upset": lambda: self.react_upset("manual test"),

@@ -94,6 +94,52 @@ def _body_launch(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return _pilot().start_mission({"kind": "undock"})
 
 
+def _body_goto(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """MAP-AWARE GOTO: A* through the room blueprint + hazard memory, routing
+    AROUND known obstacles; falls back to direct servo-with-detours if no
+    usable map. params: x, y (abs mm, required); standoff_mm, max_speed,
+    timeout_s (per leg), avoid, max_detours."""
+    if params.get("x") is None or params.get("y") is None:
+        return {"ok": False, "error": "x and y (abs mm) required"}
+    return _pilot().start_mission(
+        {"kind": "goto", "x": _num(params.get("x")), "y": _num(params.get("y")),
+         "standoff_mm": _num(params.get("standoff_mm"), 30.0),
+         "max_speed": _num(params.get("max_speed")),
+         "timeout_s": _num(params.get("timeout_s"), 20.0),
+         "avoid": bool(params.get("avoid", True)),
+         "max_detours": int(_num(params.get("max_detours"), 2) or 2)})
+
+
+def _body_park_smart(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """SMART-PARK: Zeke's docking lesson automated — optional approach servo to
+    a staging point (x,y near home), then release possession + close my session
+    and let the STOCK brain do the parking it's 4x better at; re-possess once
+    docked (or timeout). Ends with the session CLOSED — body_open to re-seat.
+    params: x, y (optional staging point), wait_s (default 240)."""
+    return _pilot().start_mission(
+        {"kind": "smart_park",
+         "x": _num(params.get("x")), "y": _num(params.get("y")),
+         "standoff_mm": _num(params.get("standoff_mm"), 60.0),
+         "timeout_s": _num(params.get("timeout_s"), 25.0),
+         "wait_s": _num(params.get("wait_s"), 240.0)})
+
+
+def _body_hazards(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """HAZARD MEMORY: the journal of every blocked/stuck/detour location
+    (pose + origin frame). The planner routes around them. params: origin
+    (filter to a pose frame), limit (default 40); clear=true wipes the file."""
+    from brain import vector_pilot as vp
+    if params.get("clear"):
+        try:
+            vp.HAZARDS.unlink(missing_ok=True)
+            return {"ok": True, "cleared": True}
+        except Exception as e:
+            return {"ok": False, "error": repr(e)[:150]}
+    hz = vp.read_hazards(origin=params.get("origin"))
+    limit = int(_num(params.get("limit"), 40) or 40)
+    return {"ok": True, "count": len(hz), "hazards": hz[-limit:]}
+
+
 def _body_pilot(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """Pilot status: state (idle/running), current mission, last 10 events."""
     return _pilot().status()
@@ -108,6 +154,9 @@ def _body_abort(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 register_tool("body_go", "PILOT: background servo to target (x,y | bearing_deg+dist_mm) — returns instantly, outcome nudges me. Obstacle DETOURS built in (avoid=true default, max_detours=2): blocked/stuck -> back off, ToF-probe both sides, sidestep, retry. params: see doc", 2, _body_go)
 register_tool("body_route", "PILOT: background waypoint route with obstacle detours (avoid/max_detours like body_go). params: points=[[x,y],...]", 2, _body_route)
 register_tool("body_retrace", "PILOT: escape the way I came — walk my own breadcrumb trail backwards (known-clear path, detours off). params: steps (default 12), timeout_s", 2, _body_retrace)
+register_tool("body_goto", "PILOT: MAP-AWARE goto — A* through the room blueprint + hazard memory, routes AROUND known obstacles (falls back to direct servo+detours without a map). params: x, y (abs mm)", 2, _body_goto)
+register_tool("body_park_smart", "PILOT: SMART-PARK — approach a staging point, then hand the actual parking to the STOCK brain (possession released, session closed, re-possess when docked). Zeke's lesson automated. params: x,y (optional staging), wait_s", 2, _body_park_smart)
+register_tool("body_hazards", "PILOT: hazard memory — journal of blocked/stuck/detour locations the planner routes around. params: origin (frame filter), limit, clear=true wipes", 1, _body_hazards)
 register_tool("body_scan", "PILOT: background 360 survey (ToF+heading polar sketch, frames opt). params: steps, frames", 2, _body_scan)
 register_tool("body_park", "PILOT: background dock on charger (wedge-safe: hangs a thread, not my turn)", 2, _body_park)
 register_tool("body_launch", "PILOT: background undock from charger", 2, _body_launch)

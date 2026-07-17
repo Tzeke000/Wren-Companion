@@ -57,6 +57,64 @@ def _battery_low_off_charger() -> bool:
         return False
 
 
+# --- HAZARD MEMORY (2026-07-17 round 2, Zeke: "all things an AI needs for a
+# mobile body"). Every blocked/stuck/detour location is journaled with pose +
+# origin_id so I stop re-learning the same obstacles. The planner treats recent
+# same-frame hazards as obstacles; body_pilot exposes them.
+HAZARDS = REPO / "state" / "vector" / "hazards.jsonl"
+HAZARD_KEEP = 300
+
+
+def log_hazard(kind: str, x, y, origin, note: str = "") -> None:
+    if x is None or y is None:
+        return
+    try:
+        HAZARDS.parent.mkdir(parents=True, exist_ok=True)
+        with HAZARDS.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": round(time.time(), 2), "kind": kind,
+                                "x": round(float(x), 1), "y": round(float(y), 1),
+                                "origin": origin, "note": str(note)[:120]}) + "\n")
+    except Exception:
+        pass
+
+
+def read_hazards(origin=None, max_n: int = HAZARD_KEEP) -> list:
+    try:
+        lines = HAZARDS.read_text(encoding="utf-8").strip().splitlines()
+    except Exception:
+        return []
+    out = []
+    for ln in lines[-max_n:]:
+        with contextlib.suppress(Exception):
+            d = json.loads(ln)
+            if origin is None or d.get("origin") == origin:
+                out.append(d)
+    return out
+
+
+# --- RETURN-HOME MARGIN (2026-07-17 round 2): don't accept a mission I might
+# not have the battery to come home from. Volts from the daemon's battery poll;
+# conservative fixed thresholds (no measured mm-per-volt yet). Missing data =
+# allow + note (hedge, don't false-block).
+def _return_margin(target_xy=None) -> dict:
+    try:
+        d = json.loads(BATTERY_JSON.read_text(encoding="utf-8"))
+        volts = float(d.get("volts") or 0.0)
+        on_charger = bool(d.get("on_charger"))
+    except Exception:
+        return {"ok": True, "note": "battery unreadable — allowing (hedged)"}
+    if on_charger or volts <= 0.0:
+        return {"ok": True}
+    if volts < 3.60:
+        return {"ok": False,
+                "refused": f"battery {volts:.2f}V off-charger — below return "
+                           f"margin; dock (body_park) is the only sane mission"}
+    if volts < 3.72:
+        return {"ok": True, "warn": f"battery {volts:.2f}V — thin margin, keep "
+                                    f"this mission short and end near home"}
+    return {"ok": True}
+
+
 def _session():
     from brain import vector_session
     s = vector_session.get_session(create=False)
@@ -100,6 +158,12 @@ class Pilot:
             return {"ok": False,
                     "refused": "battery LOW and off charger — only a dock "
                                "mission (body_park) is allowed right now"}
+        margin_warn = None
+        if str(mission.get("kind")) not in ("dock", "smart_park"):
+            mg = _return_margin()
+            if not mg.get("ok"):
+                return {"ok": False, "refused": mg.get("refused")}
+            margin_warn = mg.get("warn")
         with _LOCK:
             if self.state == "running":
                 # preempt: newest goal wins (cognition changed its mind)
@@ -115,10 +179,13 @@ class Pilot:
                 target=self._run, args=(dict(mission),),
                 name="body-pilot", daemon=True)
             self.thread.start()
-        return {"ok": True, "started": mission.get("kind"),
-                "note": "mission running in background — my turn stays free; "
-                        "outcome arrives as a [VECTOR PILOT] nudge, or poll "
-                        "body_pilot"}
+        out = {"ok": True, "started": mission.get("kind"),
+               "note": "mission running in background — my turn stays free; "
+                       "outcome arrives as a [VECTOR PILOT] nudge, or poll "
+                       "body_pilot"}
+        if margin_warn:
+            out["battery_warn"] = margin_warn
+        return out
 
     def abort(self) -> dict:
         self.abort_evt.set()
@@ -132,7 +199,8 @@ class Pilot:
         return {"ok": True, "state": self.state, "mission": self.mission,
                 "running_s": round(time.time() - self.started_ts, 1)
                 if self.state == "running" else 0.0,
-                "events": list(self.events)[-10:]}
+                "events": list(self.events)[-10:],
+                "hazards_known": len(read_hazards())}
 
     # --------------------------------------------------------- breadcrumbs
     # (2026-07-17, mobility layer): every mission drops a pose trail to disk in
@@ -178,11 +246,13 @@ class Pilot:
         try:
             fn = {"servo": self._m_servo, "route": self._m_route,
                   "scan": self._m_scan, "dock": self._m_dock,
-                  "undock": self._m_undock, "retrace": self._m_retrace}.get(kind)
+                  "undock": self._m_undock, "retrace": self._m_retrace,
+                  "smart_park": self._m_smart_park,
+                  "goto": self._m_goto}.get(kind)
             if fn is None:
                 self._event("error", f"unknown mission kind {kind!r}")
                 return
-            if kind in ("servo", "route", "retrace"):
+            if kind in ("servo", "route", "retrace", "goto"):
                 threading.Thread(target=self._crumb_loop, args=(crumb_stop,),
                                  name="pilot-crumbs", daemon=True).start()
             fn(m)
@@ -212,6 +282,8 @@ class Pilot:
         layer): back off, probe both sides with the ToF, turn toward the clearer
         one, sidestep past the obstacle. Returns False if aborted."""
         self._event("detour", {"why": str(why)[:140]})
+        st = dict(s._latest or {})
+        log_hazard("detour", st.get("x"), st.get("y"), st.get("origin"), why)
         with contextlib.suppress(Exception):        # back off nose-on-obstacle
             s._raw_wheels(-70.0, -70.0)
             time.sleep(0.9)
@@ -269,6 +341,9 @@ class Pilot:
         elif r.get("ok"):
             self._event("arrived", r, nudge=True)
         else:
+            st = dict(s._latest or {})
+            log_hazard("blocked", st.get("x"), st.get("y"), st.get("origin"),
+                       str(r.get("refused") or "")[:100])
             with contextlib.suppress(Exception):
                 s._raw_wheels(-60.0, -60.0)
                 time.sleep(0.5)
@@ -298,6 +373,33 @@ class Pilot:
             done.append(pt)
             self._event("waypoint", {"leg": i, "at": pt})
         self._event("route_done", {"legs": len(done)}, nudge=True)
+
+    def _m_goto(self, m: dict) -> None:
+        """MAP-AWARE GOTO (2026-07-17 round 2): A* through the room blueprint
+        + hazard memory → waypoint route AROUND known obstacles; graceful
+        fallback to direct servo-with-detours when there's no usable map
+        (defensive fallback: never worse than body_go)."""
+        s = _session()
+        st = dict(s._latest or {})
+        if st.get("x") is None or m.get("x") is None or m.get("y") is None:
+            self._event("error", "goto needs a live pose and target x,y",
+                        nudge=True)
+            return
+        from brain import vector_planner
+        hz = read_hazards(origin=st.get("origin"))
+        pl = vector_planner.plan((st["x"], st["y"]),
+                                 (float(m["x"]), float(m["y"])), hz)
+        if pl.get("ok"):
+            self._event("planned", {"legs": len(pl["points"]),
+                                    "length_mm": pl["length_mm"],
+                                    "plan_ms": pl["plan_ms"],
+                                    "hazards_used": pl["hazards_used"]})
+            m2 = dict(m)
+            m2["points"] = pl["points"]
+            self._m_route(m2)
+        else:
+            self._event("plan_fallback", str(pl.get("error"))[:160])
+            self._m_servo(m)
 
     def _m_retrace(self, m: dict) -> None:
         """ESCAPE THE WAY I CAME (2026-07-17): walk my own breadcrumb trail
@@ -392,6 +494,58 @@ class Pilot:
                             f"{timeout_s:.0f}s — detached. Do NOT issue more "
                             "SDK behaviors; body_close + body_open to recover."}
         return box.get("r", {"ok": False, "error": "no result"})
+
+    def _m_smart_park(self, m: dict) -> None:
+        """SMART-PARK (2026-07-17 round 2 — Zeke's lesson automated: 'get NEAR
+        the dock, then hand the last ~2m to the stock dock behavior; it lines
+        up + checks + turns in <2min — don't micromanage the parking').
+        Sequence: optional approach servo (x,y = a staging point near home) →
+        release POSSESSION → close MY session → stock brain parks itself →
+        watch the nerves for on_charger → re-possess. Ends with the session
+        CLOSED on purpose — cognition reopens with body_open when it wants
+        the body back."""
+        if m.get("x") is not None and m.get("y") is not None:
+            s = _session()
+            r = self._servo_avoid(s, m, dict(
+                x=m.get("x"), y=m.get("y"),
+                standoff_mm=float(m.get("standoff_mm") or 60.0),
+                timeout_s=float(m.get("timeout_s") or 25.0)))
+            if not r.get("ok"):
+                self._event("blocked", {"phase": "smart_park approach",
+                                        "res": r}, nudge=True)
+                return
+        self._event("smart_park", "handing the last stretch to the stock brain "
+                                  "(possession released, session closed)")
+        ctl = REPO / "state" / "vector" / "possession.json"
+        with contextlib.suppress(Exception):
+            ctl.write_text(json.dumps({"hold": False, "set_ts": time.time(),
+                                       "by": "smart_park"}), encoding="utf-8")
+        with contextlib.suppress(Exception):
+            from brain import vector_session as vs
+            vs.close_session(reason="smart-park handoff to stock brain")
+        nerves_p = REPO / "state" / "vector" / "nerves.json"
+        deadline = time.time() + float(m.get("wait_s") or 240.0)
+        docked = False
+        while time.time() < deadline and not self.abort_evt.is_set():
+            with contextlib.suppress(Exception):
+                n = json.loads(nerves_p.read_text(encoding="utf-8"))
+                if (time.time() - float(n.get("ts", 0)) < 5.0
+                        and n.get("on_charger")):
+                    docked = True
+                    break
+            time.sleep(2.0)
+        with contextlib.suppress(Exception):
+            ctl.write_text(json.dumps({"hold": True, "set_ts": time.time(),
+                                       "by": "smart_park"}), encoding="utf-8")
+        self._event("smart_park_result",
+                    {"docked": docked,
+                     "note": ("stock brain parked me; possession re-held; "
+                              "session left CLOSED — body_open to re-seat"
+                              if docked else
+                              "NOT docked within the wait window — possession "
+                              "re-held; check the body (it may still be "
+                              "maneuvering, or need light)")},
+                    nudge=True)
 
     def _m_dock(self, m: dict) -> None:
         """MISSION-AWARE REFLEXES (the 23:41 double-hang etiology): docking is
