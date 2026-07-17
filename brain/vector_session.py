@@ -555,10 +555,12 @@ class BodySession:
                         iris_chat.submit(
                             "[VECTOR SENSE — feed watchdog] my SDK camera feed "
                             f"has been FROZEN for {self._feed_stall_s:.0f}s "
-                            "(image_id pinned). Engine vision unaffected; MY "
-                            "eyes are blind. Heal: body_close + body_open. "
-                            "Known trigger: cube BLE connect. Reply with "
-                            "chat_reply (one short line ok).")
+                            "(image_id pinned). Check whether ENGINE vision is "
+                            "also blind (body_charger while facing the dock / "
+                            "cube is_visible) — 2026-07-17 both died together "
+                            "(robot-side pipeline wedge). Heal ladder: "
+                            "body_close+open → camera-service restart → robot "
+                            "reboot. Reply with chat_reply (one short line ok).")
                 if _vpose is not None:
                     _vpose.tick(st)
                 n += 1
