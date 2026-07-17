@@ -91,18 +91,28 @@ def absolute_fix(source: str = "charger", detail: dict = None) -> dict:
 
 
 def confidence() -> float:
+    # RETUNED 2026-07-17 against the first MEASURED loop-closure point:
+    # 6.5m + 2300° of turns → real drift 116mm / ~2° heading (charger re-sight).
+    # v1 constants (2500/540) predicted conf 0.002 + 256° err — wildly
+    # pessimistic; gyro-integrated heading barely drifts on in-place turns.
+    # New constants put that measured excursion at conf≈0.37 ("re-anchor
+    # before precision work"), which matches how it actually felt: usable
+    # between anchors, not gate-precise (116mm vs 140mm cone gates).
+    # Single calibration point — refine at the next measured closure.
     with _lock:
         if _state["fix_ts"] <= 0.0:
             return 0.0 if _state["origin"] is not None else 0.0
-        return round(math.exp(-(_state["dist_mm"] / 2500.0
-                                + _state["turns_deg"] / 540.0)), 3)
+        return round(math.exp(-(_state["dist_mm"] / 9000.0
+                                + _state["turns_deg"] / 5500.0)), 3)
 
 
 def status() -> dict:
     with _lock:
         s = dict(_state)
     conf = confidence()
-    heading_budget = round(s["turns_deg"] * 0.10 + (s["dist_mm"] / 30.0) * 0.2, 1)
+    # Bounded ~2× above the measured point (real: 2° / 116mm at 2300°/5.4m).
+    heading_budget = round(s["turns_deg"] * 0.005 + (s["dist_mm"] / 1000.0) * 2.0, 1)
+    pos_budget = round(s["dist_mm"] * 0.02 + s["turns_deg"] * 0.05, 0)
     if s["fix_ts"] <= 0.0:
         advice = ("NO absolute fix in this pose frame — face the charger "
                   "(body_charger until known+fresh) or dock once; treat "
@@ -121,6 +131,7 @@ def status() -> dict:
                           "age_s": round(time.time() - s["fix_ts"], 1)
                           if s["fix_ts"] else None},
             "est_heading_err_deg": heading_budget,
+            "est_pos_err_mm": pos_budget,
             "fix_source": s["fix_source"], "origin": s["origin"],
             "advice": advice}
 

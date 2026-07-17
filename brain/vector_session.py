@@ -525,11 +525,40 @@ class BodySession:
             from brain import vector_pose as _vpose   # pose-truth tracker (2026-07-17)
         except Exception:
             _vpose = None
+        # FEED-STALL WATCHDOG (2026-07-17 live-test scar: cube BLE connect froze
+        # the SDK camera feed — twice — and I only noticed by reading frame ages
+        # mid-mission). Detect it AT the stream layer: image_id not advancing
+        # for >12s while connected = stalled feed. One nudge per episode; the
+        # value rides body_status as feed_stall_s. Heal = body_close/body_open.
+        self._feed_last_iid = None
+        self._feed_iid_ts = time.time()
+        self._feed_stall_s = 0.0
+        self._feed_stall_nudged = False
         while not self._stop.is_set() and self.connected:
             try:
                 st = self._capture_fused()
                 self._latest = st
                 self._stream.append(st)
+                iid = st.get("image_id")
+                if iid is not None and iid != self._feed_last_iid:
+                    self._feed_last_iid = iid
+                    self._feed_iid_ts = st["t"]
+                    self._feed_stall_nudged = False
+                self._feed_stall_s = round(st["t"] - self._feed_iid_ts, 1)
+                if self._feed_stall_s > 12.0 and not self._feed_stall_nudged:
+                    self._feed_stall_nudged = True
+                    self._log_reflex("feed_stall",
+                                     f"camera feed FROZEN {self._feed_stall_s:.0f}s "
+                                     f"(image_id {self._feed_last_iid} pinned)")
+                    with contextlib.suppress(Exception):
+                        from brain import iris_chat
+                        iris_chat.submit(
+                            "[VECTOR SENSE — feed watchdog] my SDK camera feed "
+                            f"has been FROZEN for {self._feed_stall_s:.0f}s "
+                            "(image_id pinned). Engine vision unaffected; MY "
+                            "eyes are blind. Heal: body_close + body_open. "
+                            "Known trigger: cube BLE connect. Reply with "
+                            "chat_reply (one short line ok).")
                 if _vpose is not None:
                     _vpose.tick(st)
                 n += 1

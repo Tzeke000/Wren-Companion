@@ -148,6 +148,13 @@ def _body_status(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     fused = dict(getattr(s, "_latest", {}) or {})
     out["fused"] = fused                      # pose/prox/flags/pitch/roll/etc
     out["stream_hz"] = getattr(s, "_stream_hz", 0.0)
+    # feed-stall watchdog (2026-07-17): seconds since image_id last advanced.
+    # >12 = my eyes are FROZEN (engine vision unaffected) — body_close/open.
+    stall = getattr(s, "_feed_stall_s", None)
+    if stall is not None:
+        out["feed_stall_s"] = stall
+        if stall > 12.0:
+            out["feed_frozen"] = True
     out["cached"] = True
     out["note"] = ("cached fused state (no live gRPC — wedge-proof); "
                    "live=true for real battery")
