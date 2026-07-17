@@ -58,9 +58,12 @@ def _body_charger(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "no body session open"}
     try:
         ch = s.robot.world.charger
-        if ch is None:
+        if ch is None or getattr(ch, "pose", None) is None:
+            # 2026-07-17: post-reboot the charger OBJECT can exist with pose
+            # None (half-initialized world state) — treat as not-known.
             return {"ok": True, "charger_known": False,
-                    "note": "engine has NOT seen the charger this connection — "
+                    "note": "engine has NOT localized the charger this "
+                            "connection (object may exist with no pose) — "
                             "face it with marker vision on, then re-check"}
         p = ch.pose
         return {"ok": True, "charger_known": True,
@@ -193,7 +196,83 @@ def _body_cube(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": repr(e)[:250]}
 
 
+def _body_landmarks(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """MY ROOM MARKERS (Zeke placed 2026-07-17, HIS layout — three PAIRS,
+    wall marker at exactly 100mm height + same-shape floor marker directly
+    below: BED POST = Diamonds2(wall)+Diamonds3(floor); DRESSER-BY-COUCH =
+    Circles2(wall)+Circles3(floor), best webcam visibility; CHARGER WALL =
+    Triangles4(wall)+Triangles5(floor). 90mm symbol squares. Floor markers
+    face UP — mainly for the overhead webcam; wall markers are MINE.
+    They never move = absolute landmarks.)
+    action='define' registers all SIX as unique custom walls (per-connection
+    — re-define after every body_open). action='list' (default) returns every
+    custom object the engine knows, with pose + freshness."""
+    s = _live_session()
+    if s is None:
+        return {"ok": False, "error": "no body session open"}
+    action = str(params.get("action") or "list").lower()
+    try:
+        from anki_vector.objects import CustomObjectMarkers, CustomObjectTypes
+        if action == "define":
+            defs = [
+                ("Circles2", CustomObjectMarkers.Circles2, CustomObjectTypes.CustomType00),
+                ("Circles3", CustomObjectMarkers.Circles3, CustomObjectTypes.CustomType01),
+                ("Diamonds2", CustomObjectMarkers.Diamonds2, CustomObjectTypes.CustomType02),
+                ("Diamonds3", CustomObjectMarkers.Diamonds3, CustomObjectTypes.CustomType03),
+                # 2026-07-17 ~15:40: THE MISSING PAIR — I stared at Triangles4
+                # by the dock for 20 minutes wondering why detection was dead;
+                # it was never DEFINED (and my eye misread triangles as
+                # diamonds at that resolution). Zeke's layout has 6 markers.
+                ("Triangles4", CustomObjectMarkers.Triangles4, CustomObjectTypes.CustomType04),
+                ("Triangles5", CustomObjectMarkers.Triangles5, CustomObjectTypes.CustomType05),
+            ]
+            done, errs = [], []
+            for name, marker, ctype in defs:
+                try:
+                    r = s.robot.world.define_custom_wall(
+                        custom_object_type=ctype, marker=marker,
+                        width_mm=100.0, height_mm=100.0,
+                        marker_width_mm=90.0, marker_height_mm=90.0,
+                        is_unique=True)
+                    done.append(name if r is not None else f"{name}(?)")
+                except Exception as e:
+                    errs.append(f"{name}: {repr(e)[:100]}")
+            out: dict[str, Any] = {"ok": not errs, "defined": done,
+                                   "note": "firmware now reports pose when a "
+                                           "marker enters view (marker vision "
+                                           "must be on — auto at body_open)"}
+            if errs:
+                out["errors"] = errs
+            return out
+        # ---- list: what does the engine know right now?
+        objs = []
+        for o in list(getattr(s.robot.world, "all_objects", []) or []):
+            tname = type(o).__name__
+            if "Custom" not in tname:
+                continue
+            d: dict[str, Any] = {"class": tname}
+            with __import__("contextlib").suppress(Exception):
+                d["object_type"] = str(getattr(o, "custom_type", ""))[:40]
+            with __import__("contextlib").suppress(Exception):
+                d["is_visible"] = bool(o.is_visible)
+                d["last_seen_s_ago"] = round(float(
+                    getattr(o, "time_since_last_seen", -1.0)), 1)
+            with __import__("contextlib").suppress(Exception):
+                p = o.pose
+                d["pose"] = {"x_mm": round(float(p.position.x), 1),
+                             "y_mm": round(float(p.position.y), 1),
+                             "heading_deg": round(float(p.rotation.angle_z.degrees), 1),
+                             "origin_id": int(getattr(p, "origin_id", -1))}
+            objs.append(d)
+        return {"ok": True, "landmarks": objs, "count": len(objs),
+                "note": "empty = none seen yet this connection (define first, "
+                        "then LOOK at a marker)"}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)[:250]}
+
+
 register_tool("body_marker_vision", "Enable firmware marker detection on the live session (charger/cube/custom fiducials)", 2, _body_marker_vision)
+register_tool("body_landmarks", "My ROOM MARKERS (Circles2/3, Diamonds2/3, 90mm): action=define registers them as unique walls (per-connection); action=list shows known landmark poses", 2, _body_landmarks)
 register_tool("body_cube", "MY HANDS — cube find/dock/pickup/place/roll via firmware behaviors (hang-guarded). actions: status/connect/disconnect/lights/dock/pickup/place/roll", 2, _body_cube)
 register_tool("body_charger", "Engine's known charger pose — MUST be known before body_park (unseen charger = dock hang)", 1, _body_charger)
 register_tool("body_overhead", "OVERHEAD-EYE probe: PC-camera frame + ArUco marker detection (localization stage 1). Read the saved jpg to judge whether the view covers my driving area.", 1, _body_overhead)
