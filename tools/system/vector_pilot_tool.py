@@ -167,9 +167,10 @@ def _session_or_err():
 
 def _body_pose_truth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """POSE TRUTH: how much to trust my odometry right now (confidence 0..1,
-    drift budget since last absolute fix, advice). fix=true attempts a charger
-    absolute fix NOW (needs a FRESH engine charger sighting on the live
-    session). The v1 of the charger-anchored SLAM design."""
+    drift budget since last absolute fix, advice). fix=true attempts an
+    absolute fix NOW — charger first, then ANY freshly-seen room landmark
+    (Zeke's six permanent markers, 2026-07-17). Needs a FRESH sighting on
+    the live session (face a marker, then fix)."""
     from brain import vector_pose
     out = vector_pose.status()
     if params.get("fix"):
@@ -177,7 +178,9 @@ def _body_pose_truth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
         if s is None:
             out["fix_attempt"] = {"ok": False, "error": "body session not open"}
         else:
-            out["fix_attempt"] = vector_pose.try_charger_fix(s)
+            fixer = getattr(vector_pose, "try_landmark_fix",
+                            vector_pose.try_charger_fix)
+            out["fix_attempt"] = fixer(s)
             if out["fix_attempt"].get("ok"):
                 out.update(vector_pose.status())
     return out
