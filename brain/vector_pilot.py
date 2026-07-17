@@ -30,12 +30,31 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import json
 import math
 import threading
 import time
+from pathlib import Path
 
 _LOCK = threading.Lock()
 _PILOT = None
+
+REPO = Path(__file__).resolve().parent.parent
+CRUMBS = REPO / "state" / "vector" / "breadcrumbs.jsonl"
+BATTERY_JSON = REPO / "state" / "vector" / "battery.json"
+CRUMB_SPACING_MM = 25.0     # min distance between logged breadcrumbs
+CRUMB_KEEP = 400            # file trimmed to this many recent crumbs
+
+
+def _battery_low_off_charger() -> bool:
+    """True when the last battery poll says LOW while off the charger — the
+    drain-that-killed-him-once condition. Missions must not start then."""
+    try:
+        d = json.loads(BATTERY_JSON.read_text(encoding="utf-8"))
+        return (bool(d.get("ok")) and isinstance(d.get("level"), int)
+                and d["level"] <= 1 and not d.get("on_charger"))
+    except Exception:
+        return False
 
 
 def _session():
@@ -76,6 +95,11 @@ class Pilot:
 
     # ------------------------------------------------------------ control
     def start(self, mission: dict) -> dict:
+        # BATTERY GATE (2026-07-17): low battery off-charger = dock or nothing.
+        if str(mission.get("kind")) != "dock" and _battery_low_off_charger():
+            return {"ok": False,
+                    "refused": "battery LOW and off charger — only a dock "
+                               "mission (body_park) is allowed right now"}
         with _LOCK:
             if self.state == "running":
                 # preempt: newest goal wins (cognition changed its mind)
@@ -110,16 +134,57 @@ class Pilot:
                 if self.state == "running" else 0.0,
                 "events": list(self.events)[-10:]}
 
+    # --------------------------------------------------------- breadcrumbs
+    # (2026-07-17, mobility layer): every mission drops a pose trail to disk in
+    # the current odometry frame. The trail is the known-clear path — 'retrace'
+    # walks it backwards to escape a dead end the way I came in. Crumbs key on
+    # the pose origin_id: a frame reset (pickup/sleep) makes old crumbs alien.
+    def _crumb_loop(self, stop_evt: threading.Event) -> None:
+        last_xy = None
+        while not stop_evt.is_set():
+            with contextlib.suppress(Exception):
+                s = _session()
+                st = dict(s._latest or {})
+                x, y = st.get("x"), st.get("y")
+                if x is not None and y is not None:
+                    if (last_xy is None or
+                            math.hypot(x - last_xy[0], y - last_xy[1]) >= CRUMB_SPACING_MM):
+                        last_xy = (x, y)
+                        rec = {"t": round(time.time(), 2), "x": x, "y": y,
+                               "h": st.get("heading"), "origin": st.get("origin")}
+                        CRUMBS.parent.mkdir(parents=True, exist_ok=True)
+                        with CRUMBS.open("a", encoding="utf-8") as f:
+                            f.write(json.dumps(rec) + "\n")
+            stop_evt.wait(0.4)
+
+    def _read_crumbs(self, origin) -> list:
+        """Recent crumbs in the CURRENT pose frame only, oldest->newest."""
+        try:
+            lines = CRUMBS.read_text(encoding="utf-8").strip().splitlines()
+        except Exception:
+            return []
+        out = []
+        for ln in lines[-CRUMB_KEEP:]:
+            with contextlib.suppress(Exception):
+                d = json.loads(ln)
+                if d.get("origin") == origin:
+                    out.append(d)
+        return out
+
     # ------------------------------------------------------------ missions
     def _run(self, m: dict) -> None:
         kind = str(m.get("kind") or "")
+        crumb_stop = threading.Event()
         try:
             fn = {"servo": self._m_servo, "route": self._m_route,
                   "scan": self._m_scan, "dock": self._m_dock,
-                  "undock": self._m_undock}.get(kind)
+                  "undock": self._m_undock, "retrace": self._m_retrace}.get(kind)
             if fn is None:
                 self._event("error", f"unknown mission kind {kind!r}")
                 return
+            if kind in ("servo", "route", "retrace"):
+                threading.Thread(target=self._crumb_loop, args=(crumb_stop,),
+                                 name="pilot-crumbs", daemon=True).start()
             fn(m)
         except Exception as e:
             with contextlib.suppress(Exception):
@@ -128,25 +193,82 @@ class Pilot:
                 s._wheels = (0.0, 0.0)
             self._event("error", repr(e)[:220], nudge=True)
         finally:
+            crumb_stop.set()
             self.state = "idle"
             self.mission = None
 
+    # ------------------------------------------------- obstacle avoidance
+    def _tof_read(self, s) -> float:
+        """Settled ToF distance in the current facing; 1200 = clear/unknown."""
+        time.sleep(0.35)
+        st = dict(s._latest or {})
+        pm = st.get("prox_mm")
+        if not st.get("prox_found") or pm is None or st.get("prox_q", 0) <= 0.02:
+            return 1200.0
+        return float(pm)
+
+    def _detour(self, s, why: str) -> bool:
+        """One bounded escape maneuver (bug-algorithm step, 2026-07-17 mobility
+        layer): back off, probe both sides with the ToF, turn toward the clearer
+        one, sidestep past the obstacle. Returns False if aborted."""
+        self._event("detour", {"why": str(why)[:140]})
+        with contextlib.suppress(Exception):        # back off nose-on-obstacle
+            s._raw_wheels(-70.0, -70.0)
+            time.sleep(0.9)
+            s._raw_wheels(0.0, 0.0)
+            s._wheels = (0.0, 0.0)
+        if self.abort_evt.is_set():
+            return False
+        with contextlib.suppress(Exception):        # probe right (-45°)...
+            s.turn(-45.0, speed_deg_s=120.0)
+        right = self._tof_read(s)
+        with contextlib.suppress(Exception):        # ...then left (+45°)
+            s.turn(90.0, speed_deg_s=120.0)
+        left = self._tof_read(s)
+        if self.abort_evt.is_set():
+            return False
+        if right > left:                            # face the clearer side
+            with contextlib.suppress(Exception):
+                s.turn(-90.0, speed_deg_s=120.0)
+        side = "right" if right > left else "left"
+        self._event("detour_probe", {"left_mm": int(left), "right_mm": int(right),
+                                     "chose": side})
+        with contextlib.suppress(Exception):        # sidestep past the obstacle
+            s.straight(150.0, speed_mm_s=110.0)
+        return not self.abort_evt.is_set()
+
+    def _servo_avoid(self, s, m: dict, kw: dict) -> dict:
+        """servo_to + bounded detour retries. Blocked (prox-brake / stuck) →
+        escape maneuver → re-servo, up to max_detours times. avoid=False = old
+        one-shot behavior."""
+        avoid = m.get("avoid", True)
+        detours = int(m.get("max_detours") if m.get("max_detours") is not None else 2)
+        r = s.servo_to(**kw, abort_event=self.abort_evt)
+        while (avoid and detours > 0 and not r.get("ok")
+               and not r.get("aborted")
+               and (r.get("refused") or r.get("stuck") or r.get("timed_out"))
+               and not self.abort_evt.is_set()):
+            detours -= 1
+            if not self._detour(s, r.get("refused") or "timed out short of target"):
+                r["aborted"] = True
+                break
+            r = s.servo_to(**kw, abort_event=self.abort_evt)
+        return r
+
     def _m_servo(self, m: dict) -> None:
         s = _session()
-        r = s.servo_to(
-            x=m.get("x"), y=m.get("y"),
-            bearing_deg=m.get("bearing_deg"), dist_mm=m.get("dist_mm"),
-            standoff_mm=float(m.get("standoff_mm") or 25.0),
-            max_speed=m.get("max_speed"),
-            timeout_s=float(m.get("timeout_s") or 20.0),
-            relative=bool(m.get("relative")),
-            abort_event=self.abort_evt)
+        kw = dict(x=m.get("x"), y=m.get("y"),
+                  bearing_deg=m.get("bearing_deg"), dist_mm=m.get("dist_mm"),
+                  standoff_mm=float(m.get("standoff_mm") or 25.0),
+                  max_speed=m.get("max_speed"),
+                  timeout_s=float(m.get("timeout_s") or 20.0),
+                  relative=bool(m.get("relative")))
+        r = self._servo_avoid(s, m, kw)
         if r.get("aborted"):
             self._event("aborted", r)
         elif r.get("ok"):
             self._event("arrived", r, nudge=True)
         else:
-            # blocked/refused: back off a touch so I'm not nose-on-obstacle
             with contextlib.suppress(Exception):
                 s._raw_wheels(-60.0, -60.0)
                 time.sleep(0.5)
@@ -161,11 +283,11 @@ class Pilot:
             if self.abort_evt.is_set():
                 self._event("aborted", {"leg": i, "done": done})
                 return
-            r = s.servo_to(x=float(pt[0]), y=float(pt[1]),
-                           standoff_mm=float(m.get("standoff_mm") or 30.0),
-                           max_speed=m.get("max_speed"),
-                           timeout_s=float(m.get("timeout_s") or 20.0),
-                           abort_event=self.abort_evt)
+            kw = dict(x=float(pt[0]), y=float(pt[1]),
+                      standoff_mm=float(m.get("standoff_mm") or 30.0),
+                      max_speed=m.get("max_speed"),
+                      timeout_s=float(m.get("timeout_s") or 20.0))
+            r = self._servo_avoid(s, m, kw)
             if r.get("aborted"):
                 self._event("aborted", {"leg": i, "done": done})
                 return
@@ -176,6 +298,47 @@ class Pilot:
             done.append(pt)
             self._event("waypoint", {"leg": i, "at": pt})
         self._event("route_done", {"legs": len(done)}, nudge=True)
+
+    def _m_retrace(self, m: dict) -> None:
+        """ESCAPE THE WAY I CAME (2026-07-17): walk my own breadcrumb trail
+        backwards — the known-clear path — instead of improvising through the
+        obstacle that just stopped me. Detours OFF (the trail was driveable);
+        crumbs from other pose frames (origin changed) are ignored."""
+        s = _session()
+        st = dict(s._latest or {})
+        origin = st.get("origin")
+        cx, cy = st.get("x"), st.get("y")
+        crumbs = self._read_crumbs(origin)
+        if not crumbs or cx is None:
+            self._event("error", "no breadcrumbs in the current pose frame "
+                                 "(fresh frame or no prior mission)", nudge=True)
+            return
+        n = max(1, min(int(m.get("steps") or 12), 40))
+        pts = []
+        for d in reversed(crumbs[-n:]):             # newest first = backwards
+            if math.hypot(d["x"] - cx, d["y"] - cy) < 40.0:
+                continue                            # skip where I already stand
+            pts.append([d["x"], d["y"]])
+        if not pts:
+            self._event("retrace_done", {"note": "already at trail start"}, nudge=True)
+            return
+        self._event("retracing", {"legs": len(pts)})
+        done = 0
+        for pt in pts:
+            if self.abort_evt.is_set():
+                self._event("aborted", {"retraced": done})
+                return
+            r = s.servo_to(x=pt[0], y=pt[1], standoff_mm=35.0,
+                           timeout_s=float(m.get("timeout_s") or 15.0),
+                           abort_event=self.abort_evt)
+            if r.get("aborted"):
+                self._event("aborted", {"retraced": done})
+                return
+            if not r.get("ok"):
+                self._event("blocked", {"retrace_leg": done, "res": r}, nudge=True)
+                return
+            done += 1
+        self._event("retrace_done", {"legs": done}, nudge=True)
 
     def _m_scan(self, m: dict) -> None:
         """Rotate-survey: N steps around 360°, sample fused state (esp. ToF
