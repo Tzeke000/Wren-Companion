@@ -145,6 +145,106 @@ def _body_pilot(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return _pilot().status()
 
 
+def _session_or_err():
+    from brain import vector_session
+    s = vector_session.get_session(create=False)
+    if s is None or not s.connected:
+        return None
+    return s
+
+
+def _body_pose_truth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """POSE TRUTH: how much to trust my odometry right now (confidence 0..1,
+    drift budget since last absolute fix, advice). fix=true attempts a charger
+    absolute fix NOW (needs a FRESH engine charger sighting on the live
+    session). The v1 of the charger-anchored SLAM design."""
+    from brain import vector_pose
+    out = vector_pose.status()
+    if params.get("fix"):
+        s = _session_or_err()
+        if s is None:
+            out["fix_attempt"] = {"ok": False, "error": "body session not open"}
+        else:
+            out["fix_attempt"] = vector_pose.try_charger_fix(s)
+            if out["fix_attempt"].get("ok"):
+                out.update(vector_pose.status())
+    return out
+
+
+def _body_macro(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """ONE-PRESS MANEUVERS (Zeke 2026-07-17: 'hands on the controller — one
+    press away, active and live'). name=
+      look_around  — head sweep, 3 frames (safe anywhere, incl. docked)
+      peek         — turn +45/frame, -90/frame, +45 back (2 frames)
+      back_off     — reverse 80mm
+      face_home    — turn toward the charger (bearing from live nerves)
+      square_up    — rotate to the nearest 90° heading
+    Wheel macros refuse while docked (body_launch first)."""
+    import time as _t
+    s = _session_or_err()
+    if s is None:
+        return {"ok": False, "error": "body session not open (call body_open)"}
+    name = str(params.get("name") or "").strip()
+    st = dict(getattr(s, "_latest", {}) or {})
+    wheel_macros = {"peek", "back_off", "face_home", "square_up"}
+    if name in wheel_macros and st.get("on_charger"):
+        return {"ok": False, "refused": "docked — body_launch before wheel "
+                                        "macros (turning on the contacts is "
+                                        "bad for both of us)"}
+    if name == "look_around":
+        frames = []
+        for i, ang in enumerate((-15.0, 10.0, 35.0)):
+            s.head(ang)
+            _t.sleep(0.4)
+            r = s.look(name=f"macro_look_{i}")
+            if r.get("ok"):
+                frames.append(r["path"])
+        return {"ok": True, "macro": name, "frames": frames}
+    if name == "peek":
+        frames = []
+        s.turn(45.0)
+        _t.sleep(0.3)
+        r = s.look(name="macro_peek_left")
+        if r.get("ok"):
+            frames.append(r["path"])
+        s.turn(-90.0)
+        _t.sleep(0.3)
+        r = s.look(name="macro_peek_right")
+        if r.get("ok"):
+            frames.append(r["path"])
+        s.turn(45.0)
+        return {"ok": True, "macro": name, "frames": frames,
+                "note": "left frame first, then right; heading restored"}
+    if name == "back_off":
+        return {"ok": True, "macro": name, "res": s.straight(-80.0, 100.0)}
+    if name == "face_home":
+        try:
+            import json as _json
+            from pathlib import Path as _P
+            n = _json.loads((_P(r"D:\Wren-Companion\state\vector\nerves.json")
+                             ).read_text(encoding="utf-8"))
+            if not n.get("charger_seen"):
+                return {"ok": False, "error": "charger bearing unknown (engine "
+                                              "hasn't seen the dock) — "
+                                              "body_scan or sight it first"}
+            b = float(n.get("charger_bearing_deg") or 0.0)
+        except Exception as e:
+            return {"ok": False, "error": f"nerves unreadable: {e!r}"[:150]}
+        return {"ok": True, "macro": name, "turned": b, "res": s.turn(b)}
+    if name == "square_up":
+        h = st.get("heading")
+        if h is None:
+            return {"ok": False, "error": "no heading in stream yet"}
+        target = round(float(h) / 90.0) * 90.0
+        delta = ((target - float(h) + 180.0) % 360.0) - 180.0
+        return {"ok": True, "macro": name, "delta": round(delta, 1),
+                "res": s.turn(delta) if abs(delta) > 1.5 else {"ok": True,
+                                                               "already": True}}
+    return {"ok": False, "error": f"unknown macro '{name}' — see tool doc",
+            "macros": ["look_around", "peek", "back_off", "face_home",
+                       "square_up"]}
+
+
 def _body_abort(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """STOP the current mission now (wheels zeroed). Also what a new mission
     does implicitly (preempt) — this is the explicit brake."""
@@ -157,6 +257,8 @@ register_tool("body_retrace", "PILOT: escape the way I came — walk my own brea
 register_tool("body_goto", "PILOT: MAP-AWARE goto — A* through the room blueprint + hazard memory, routes AROUND known obstacles (falls back to direct servo+detours without a map). params: x, y (abs mm)", 2, _body_goto)
 register_tool("body_park_smart", "PILOT: SMART-PARK — approach a staging point, then hand the actual parking to the STOCK brain (possession released, session closed, re-possess when docked). Zeke's lesson automated. params: x,y (optional staging), wait_s", 2, _body_park_smart)
 register_tool("body_hazards", "PILOT: hazard memory — journal of blocked/stuck/detour locations the planner routes around. params: origin (frame filter), limit, clear=true wipes", 1, _body_hazards)
+register_tool("body_pose_truth", "POSE TRUTH: odometry confidence 0..1 + drift budget since last absolute fix + advice; fix=true grabs a charger absolute fix NOW (needs fresh sighting). Charger-anchored SLAM v1.", 1, _body_pose_truth)
+register_tool("body_macro", "ONE-PRESS maneuvers: name=look_around (head sweep + 3 frames, dock-safe) | peek (±45° + 2 frames) | back_off | face_home (turn to charger bearing) | square_up (snap to nearest 90°). Wheel macros refuse while docked.", 2, _body_macro)
 register_tool("body_scan", "PILOT: background 360 survey (ToF+heading polar sketch, frames opt). params: steps, frames", 2, _body_scan)
 register_tool("body_park", "PILOT: background dock on charger (wedge-safe: hangs a thread, not my turn)", 2, _body_park)
 register_tool("body_launch", "PILOT: background undock from charger", 2, _body_launch)
