@@ -433,23 +433,57 @@ def _vector_say_iris(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
         wav = _boost_wav(r.content)  # peak-normalize — robot speaker is small
     except Exception as e:
         return {"ok": False, "error": f"mouth /synth unreachable: {e!r}"[:300]}
+    wirepod_err = None
     try:
         esn = _serial()
         if not esn:
-            return {"ok": False, "error": "no activated bot in wire-pod jdocs"}
-        # play_sound blocks while the robot plays; size ~16KB/s at 8kHz mono int16.
-        est_s = max(5.0, len(wav) / 16000.0 + 8.0)
-        _stamp_spoke(est_dur=len(wav) / 16000.0)  # ears echo guard
-        r2 = requests.post(f"{_WIREPOD}/api-sdk/play_sound",
-                           params={"serial": esn},
-                           files={"sound": ("iris.wav", wav, "audio/wav")},
-                           timeout=est_s + 20)
-        return {"ok": r2.status_code == 200, "http": r2.status_code,
-                "wav_bytes": len(wav),
-                "note": "spoken on Vector in MY voice" if r2.status_code == 200
-                        else r2.text[:200]}
+            wirepod_err = "no activated bot in wire-pod jdocs"
+        else:
+            # play_sound blocks while the robot plays; ~16KB/s at 8kHz mono int16.
+            est_s = max(5.0, len(wav) / 16000.0 + 8.0)
+            _stamp_spoke(est_dur=len(wav) / 16000.0)  # ears echo guard
+            r2 = requests.post(f"{_WIREPOD}/api-sdk/play_sound",
+                               params={"serial": esn},
+                               files={"sound": ("iris.wav", wav, "audio/wav")},
+                               timeout=est_s + 20)
+            if r2.status_code == 200:
+                return {"ok": True, "http": 200, "engine": "wire-pod",
+                        "wav_bytes": len(wav),
+                        "note": "spoken on Vector in MY voice"}
+            wirepod_err = f"http {r2.status_code} {r2.text[:150]}"
     except Exception as e:
-        return {"ok": False, "error": f"play_sound failed: {e!r}"[:300]}
+        wirepod_err = f"{e!r}"[:200]
+    # FALLBACK (2026-07-16, post-ears-repoint): wire-pod's api-sdk session can
+    # panic after the robot re-homes/reboots (RemoteDisconnected). The direct
+    # anki_vector session (body_open) auths fine, so stream the same wav there.
+    # No-worse-than-before: report which engine spoke, never silent stock voice.
+    try:
+        from brain import vector_session
+        s = vector_session.get_session(create=False)
+        if s is None or not getattr(s, "connected", False) or s.robot is None:
+            return {"ok": False,
+                    "error": f"wire-pod play_sound failed ({wirepod_err}) and "
+                             "no body session for direct-SDK fallback — "
+                             "body_open first, then retry"}
+        import os
+        import tempfile
+        tf = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tf.write(wav)
+        tf.close()
+        try:
+            _stamp_spoke(est_dur=len(wav) / 16000.0)  # re-stamp: fallback plays later
+            s.robot.audio.stream_wav_file(tf.name, 100)
+            return {"ok": True, "engine": "direct-sdk", "wav_bytes": len(wav),
+                    "note": "spoken on Vector in MY voice (direct SDK; "
+                            f"wire-pod path failed: {wirepod_err})"}
+        finally:
+            try:
+                os.unlink(tf.name)
+            except Exception:
+                pass
+    except Exception as e:
+        return {"ok": False, "error": f"play_sound failed both paths — "
+                f"wire-pod: {wirepod_err}; direct-sdk: {e!r}"[:400]}
 
 
 # ---- FULL-BODY EXPANSION (2026-07-13 late night, "get really seated in there") ----
