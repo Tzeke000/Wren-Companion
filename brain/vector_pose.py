@@ -158,3 +158,42 @@ def try_charger_fix(session) -> dict:
             "last_seen_s": round(last_seen, 2)})
     except Exception as e:
         return {"ok": False, "error": repr(e)[:200]}
+
+
+def try_landmark_fix(session, max_age_s: float = 2.0) -> dict:
+    """LANDMARK fix (2026-07-17 — Zeke placed six permanent room markers):
+    any FRESHLY-seen custom-object landmark re-grounds the pose the same way
+    a charger sighting does. The engine re-anchors a unique custom object's
+    pose on every observation, so a fresh sighting means the engine just
+    localized me against a fixed wall marker — reset the drift budget.
+    Tries the charger first (best-calibrated), then any custom object seen
+    within max_age_s. Landmarks never move (Zeke's guarantee)."""
+    r = try_charger_fix(session)
+    if r.get("ok"):
+        return r
+    try:
+        best = None
+        best_age = 1e9
+        for o in list(getattr(session.robot.world, "all_objects", []) or []):
+            if "Custom" not in type(o).__name__:
+                continue
+            if getattr(o, "pose", None) is None:
+                continue
+            age = float(getattr(o, "time_since_last_seen", 1e9))
+            if age < best_age:
+                best, best_age = o, age
+        if best is None or best_age > max_age_s:
+            return {"ok": False,
+                    "note": ("no fresh landmark sighting (best "
+                             f"{best_age:.1f}s ago)" if best is not None else
+                             "no landmarks known this connection — "
+                             "body_landmarks define, then face one")}
+        p = best.pose
+        kind = str(getattr(best, "custom_type", type(best).__name__))[:32]
+        return absolute_fix("landmark", {
+            "landmark": kind,
+            "landmark_x": round(float(p.position.x), 1),
+            "landmark_y": round(float(p.position.y), 1),
+            "last_seen_s": round(best_age, 2)})
+    except Exception as e:
+        return {"ok": False, "error": repr(e)[:200]}
