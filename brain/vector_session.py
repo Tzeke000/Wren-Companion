@@ -521,11 +521,17 @@ class BodySession:
         period = 1.0 / 15.0  # ~15 Hz target (camera rate)
         last = time.time()
         n = 0
+        try:
+            from brain import vector_pose as _vpose   # pose-truth tracker (2026-07-17)
+        except Exception:
+            _vpose = None
         while not self._stop.is_set() and self.connected:
             try:
                 st = self._capture_fused()
                 self._latest = st
                 self._stream.append(st)
+                if _vpose is not None:
+                    _vpose.tick(st)
                 n += 1
                 now = time.time()
                 if now - last >= 1.0:
