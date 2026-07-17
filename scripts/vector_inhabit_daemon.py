@@ -474,6 +474,37 @@ def _nav_map_loop(robot, alive) -> None:
         time.sleep(3.0)
 
 
+# STRAND-CLASS alarms escalate to Zeke's Discord DIRECTLY (2026-07-17 strand
+# incident: these alarms fired every 10min for 2h into a FROZEN session while
+# the body drained in the dark — Iris is a single point of failure; the alarm
+# chain must not dead-end in her). Uses scripts/discord_dm_user.py (REST, no
+# session). Rate-limited hard so a flapping sensor can't spam Zeke's phone.
+_STRAND_SENSES = {"lost_contact", "low_battery"}
+_ZEKE_USER_ID = "600008921008046120"
+_DISCORD_ESCALATE_COOLDOWN_S = 1800.0          # max one DM per sense per 30min
+_last_discord_escalate: dict = {}
+
+
+def _escalate_to_zeke_discord(sense: str, text: str) -> None:
+    now = time.time()
+    if now - _last_discord_escalate.get(sense, 0.0) < _DISCORD_ESCALATE_COOLDOWN_S:
+        return
+    _last_discord_escalate[sense] = now
+    try:
+        import subprocess
+        script = str(Path(__file__).resolve().parent / "discord_dm_user.py")
+        py = str(Path(__file__).resolve().parents[1] / ".venv" / "Scripts" / "python.exe")
+        msg = (f"🚨 [Vector body alarm — direct from the inhabit daemon; "
+               f"Iris's session may be frozen] {text}")
+        subprocess.Popen([py, script, _ZEKE_USER_ID, msg],
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        log(f"ESCALATED to Zeke's Discord ({sense})")
+    except Exception as e:
+        log(f"discord escalation failed: {e!r}")
+
+
 def nudge(sense: str, text: str) -> None:
     now = time.time()
     if now - _last_fire.get(sense, 0.0) < COOLDOWN.get(sense, 30.0):
@@ -492,6 +523,8 @@ def nudge(sense: str, text: str) -> None:
         log(f"NUDGE {sense}: {text}")
     except Exception as e:
         log(f"nudge submit failed: {e!r}")
+    if sense in _STRAND_SENSES:
+        _escalate_to_zeke_discord(sense, text)
 
 
 _TRANSCRIPT_RE = None
