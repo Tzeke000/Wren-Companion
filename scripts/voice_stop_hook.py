@@ -845,8 +845,28 @@ _VOICE_REWAKE = (
 def _chat_rewake(req: dict) -> str:
     rid = str(req.get("id") or "")
     user_text = str(req.get("user_text") or "").replace('"', "'")[:1500]
+    # Delivery-age annotation (Zeke directive 2026-07-16): the queue between
+    # submit and rewake can be minutes long; stamp the AGE at delivery so the
+    # model never has to guess whether a '[VECTOR ... @ HH:MM:SS]' line is live.
+    import time as _t
+    age_line = ""
+    try:
+        ts = float(req.get("ts") or 0.0)
+        if ts > 0:
+            age = _t.time() - ts
+            if age >= 45.0:
+                age_line = (
+                    f"[DELIVERY AGE: queued {age / 60.0:.1f} min ago — STALE. "
+                    "Any stamp inside is a replayed log line, not a live "
+                    "alarm; do not act on it as current state.]\n"
+                )
+            else:
+                age_line = f"[DELIVERY AGE: {age:.0f}s — effectively live.]\n"
+    except Exception:
+        pass
     return (
         f"Pending chat request from the orb (request_id={rid!r}).\n"
+        f"{age_line}"
         f"User said: \"{user_text}\"\n\n"
         "Generate ONE response and call mcp__iris__chat_reply(request_id, text) "
         "with your full reply as plain text — that tool writes the response "
