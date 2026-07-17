@@ -440,15 +440,21 @@ def run_once() -> None:
                            cache_animation_lists=False) as robot:
         log("connected — nerves online (observe mode, his brain still runs)")
         # enable marker detection so robot.world.charger (+ cube) populate — the
-        # native 'go home' pose (Zeke 2026-07-14). Best-effort across sig variants.
+        # native 'go home' pose (Zeke 2026-07-14). FIXED 2026-07-17: SDK 0.8.1 has
+        # NO enable_marker_detection (that's newer forks) — this call silently
+        # failed since 07-14. The real switch is enable_custom_object_detection.
         try:
-            try:
-                robot.vision.enable_marker_detection(detect_markers=True)
-            except TypeError:
-                robot.vision.enable_marker_detection()
+            v = robot.vision
+            if hasattr(v, "enable_marker_detection"):
+                try:
+                    v.enable_marker_detection(detect_markers=True)
+                except TypeError:
+                    v.enable_marker_detection()
+            else:
+                v.enable_custom_object_detection(True)
             log("marker detection ON — charger/cube pose available once seen")
         except Exception as e:
-            log(f"enable_marker_detection failed (non-fatal): {e!r}")
+            log(f"marker-vision enable failed (non-fatal): {e!r}")
         alive = {"ok": True}
         import threading as _threading
         if os.environ.get("IRIS_VECTOR_EARS", "1") != "0":
