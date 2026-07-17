@@ -110,6 +110,18 @@ def _body_goto(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
          "max_detours": int(_num(params.get("max_detours"), 2) or 2)})
 
 
+def _body_explore(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """FRONTIER EXPLORATION: repeatedly goto the nearest known-clear/unknown
+    boundary + 360 survey so the nav-map daemon absorbs new territory. The
+    map grows as I move. params: targets (default 3), timeout_s (overall)."""
+    return _pilot().start_mission(
+        {"kind": "explore",
+         "targets": int(_num(params.get("targets"), 3) or 3),
+         "timeout_s": _num(params.get("timeout_s"), 180.0),
+         "max_speed": _num(params.get("max_speed")),
+         "avoid": True, "max_detours": 2})
+
+
 def _body_park_smart(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """SMART-PARK: Zeke's docking lesson automated — optional approach servo to
     a staging point (x,y near home), then release possession + close my session
@@ -255,6 +267,7 @@ register_tool("body_go", "PILOT: background servo to target (x,y | bearing_deg+d
 register_tool("body_route", "PILOT: background waypoint route with obstacle detours (avoid/max_detours like body_go). params: points=[[x,y],...]", 2, _body_route)
 register_tool("body_retrace", "PILOT: escape the way I came — walk my own breadcrumb trail backwards (known-clear path, detours off). params: steps (default 12), timeout_s", 2, _body_retrace)
 register_tool("body_goto", "PILOT: MAP-AWARE goto — A* through the room blueprint + hazard memory, routes AROUND known obstacles (falls back to direct servo+detours without a map). params: x, y (abs mm)", 2, _body_goto)
+register_tool("body_explore", "PILOT: FRONTIER EXPLORATION — drive to the nearest known/unknown boundary, survey, re-plan as the map grows. Bounded. params: targets (default 3, max 8), timeout_s (overall, default 180)", 2, _body_explore)
 register_tool("body_park_smart", "PILOT: SMART-PARK — approach a staging point, then hand the actual parking to the STOCK brain (possession released, session closed, re-possess when docked). Zeke's lesson automated. params: x,y (optional staging), wait_s", 2, _body_park_smart)
 register_tool("body_hazards", "PILOT: hazard memory — journal of blocked/stuck/detour locations the planner routes around. params: origin (frame filter), limit, clear=true wipes", 1, _body_hazards)
 register_tool("body_pose_truth", "POSE TRUTH: odometry confidence 0..1 + drift budget since last absolute fix + advice; fix=true grabs a charger absolute fix NOW (needs fresh sighting). Charger-anchored SLAM v1.", 1, _body_pose_truth)
