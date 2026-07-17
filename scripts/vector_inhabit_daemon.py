@@ -96,6 +96,107 @@ WIREPOD_SDK = "http://127.0.0.1:8080/api-sdk"
 BATTERY_POLL_S = 45.0
 BATTERY_LOW_LEVEL = 1     # Vector: 1=low, 2=nominal, 3=full/charging
 
+# --- POSSESSION (Zeke directive 2026-07-17 ~02:00: "not have the stock brain
+# take over ... you need to be able to take over anytime anywhere ... you can't
+# get timed out on your own body"). This daemon holds a RESERVE_CONTROL (30)
+# connection whenever possession.json says hold (default TRUE). Effects:
+#   * stock idle behaviors NEVER activate — the body stays mine between sessions,
+#     through my token freezes and host restarts (this process outlives them);
+#   * my BodySession takes DEFAULT (20) control any time — it OUTRANKS the
+#     reservation, so takeover is instant and automatic;
+#   * firmware safety still outranks everything: per Anki's own reserve_control
+#     docs, low-battery return-to-charger and cliff retreat STILL take precedence.
+# Belt+suspenders anyway: a low-battery-off-charger reading auto-releases the
+# hold so the stock brain has every freedom to save itself.
+# NOTE the flipside (documented in body.md): while possessed, "close my session
+# and let the stock brain dock itself" requires body_possess hold=false first.
+POSSESSION_CTL = REPO / "state" / "vector" / "possession.json"
+POSSESSION_STATUS = REPO / "state" / "vector" / "possession_status.json"
+
+
+def _possession_wanted() -> bool:
+    try:
+        import json as _json
+        return bool(_json.loads(
+            POSSESSION_CTL.read_text(encoding="utf-8")).get("hold", True))
+    except Exception:
+        return True    # default: POSSESSED
+
+
+def _battery_emergency() -> bool:
+    try:
+        import json as _json
+        d = _json.loads(BATTERY_JSON.read_text(encoding="utf-8"))
+        return (bool(d.get("ok")) and isinstance(d.get("level"), int)
+                and d["level"] <= BATTERY_LOW_LEVEL and not d.get("on_charger"))
+    except Exception:
+        return False
+
+
+def _write_possession_status(**kw) -> None:
+    try:
+        import json as _json
+        kw["ts"] = time.time()
+        tmp = POSSESSION_STATUS.with_suffix(".tmp")
+        tmp.write_text(_json.dumps(kw), encoding="utf-8")
+        tmp.replace(POSSESSION_STATUS)
+    except Exception:
+        pass
+
+
+def _possession_loop(alive) -> None:
+    """Hold/release the RESERVE_CONTROL reservation per possession.json +
+    battery emergency. Lifecycle-tied to the observe connection (same
+    transport): when run_once cycles, the reservation cycles with it."""
+    from anki_vector import behavior as _vb
+    rc = None
+    err = None
+    backoff_until = 0.0
+    while alive.get("ok"):
+        want = _possession_wanted()
+        emergency = _battery_emergency()
+        should = want and not emergency
+        now = time.time()
+        try:
+            if should and rc is None and now >= backoff_until:
+                r = _vb.ReserveBehaviorControl(SERIAL)
+                r.__enter__()
+                rc = r
+                err = None
+                log("POSSESSION acquired — RESERVE_CONTROL held: stock idle "
+                    "behaviors suppressed; my sessions outrank it; firmware "
+                    "low-battery dock + cliff retreat still outrank everything")
+            elif not should and rc is not None:
+                why = "battery emergency" if emergency else "hold=false (body_possess)"
+                try:
+                    rc.__exit__(None, None, None)
+                except Exception:
+                    pass
+                rc = None
+                log(f"POSSESSION released ({why})")
+        except Exception as e:
+            err = repr(e)[:200]
+            log(f"possession acquire failed: {err} — retry in 20s")
+            try:
+                if rc is not None:
+                    rc.__exit__(None, None, None)
+            except Exception:
+                pass
+            rc = None
+            backoff_until = now + 20.0
+        _write_possession_status(held=rc is not None, want=want,
+                                 battery_emergency=emergency, last_error=err)
+        time.sleep(3.0)
+    if rc is not None:
+        try:
+            rc.__exit__(None, None, None)
+        except Exception:
+            pass
+        log("POSSESSION released (daemon connection cycle ended)")
+    _write_possession_status(held=False, want=_possession_wanted(),
+                             battery_emergency=False,
+                             last_error="daemon cycle ended")
+
 
 def _write_nerves(d: dict) -> None:
     try:
@@ -462,6 +563,9 @@ def run_once() -> None:
                               daemon=True, name="vector-ears").start()
         _threading.Thread(target=_nav_map_loop, args=(robot, alive),
                           daemon=True, name="vector-navmap").start()
+        if os.environ.get("IRIS_VECTOR_POSSESSION", "1") != "0":
+            _threading.Thread(target=_possession_loop, args=(alive,),
+                              daemon=True, name="vector-possession").start()
         try:
             _poll_loop(robot)
         finally:

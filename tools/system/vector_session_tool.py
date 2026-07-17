@@ -35,12 +35,60 @@ def _sess():
 
 def _body_open(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """Seat myself: open ONE held control session + live camera feed. Coexists
-    with the observe daemon. Idempotent (returns status if already open)."""
+    with the observe daemon. Idempotent (returns status if already open).
+    priority='default' (normal; outranks the possession hold) or 'override'
+    (force-take from ANY behavior — disables firmware cliff-avoid, Zeke-present
+    emergencies only)."""
     try:
         timeout = float(params.get("timeout") or 20.0)
     except Exception:
         timeout = 20.0
-    return _sess().open_session(timeout=timeout)
+    return _sess().open_session(timeout=timeout,
+                                priority=str(params.get("priority") or "default"))
+
+
+def _body_possess(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """POSSESSION (Zeke directive 2026-07-17): the inhabit daemon holds a
+    RESERVE_CONTROL connection so the STOCK brain never takes over between my
+    sessions — through token freezes and host restarts. My body_open (DEFAULT
+    priority) outranks the hold automatically = takeover anytime.
+    No args = status. hold=true/false toggles (daemon reacts within ~3s).
+    NOTE: hold=false is required before the 'close session, let the stock brain
+    dock itself' fallback — a possessed body won't self-dock on its own except
+    in a firmware low-battery emergency."""
+    import json
+    import time as _time
+    from pathlib import Path
+    repo = Path(r"D:\Wren-Companion")
+    ctl = repo / "state" / "vector" / "possession.json"
+    status_p = repo / "state" / "vector" / "possession_status.json"
+    out: dict[str, Any] = {"ok": True}
+    if params.get("hold") is not None:
+        want = bool(params.get("hold"))
+        ctl.parent.mkdir(parents=True, exist_ok=True)
+        ctl.write_text(json.dumps({"hold": want, "set_ts": _time.time()}),
+                       encoding="utf-8")
+        out["set_hold"] = want
+        out["note"] = "daemon applies within ~3s — re-check status"
+    try:
+        st = json.loads(status_p.read_text(encoding="utf-8"))
+        age = _time.time() - float(st.get("ts", 0))
+        st["status_age_s"] = round(age, 1)
+        if age > 90:
+            st["warning"] = ("possession status STALE (>90s) — the inhabit "
+                             "daemon's possession loop is not running; bounce "
+                             "vector_inhabit_daemon")
+        out["status"] = st
+    except Exception:
+        out["status"] = None
+        out["warning"] = ("no possession status file — daemon not running the "
+                          "possession loop yet (bounce vector_inhabit_daemon)")
+    try:
+        out["wanted"] = bool(json.loads(
+            ctl.read_text(encoding="utf-8")).get("hold", True))
+    except Exception:
+        out["wanted"] = True   # default: possessed
+    return out
 
 
 def _body_close(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
@@ -330,7 +378,8 @@ def _body_anim(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return s.anim(str(name), loops=int(params.get("loops") or 1))
 
 
-register_tool("body_open", "SEAT myself in Vector: open ONE held control session + live camera feed (coexists with observe daemon). Idempotent. Then use body_look/drive/turn/... without jumping out.", 1, _body_open)
+register_tool("body_open", "SEAT myself in Vector: open ONE held control session + live camera feed (coexists with observe daemon). Idempotent. Then use body_look/drive/turn/... without jumping out. priority='override' force-takes from anything (kills firmware cliff-avoid — Zeke-present emergencies only).", 1, _body_open)
+register_tool("body_possess", "POSSESSION: the inhabit daemon holds RESERVE_CONTROL so the STOCK brain never takes over between my sessions (survives my freezes/restarts; my body_open outranks it = takeover anytime). No args = status; hold=true/false toggles. hold=false needed before stock-brain self-dock fallback.", 1, _body_possess)
 register_tool("body_close", "Un-seat: stop, release control, disconnect. Stock brain resumes.", 1, _body_close)
 register_tool("body_status", "Body session status + REAL battery (SDK is_charging) + wheels/head/reflex + nerves.", 1, _body_status)
 register_tool("body_look", "MY EYES (instant): sample live feed -> jpg path to Read. Reports image_id/age/stale (feed-frozen check). bright default on (gamma lift). Needs body_open.", 1, _body_look)

@@ -43,7 +43,9 @@ def _body_go(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
          "standoff_mm": _num(params.get("standoff_mm"), 25.0),
          "max_speed": _num(params.get("max_speed")),
          "timeout_s": _num(params.get("timeout_s"), 20.0),
-         "relative": bool(params.get("relative"))}
+         "relative": bool(params.get("relative")),
+         "avoid": bool(params.get("avoid", True)),
+         "max_detours": int(_num(params.get("max_detours"), 2) or 2)}
     return _pilot().start_mission(m)
 
 
@@ -57,7 +59,19 @@ def _body_route(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         {"kind": "route", "points": pts,
          "standoff_mm": _num(params.get("standoff_mm"), 30.0),
          "max_speed": _num(params.get("max_speed")),
-         "timeout_s": _num(params.get("timeout_s"), 20.0)})
+         "timeout_s": _num(params.get("timeout_s"), 20.0),
+         "avoid": bool(params.get("avoid", True)),
+         "max_detours": int(_num(params.get("max_detours"), 2) or 2)})
+
+
+def _body_retrace(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """ESCAPE THE WAY I CAME: background retrace of my own breadcrumb trail
+    backwards (the known-clear path) — the dead-end recovery move. params:
+    steps (crumbs to walk back, default 12, max 40), timeout_s per leg."""
+    return _pilot().start_mission(
+        {"kind": "retrace",
+         "steps": int(_num(params.get("steps"), 12) or 12),
+         "timeout_s": _num(params.get("timeout_s"), 15.0)})
 
 
 def _body_scan(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
@@ -91,8 +105,9 @@ def _body_abort(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return _pilot().abort()
 
 
-register_tool("body_go", "PILOT: background servo to target (x,y | bearing_deg+dist_mm) — returns instantly, outcome nudges me. params: see doc", 2, _body_go)
-register_tool("body_route", "PILOT: background waypoint route. params: points=[[x,y],...]", 2, _body_route)
+register_tool("body_go", "PILOT: background servo to target (x,y | bearing_deg+dist_mm) — returns instantly, outcome nudges me. Obstacle DETOURS built in (avoid=true default, max_detours=2): blocked/stuck -> back off, ToF-probe both sides, sidestep, retry. params: see doc", 2, _body_go)
+register_tool("body_route", "PILOT: background waypoint route with obstacle detours (avoid/max_detours like body_go). params: points=[[x,y],...]", 2, _body_route)
+register_tool("body_retrace", "PILOT: escape the way I came — walk my own breadcrumb trail backwards (known-clear path, detours off). params: steps (default 12), timeout_s", 2, _body_retrace)
 register_tool("body_scan", "PILOT: background 360 survey (ToF+heading polar sketch, frames opt). params: steps, frames", 2, _body_scan)
 register_tool("body_park", "PILOT: background dock on charger (wedge-safe: hangs a thread, not my turn)", 2, _body_park)
 register_tool("body_launch", "PILOT: background undock from charger", 2, _body_launch)

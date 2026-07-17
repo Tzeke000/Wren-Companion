@@ -65,6 +65,14 @@ MAX_HOLD = 6.0           # ceiling on a single hold window
 GUARD_HZ = 0.06          # guard loop period (~16 Hz): fast layer re-streams + edge-stops
 IDLE_RELEASE_S = 420.0   # auto-close the held session after this much inactivity
 
+# MOBILITY REFLEXES (Zeke directive 2026-07-17 ~02:00: wire up everything an AI
+# needs for a mobile body). Guard-level, so they cover OPEN-LOOP drives too —
+# the owed "startle must fire mid-DRIVE" from the 07-16 cone run.
+DRIVE_BRAKE_MIN_MM = 70.0   # prox-brake floor; actual threshold scales with speed
+STUCK_WINDOW_S = 1.4        # wheels commanded this long with no pose change = stuck
+STUCK_MOVE_MM = 6.0         # "no pose change" = moved less than this...
+STUCK_TURN_DEG = 5.0        # ...and turned less than this
+
 _lock = threading.RLock()
 _session = None  # type: ignore  # module singleton (BodySession | None)
 
@@ -193,15 +201,30 @@ class BodySession:
         self._pet_level = 0                           # escalates 1..4 -> bliss with duration
         self._pet_last = 0.0                          # last pet-stroke time (window reset)
         self._cam_expo = None                         # (exposure_ms, gain) or ('auto',None)
+        # MOBILITY REFLEXES (2026-07-17): guard-level mid-drive brake + stuck detect
+        self._servo_active = False                    # servo runs its own prox logic
+        self._stuck_flag = None                       # set by guard; servo/drive read+clear
+        self._stuck_probe = None                      # (t0, x, y, heading) anchor
+        self._priority = "default"                    # control priority this session holds
 
     # ---------------------------------------------------------------- lifecycle
-    def open(self, timeout: float = 20.0) -> dict:
+    def open(self, timeout: float = 20.0, priority: str = "default") -> dict:
+        """priority='default' (normal: firmware cliff-reflex stays live, outranks
+        the possession daemon's RESERVE hold) or 'override' (TAKE OVER ANYTHING —
+        Zeke directive 2026-07-17 'take over anytime anywhere'. OVERRIDE disables
+        the firmware cliff-avoid: emergency/Zeke-present use, never for roaming)."""
         if self.connected:
             return {"ok": True, "already": True, **self.snapshot()}
         try:
             import anki_vector
+            from anki_vector.connection import ControlPriorityLevel
+            lvl = (ControlPriorityLevel.OVERRIDE_BEHAVIORS_PRIORITY
+                   if str(priority).lower() == "override"
+                   else ControlPriorityLevel.DEFAULT_PRIORITY)
+            self._priority = str(priority).lower()
             self.robot = anki_vector.Robot(
-                SERIAL, cache_animation_lists=True, default_logging=False)
+                SERIAL, cache_animation_lists=True, default_logging=False,
+                behavior_control_level=lvl)
             t0 = time.time()
             self.robot.connect(timeout=timeout)
             connect_s = round(time.time() - t0, 2)
@@ -330,6 +353,71 @@ class BodySession:
                         self._reflex = f"EDGE-GUARD: {danger} — wheels stopped"
                         translating = False
 
+                # a2) MID-DRIVE PROX-BRAKE (the owed cone-run item: startle must
+                #     fire mid-DRIVE). Open-loop forward motion (body_drive) gets
+                #     a speed-scaled hard brake off the ToF + a bounded back-off.
+                #     Servo drives run their own prox logic (approaching a target
+                #     on purpose is not an emergency); SDK maneuvers own the body
+                #     inside the yield window; reflex_on=False suppresses (dock).
+                if (translating and self._reflex_on and not self._servo_active
+                        and now >= getattr(self, "_yield_control_until", 0.0)):
+                    fwd = (l + r) / 2.0
+                    if fwd > 20.0:
+                        st = self._latest or {}
+                        pm = st.get("prox_mm")
+                        if (st.get("prox_found") and pm is not None
+                                and st.get("prox_q", 0) > 0.02
+                                and pm < max(DRIVE_BRAKE_MIN_MM, fwd * 0.5)):
+                            self._raw_wheels(0.0, 0.0)
+                            self._log_reflex(
+                                "drive_brake",
+                                f"obstacle {int(pm)}mm ahead at {int(fwd)}mm/s — BRAKED")
+                            if self._cool("drive_startle", 4.0):
+                                # bounded startle back-off; guard holds it, edge-
+                                # guard still covers the reverse leg next tick
+                                self._wheels = (-80.0, -80.0)
+                                self._drive_until = now + 0.35
+                                self._raw_wheels(-80.0, -80.0, DRIVE_ACCEL)
+                                threading.Thread(
+                                    target=self._play_trigger,
+                                    args=("ReactToObstacle",), daemon=True).start()
+                            else:
+                                self._wheels = (0.0, 0.0)
+                                self._drive_until = 0.0
+                            translating = False
+
+                # a3) STUCK DETECT — wheels commanded but pose frozen (obstacle
+                #     below the ToF beam, dragged cone, carpet lip). Covers open-
+                #     loop AND servo: the guard stops the wheels + raises a flag
+                #     the servo loop reads to abort its mission cooperatively.
+                if translating and now >= getattr(self, "_yield_control_until", 0.0):
+                    st = self._latest or {}
+                    x, y, h = st.get("x"), st.get("y"), st.get("heading")
+                    if x is not None and y is not None:
+                        pr = self._stuck_probe
+                        if pr is None:
+                            self._stuck_probe = (now, x, y, h)
+                        else:
+                            t0, x0, y0, h0 = pr
+                            moved = math.hypot(x - x0, y - y0)
+                            turned = (abs(((h - h0 + 180.0) % 360.0) - 180.0)
+                                      if h is not None and h0 is not None else 0.0)
+                            if moved > STUCK_MOVE_MM or turned > STUCK_TURN_DEG:
+                                self._stuck_probe = (now, x, y, h)
+                            elif now - t0 > STUCK_WINDOW_S:
+                                self._raw_wheels(0.0, 0.0)
+                                self._wheels = (0.0, 0.0)
+                                self._drive_until = 0.0
+                                self._stuck_flag = (
+                                    f"STUCK: wheels commanded {now - t0:.1f}s but "
+                                    f"moved {moved:.0f}mm / turned {turned:.0f}° — stopped")
+                                self._stuck_probe = None
+                                self._log_reflex("stuck", self._stuck_flag)
+                                translating = False
+                else:
+                    if not translating:
+                        self._stuck_probe = None
+
                 # b) SAFETY WINDOW (watchdog) — a setpoint expires if I don't refresh
                 #    it, so a stalled cognition loop can't leave him driving forever.
                 if translating and now >= self._drive_until:
@@ -404,6 +492,7 @@ class BodySession:
             s["x"] = round(float(p.position.x), 1)
             s["y"] = round(float(p.position.y), 1)
             s["heading"] = round(float(p.rotation.angle_z.degrees), 1)
+            s["origin"] = getattr(p, "origin_id", None)   # frame id — breadcrumbs key on it
         with contextlib.suppress(Exception):
             a = r.accel  # mm/s^2; ~9810 on z when level
             ax, ay, az = float(a.x), float(a.y), float(a.z)
@@ -513,11 +602,17 @@ class BodySession:
         standoff = max(5.0, float(standoff_mm))
         t_end = time.time() + max(1.0, float(timeout_s))
         steps = 0
+        self._servo_active = True     # guard: skip prox-brake, servo owns approach
+        self._stuck_flag = None       # fresh attempt clears any stale stuck note
         try:
             while time.time() < t_end:
                 if abort_event is not None and abort_event.is_set():
                     self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
                     return {"ok": False, "aborted": True, "steps": steps}
+                if self._stuck_flag:  # guard detected frozen pose under command
+                    self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
+                    return {"ok": False, "refused": self._stuck_flag,
+                            "stuck": True, "steps": steps}
                 st = self._latest or {}
                 x0 = float(st.get("x", cx)); y0 = float(st.get("y", cy))
                 h0 = float(st.get("heading", ch))
@@ -564,6 +659,8 @@ class BodySession:
         except Exception as e:
             self._raw_wheels(0.0, 0.0); self._wheels = (0.0, 0.0)
             return {"ok": False, "error": repr(e)[:300]}
+        finally:
+            self._servo_active = False
 
     # -------------------------------------------------- reflexes + character
     def _cool(self, key: str, seconds: float) -> bool:
@@ -877,6 +974,8 @@ class BodySession:
                 return {"ok": False, "refused": f"{danger} right now",
                         "hint": "spin (lw=-rw) or back up (lw=rw<0)"}
         self._reflex = None
+        self._stuck_flag = None       # new command = fresh attempt
+        self._stuck_probe = None
         self._wheels = (lw, rw)
         self._drive_until = time.time() + hold
         # ramp on the initiating command; the guard then holds it (accel=0, no re-ramp)
@@ -1087,6 +1186,7 @@ class BodySession:
     def snapshot(self) -> dict:
         return {
             "connected": self.connected,
+            "priority": getattr(self, "_priority", "default"),
             "feed_ok": self.feed_ok,
             "wheels": list(self._wheels),
             "last_head_deg": self._last_head_deg,
@@ -1166,8 +1266,8 @@ def get_session(create: bool = True):
         return _session
 
 
-def open_session(timeout: float = 20.0) -> dict:
-    return get_session().open(timeout=timeout)
+def open_session(timeout: float = 20.0, priority: str = "default") -> dict:
+    return get_session().open(timeout=timeout, priority=priority)
 
 
 def close_session(reason: str = "requested") -> dict:
