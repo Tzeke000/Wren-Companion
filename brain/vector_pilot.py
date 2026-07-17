@@ -676,8 +676,35 @@ class Pilot:
         stop and the session guard stay armed. Restore is in finally — a hang
         or exception can never leave me reflex-dead."""
         s = _session()
-        self._event("docking",
-                    "drive_on_charger started (reflexes suspended + control yielded)")
+        # PRE-DOCK GATE (2026-07-17 live-test): a dock started with the charger
+        # UNKNOWN to the engine hangs drive_on_charger forever (etiology c).
+        # Enforce THE DOCK RECIPE for every caller — policy rules included:
+        # refuse fast with instructions instead of blocking 90s. Stale-but-known
+        # sightings proceed (engine homes on remembered pose, vision-locks
+        # close in) but the event notes the staleness.
+        ch = None
+        seen_ago = None
+        try:
+            ch = s.robot.world.charger
+            if ch is not None:
+                seen_ago = float(getattr(ch, "time_since_last_seen", -1.0))
+        except Exception:
+            ch = None
+        if ch is None:
+            self._event("dock_result",
+                        {"ok": False,
+                         "refused": ("charger NOT known this connection — "
+                                     "drive_on_charger would hang forever. "
+                                     "Face the dock with marker vision on "
+                                     "(body_charger until known+fresh), then "
+                                     "re-dock")},
+                        nudge=True)
+            return
+        note = ("drive_on_charger started (reflexes suspended + control yielded)"
+                + (f" — charger sighting {seen_ago:.0f}s old; stall-at-alignment "
+                   f"risk rises with stale sightings/dim light"
+                   if seen_ago is not None and seen_ago > 10.0 else ""))
+        self._event("docking", note)
         prev = getattr(s, "_reflex_on", True)
         s._reflex_on = False
         s._yield_control_until = time.time() + 95.0   # guard won't reclaim control

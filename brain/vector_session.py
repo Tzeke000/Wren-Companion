@@ -812,6 +812,31 @@ class BodySession:
         closing = (float(base["prox_mm"]) - float(now_e["prox_mm"])) / dt
         return float(now_e["prox_mm"]), closing
 
+    def _turn_rate_dps(self) -> float:
+        """Recent |turn rate| deg/s from the fused stream buffer (~0.5s).
+        Rotation sweeps the ToF beam across nearby surfaces, which reads as
+        'object closing fast' — live-test false-positive 2026-07-17: a scan
+        rotation fired react_evade and dodge-arc'd me 9cm. Evade must gate
+        on NOT-turning; SDK turns (turn_in_place) never touch self._wheels,
+        so the 'driving' flag alone cannot see them."""
+        buf = list(self._stream)
+        if len(buf) < 4:
+            return 0.0
+        now_e = buf[-1]
+        base = None
+        for e in reversed(buf[:-1]):
+            if now_e.get("t", 0) - e.get("t", 0) >= 0.4:
+                base = e
+                break
+        if base is None:
+            base = buf[0]
+        h0, h1 = base.get("heading"), now_e.get("heading")
+        if h0 is None or h1 is None:
+            return 0.0
+        d = (float(h1) - float(h0) + 180.0) % 360.0 - 180.0
+        dt = max(0.1, now_e["t"] - base["t"])
+        return abs(d) / dt
+
     def react_startle(self, prox_mm):
         """SUDDEN THING in my depth sensor while I sat still — startle back-up
         (short; no rear sensor) + Vector's obstacle reaction + go LOOK."""
@@ -882,6 +907,7 @@ class BodySession:
                                                  if not driving else (None, 0.0))
                                 if (pnow is not None and pnow < 350
                                         and closing > 120.0
+                                        and self._turn_rate_dps() < 20.0
                                         and self._cool("evade", 6.0)):
                                     self.react_evade(pnow, closing)
                                 elif (st.get("prox_found") and not pv.get("prox_found")
