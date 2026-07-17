@@ -85,13 +85,19 @@ DEFAULT_RULES = [
 ]
 
 
-def _read_battery_volts() -> float:
+def _read_battery_sample() -> tuple:
+    """(volts, sampled_on_charger) from the daemon's battery poll.
+    (0.0, None) = missing/stale = unusable. The sample carries its own
+    charger-context because DOCKED reads sit ~0.4V LOW (3.55V docked vs
+    3.998V real, measured 2026-07-17) — a battery rule must never judge
+    one charger-state with a sample taken in the other."""
     try:
         d = json.loads(BATTERY_JSON.read_text(encoding="utf-8"))
-        v = float(d.get("volts") or 0.0)
-        return v if time.time() - float(d.get("ts", 0)) < 180 else 0.0
+        if time.time() - float(d.get("ts", 0)) >= 180:
+            return 0.0, None
+        return float(d.get("volts") or 0.0), bool(d.get("on_charger"))
     except Exception:
-        return 0.0
+        return 0.0, None
 
 
 def load(force: bool = False) -> list:
@@ -190,7 +196,14 @@ def _match(rule: dict, cur: dict, prev: dict, ctx: dict) -> bool:
             if str(ctx.get("mission", "idle")) != str(want):
                 return False
         elif key == "battery_lt_v":
-            v = _read_battery_volts()
+            v, sampled_on_charger = _read_battery_sample()
+            # CONTEXT MATCH (live-test bug 2026-07-17): right after undock the
+            # freshest sample was still a DOCKED read (artificially low) while
+            # live on_charger had just flipped false → phantom emergency dock
+            # + blind-dock hang. The sample's charger-state must match NOW's.
+            if sampled_on_charger is None or \
+                    sampled_on_charger != bool(cur.get("on_charger")):
+                return False
             if not (0.0 < v < float(want)):
                 return False
         else:
