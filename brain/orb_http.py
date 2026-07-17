@@ -2016,6 +2016,15 @@ def start(g: dict[str, Any], root: Path, tts: Any | None = None) -> None:
                         _alive = True
                     except (OSError, PermissionError, ProcessLookupError):
                         _alive = False
+                    except SystemError:
+                        # 2026-07-17: on Windows os.kill(pid, 0) against a dead
+                        # pid can raise SystemError ("OSError returned a result
+                        # with an exception set", WinError 87). This CRASHED
+                        # start() at the 07:40 boot via a stale lockfile → no
+                        # :5876 listener all day → orb showed 'Iris offline'.
+                        # Treat as not-alive: the PORT PROBE above is the
+                        # primary duplicate guard, the lockfile is belt-only.
+                        _alive = False
                     if _alive:
                         print(
                             f"[orb_http] ERROR: stale lockfile {_pid_file} points at PID "

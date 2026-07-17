@@ -195,6 +195,65 @@ register_tool(
 )
 
 
+def _restart_orb_http(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Restart the orb HTTP listener (2026-07-17: the uvicorn daemon thread
+    DIED during a token freeze — :5876 had no listener, the orb app sat in
+    SYN_SENT forever, app showed 'Iris offline'; rebind_orb_http_state was
+    healthy because the STATE was fine — only the SERVER thread was dead).
+    Safe: if a listener already answers on :5876 this is a no-op; otherwise
+    re-runs brain.orb_http.start() (port-probe guarded) in this process."""
+    import socket
+    import time as _t
+
+    out: dict[str, Any] = {"ok": True}
+
+    def _probe() -> bool:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.5)
+        try:
+            s.connect(("127.0.0.1", 5876))
+            return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+
+    if _probe():
+        out["was_listening"] = True
+        out["note"] = "listener already alive — nothing to do"
+        return out
+    out["was_listening"] = False
+    try:
+        import brain.orb_http as m
+        root = Path(g.get("BASE_DIR") or ".")
+        m._g = g                     # belt: state rebind rides along
+        m.start(g, root, tts=getattr(m, "_tts_ref", None))
+        _t.sleep(1.5)
+        out["listening_now"] = _probe()
+        if not out["listening_now"]:
+            out["ok"] = False
+            out["error"] = ("start() returned but :5876 still not answering — "
+                            "check stderr for [orb_http] lines")
+    except Exception as e:
+        import traceback
+        out["ok"] = False
+        out["error"] = repr(e)
+        out["traceback"] = traceback.format_exc()[-1500:]
+    return out
+
+
+register_tool(
+    name="restart_orb_http",
+    description=(
+        "Repair: restart the orb HTTP listener thread on :5876 after it dies "
+        "(orb app shows 'Iris offline', connections SYN_SENT, no LISTENING). "
+        "No-op if a listener already answers. Tier 2."
+    ),
+    tier=2,
+    handler=_restart_orb_http,
+)
+
+
 register_tool(
     name="rebind_orb_http_state",
     description=(
