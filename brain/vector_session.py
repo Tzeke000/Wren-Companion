@@ -223,6 +223,21 @@ class BodySession:
                     self.set_camera_brightness()
                 except Exception as e:
                     self._reflex = f"cam brighten skipped: {e!r}"[:120]
+            # MARKER VISION (23:58 dock saga): without this the engine never
+            # "sees" the charger on MY connection → robot.world.charger stays
+            # empty → drive_on_charger hangs forever. The daemon's connection
+            # always enabled it; the session must too.
+            try:
+                v = self.robot.vision
+                if hasattr(v, "enable_marker_detection"):
+                    try:
+                        v.enable_marker_detection(detect_markers=True)
+                    except TypeError:
+                        v.enable_marker_detection()
+                else:            # SDK 0.8.1: Markers mode rides this switch
+                    v.enable_custom_object_detection(True)
+            except Exception as e:
+                self._reflex = f"marker vision skipped: {e!r}"[:120]
             self.connected = True
             self.error = None
             self.opened_ts = time.time()
@@ -329,14 +344,21 @@ class BodySession:
 
                 # d) control-lost recovery — DEFAULT_PRIORITY yanks control on a
                 #    hardware reflex or a higher-priority behavior; stop + reclaim.
+                #    EXCEPT inside a yield window (the 23:46 dock-stall etiology):
+                #    drive_on_charger/off_charger NEED control released to run —
+                #    reclaiming mid-maneuver kills the behavior in a livelock and
+                #    the SDK call blocks forever. The pilot opens the window.
                 try:
-                    cle = getattr(self.robot.conn, "control_lost_event", None)
-                    if cle is not None and cle.is_set():
-                        self._raw_wheels(0.0, 0.0)
-                        self._wheels = (0.0, 0.0)
-                        self._reflex = "CONTROL LOST (reflex/higher-prio) — reclaiming"
-                        with contextlib.suppress(Exception):
-                            self.robot.conn.request_control()
+                    if now < getattr(self, "_yield_control_until", 0.0):
+                        pass    # deliberate: an SDK behavior owns the body right now
+                    else:
+                        cle = getattr(self.robot.conn, "control_lost_event", None)
+                        if cle is not None and cle.is_set():
+                            self._raw_wheels(0.0, 0.0)
+                            self._wheels = (0.0, 0.0)
+                            self._reflex = "CONTROL LOST (reflex/higher-prio) — reclaiming"
+                            with contextlib.suppress(Exception):
+                                self.robot.conn.request_control()
                 except Exception:
                     pass
 

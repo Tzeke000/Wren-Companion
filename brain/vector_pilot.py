@@ -231,14 +231,36 @@ class Pilot:
         return box.get("r", {"ok": False, "error": "no result"})
 
     def _m_dock(self, m: dict) -> None:
+        """MISSION-AWARE REFLEXES (the 23:41 double-hang etiology): docking is
+        an EXPECTED close approach — but my L1 startle reflex reads the looming
+        charger as 'something appeared <220mm' and backs away mid-maneuver, so
+        drive_on_charger never completes and the SDK call blocks forever.
+        Suspend expressive/startle reflexes for the maneuver; L0 firmware cliff
+        stop and the session guard stay armed. Restore is in finally — a hang
+        or exception can never leave me reflex-dead."""
         s = _session()
-        self._event("docking", "drive_on_charger started")
-        r = self._guarded_sdk(s.dock, "dock", 60.0)
+        self._event("docking",
+                    "drive_on_charger started (reflexes suspended + control yielded)")
+        prev = getattr(s, "_reflex_on", True)
+        s._reflex_on = False
+        s._yield_control_until = time.time() + 95.0   # guard won't reclaim control
+        try:
+            r = self._guarded_sdk(s.dock, "dock", 90.0)
+        finally:
+            s._reflex_on = prev
+            s._yield_control_until = 0.0
         self._event("dock_result", r, nudge=True)
 
     def _m_undock(self, m: dict) -> None:
         s = _session()
-        r = self._guarded_sdk(s.undock, "undock", 30.0)
+        prev = getattr(s, "_reflex_on", True)
+        s._reflex_on = False               # same close-quarters logic as dock
+        s._yield_control_until = time.time() + 35.0
+        try:
+            r = self._guarded_sdk(s.undock, "undock", 30.0)
+        finally:
+            s._reflex_on = prev
+            s._yield_control_until = 0.0
         self._event("undock_result", r, nudge=True)
 
 
