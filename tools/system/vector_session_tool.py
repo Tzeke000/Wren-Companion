@@ -97,6 +97,43 @@ def _body_close(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return _sess().close_session(reason=reason)
 
 
+def _body_policy(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """MY POLICY RULEBOOK (L1.5): situation→action rules that fire at 8Hz in
+    the body's reflex loop — my decisions pre-compiled, no turn-wait (Zeke
+    2026-07-17: 'give that reaction speed to you'). No args = list rules.
+    rule={id, when{...}, do[...], cooldown_s, enabled, note} upserts (see
+    brain/vector_policy.py docstring for the full schema). remove='id' deletes;
+    enable='id'/disable='id' toggles; test='id' executes a rule's actions NOW
+    on the live session (needs body_open)."""
+    from brain import vector_policy as vp
+    if params.get("rule"):
+        return vp.upsert(dict(params["rule"]))
+    if params.get("remove"):
+        return vp.remove(str(params["remove"]))
+    if params.get("enable") or params.get("disable"):
+        rid = str(params.get("enable") or params.get("disable"))
+        rules = vp.load(force=True)
+        hit = [r for r in rules if r.get("id") == rid]
+        if not hit:
+            return {"ok": False, "error": f"no rule '{rid}'"}
+        hit[0]["enabled"] = bool(params.get("enable"))
+        vp.save(rules)
+        return {"ok": True, "id": rid, "enabled": hit[0]["enabled"]}
+    if params.get("test"):
+        rid = str(params["test"])
+        hit = [r for r in vp.load(force=True) if r.get("id") == rid]
+        if not hit:
+            return {"ok": False, "error": f"no rule '{rid}'"}
+        s = _sess().get_session(create=False)
+        if s is None or not s.connected:
+            return {"ok": False, "error": "body session not open (call body_open)"}
+        vp.execute(s, hit[0])
+        return {"ok": True, "tested": rid,
+                "note": "actions executed on the live session — check "
+                        "body_reflexes recent"}
+    return {"ok": True, "rules": vp.load(force=True)}
+
+
 def _body_status(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """Session + fused sensor cache. WEDGE-PROOF (23:30 scar): reads ONLY the
     stream cache + pure fields — a live get_battery_state gRPC during a hung
@@ -380,6 +417,7 @@ def _body_anim(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 
 register_tool("body_open", "SEAT myself in Vector: open ONE held control session + live camera feed (coexists with observe daemon). Idempotent. Then use body_look/drive/turn/... without jumping out. priority='override' force-takes from anything (kills firmware cliff-avoid — Zeke-present emergencies only).", 1, _body_open)
 register_tool("body_possess", "POSSESSION: the inhabit daemon holds RESERVE_CONTROL so the STOCK brain never takes over between my sessions (survives my freezes/restarts; my body_open outranks it = takeover anytime). No args = status; hold=true/false toggles. hold=false needed before stock-brain self-dock fallback.", 1, _body_possess)
+register_tool("body_policy", "MY POLICY RULEBOOK (L1.5): situation->action rules firing at 8Hz in the reflex loop — decisions pre-compiled, no turn-wait. No args=list; rule={...} upserts; remove/enable/disable='id'; test='id' runs actions now.", 1, _body_policy)
 register_tool("body_close", "Un-seat: stop, release control, disconnect. Stock brain resumes.", 1, _body_close)
 register_tool("body_status", "Body session status + REAL battery (SDK is_charging) + wheels/head/reflex + nerves.", 1, _body_status)
 register_tool("body_look", "MY EYES (instant): sample live feed -> jpg path to Read. Reports image_id/age/stale (feed-frozen check). bright default on (gamma lift). Needs body_open.", 1, _body_look)

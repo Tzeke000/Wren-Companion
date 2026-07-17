@@ -883,6 +883,24 @@ class BodySession:
                                         and st.get("prox_q", 0) > 0.02
                                         and not driving and self._cool("startle", 5.0)):
                                     self.react_startle(pm)
+                        # POLICY LAYER (L1.5, 2026-07-17 — Zeke: "give that
+                        # reaction speed to you"): my pre-compiled situation->
+                        # action rules evaluate here at body rate — decisions
+                        # I made in advance fire without waiting for a turn.
+                        try:
+                            from brain import vector_policy
+                            ctx = {"driving": driving, "mission": "idle",
+                                   "closing": 0.0}
+                            with contextlib.suppress(Exception):
+                                from brain import vector_pilot
+                                ctx["mission"] = vector_pilot.get_pilot().state
+                            with contextlib.suppress(Exception):
+                                pn, closing = self._prox_closing_speed()
+                                ctx["closing"] = closing if pn is not None else 0.0
+                            for rule in vector_policy.evaluate(st, pv, ctx):
+                                vector_policy.execute(self, rule)
+                        except Exception:
+                            pass
                         self._prev = dict(st)
             except Exception:
                 pass
