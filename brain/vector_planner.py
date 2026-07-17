@@ -211,6 +211,52 @@ def _simplify(g: _Grid, path: list) -> list:
     return out
 
 
+def frontiers(start_xy, hazards: list = None, min_sep_mm: float = 200.0) -> dict:
+    """FRONTIER targets for exploration (2026-07-17 — research found nobody
+    has built this for Vector; the blueprint makes it nearly free): known-CLEAR
+    cells adjacent to UNKNOWN space are where driving gains information.
+    Returns cluster representatives sorted nearest-first (they're already
+    passable by construction — no snapping needed)."""
+    try:
+        bp = _load_map()
+    except Exception as e:
+        return {"ok": False, "error": f"no usable blueprint: {e}"[:200]}
+    try:
+        g = _Grid(bp, hazards or [], [start_xy])
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    sx, sy = float(start_xy[0]), float(start_xy[1])
+    cands = []
+    for i in range(g.nx):
+        row = g.cost[i]
+        for j in range(g.ny):
+            if row[j] != 1.0:            # frontier seeds are KNOWN-clear...
+                continue
+            edge = False                 # ...touching unknown
+            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                a, b = i + di, j + dj
+                if (0 <= a < g.nx and 0 <= b < g.ny
+                        and g.cost[a][b] == UNKNOWN_COST):
+                    edge = True
+                    break
+            if edge:
+                x, y = g._xy(i, j)
+                cands.append((math.hypot(x - sx, y - sy), x, y))
+    cands.sort()
+    picked = []
+    for d, x, y in cands:
+        if d < 120.0:                    # already standing at this frontier
+            continue
+        if all(math.hypot(x - px, y - py) >= min_sep_mm for (px, py) in picked):
+            picked.append((x, y))
+        if len(picked) >= 8:
+            break
+    return {"ok": True,
+            "targets": [[round(x, 1), round(y, 1)] for (x, y) in picked],
+            "n_candidates": len(cands),
+            "map_age_s": round(time.time() - float(bp.get("ts", 0)), 1)}
+
+
 def plan(start_xy, goal_xy, hazards: list = None) -> dict:
     """Route start->goal through the blueprint. Returns waypoints in mm
     (excluding the start point), ready for body_route legs."""

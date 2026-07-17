@@ -248,11 +248,12 @@ class Pilot:
                   "scan": self._m_scan, "dock": self._m_dock,
                   "undock": self._m_undock, "retrace": self._m_retrace,
                   "smart_park": self._m_smart_park,
-                  "goto": self._m_goto}.get(kind)
+                  "goto": self._m_goto,
+                  "explore": self._m_explore}.get(kind)
             if fn is None:
                 self._event("error", f"unknown mission kind {kind!r}")
                 return
-            if kind in ("servo", "route", "retrace", "goto"):
+            if kind in ("servo", "route", "retrace", "goto", "explore"):
                 threading.Thread(target=self._crumb_loop, args=(crumb_stop,),
                                  name="pilot-crumbs", daemon=True).start()
             fn(m)
@@ -269,18 +270,82 @@ class Pilot:
 
     # ------------------------------------------------- obstacle avoidance
     def _tof_read(self, s) -> float:
-        """Settled ToF distance in the current facing; 1200 = clear/unknown."""
-        time.sleep(0.35)
-        st = dict(s._latest or {})
-        pm = st.get("prox_mm")
-        if not st.get("prox_found") or pm is None or st.get("prox_q", 0) <= 0.02:
+        """Settled MEDIAN ToF distance in the current facing (research playbook
+        2026-07-17: settle after rotation, median of several reads, range-gate
+        35..1100mm; out-of-range/no-target = free-to-max, NOT obstacle).
+        1200 = clear/unknown."""
+        time.sleep(0.30)
+        vals = []
+        for _ in range(4):
+            st = dict(s._latest or {})
+            pm = st.get("prox_mm")
+            if (st.get("prox_found") and pm is not None
+                    and st.get("prox_q", 0) > 0.02 and 35.0 <= pm <= 1100.0):
+                vals.append(float(pm))
+            time.sleep(0.08)
+        if not vals:
             return 1200.0
-        return float(pm)
+        vals.sort()
+        return vals[len(vals) // 2]
 
-    def _detour(self, s, why: str) -> bool:
-        """One bounded escape maneuver (bug-algorithm step, 2026-07-17 mobility
-        layer): back off, probe both sides with the ToF, turn toward the clearer
-        one, sidestep past the obstacle. Returns False if aborted."""
+    def polar_scan(self, s, arc_deg: float = 150.0, steps: int = 7) -> list:
+        """Whole-robot rotate-scan (the servo-pan substitute — research: same
+        math, rotation instead of pan): sweep `arc_deg` centered on the current
+        heading in `steps` stops, settled-median ToF at each. Returns
+        [(rel_bearing_deg, dist_mm)] and restores the original heading."""
+        steps = max(3, min(int(steps), 11))
+        half = float(arc_deg) / 2.0
+        offsets = [(-half + i * (float(arc_deg) / (steps - 1)))
+                   for i in range(steps)]
+        out = []
+        cur = 0.0
+        for off in offsets:
+            if self.abort_evt.is_set():
+                break
+            with contextlib.suppress(Exception):
+                s.turn(off - cur, speed_deg_s=140.0)
+            cur = off
+            out.append((round(off, 1), self._tof_read(s)))
+        with contextlib.suppress(Exception):        # restore heading
+            s.turn(-cur, speed_deg_s=140.0)
+        return out
+
+    @staticmethod
+    def vfh_pick(scan: list, target_rel_deg: float = 0.0,
+                 clear_mm: float = 300.0) -> dict:
+        """VFH-lite valley pick over a sparse polar scan: sectors with
+        dist >= clear_mm are free; contiguous free runs are valleys; choose
+        the valley center nearest the target bearing (research: direct-polar
+        simplification of Borenstein's VFH for sparse single-beam sweeps)."""
+        if not scan:
+            return {"ok": False, "error": "empty scan"}
+        free = [(b, d) for (b, d) in scan if d >= clear_mm]
+        if not free:
+            widest = max(scan, key=lambda t: t[1])
+            return {"ok": False, "blocked": True, "least_bad_deg": widest[0],
+                    "least_bad_mm": widest[1]}
+        valleys = []
+        run = [free[0]]
+        for (b, d) in free[1:]:
+            if b - run[-1][0] <= (scan[1][0] - scan[0][0]) + 1.0:
+                run.append((b, d))
+            else:
+                valleys.append(run)
+                run = [(b, d)]
+        valleys.append(run)
+        best = min(valleys, key=lambda v: abs(
+            (v[0][0] + v[-1][0]) / 2.0 - target_rel_deg))
+        center = (best[0][0] + best[-1][0]) / 2.0
+        return {"ok": True, "steer_deg": round(center, 1),
+                "valley_width_deg": round(best[-1][0] - best[0][0], 1),
+                "valley_min_mm": round(min(d for _, d in best), 0),
+                "n_valleys": len(valleys)}
+
+    def _detour(self, s, why: str, target_rel_deg: float = 0.0) -> bool:
+        """One bounded escape maneuver (upgraded 2026-07-17 from 2-point probe
+        to a 7-stop polar scan + VFH-lite valley pick — research playbook):
+        back off, sweep the forward arc, steer into the valley nearest the
+        goal bearing, sidestep. Returns False if aborted."""
         self._event("detour", {"why": str(why)[:140]})
         st = dict(s._latest or {})
         log_hazard("detour", st.get("x"), st.get("y"), st.get("origin"), why)
@@ -291,23 +356,33 @@ class Pilot:
             s._wheels = (0.0, 0.0)
         if self.abort_evt.is_set():
             return False
-        with contextlib.suppress(Exception):        # probe right (-45°)...
-            s.turn(-45.0, speed_deg_s=120.0)
-        right = self._tof_read(s)
-        with contextlib.suppress(Exception):        # ...then left (+45°)
-            s.turn(90.0, speed_deg_s=120.0)
-        left = self._tof_read(s)
+        scan = self.polar_scan(s, arc_deg=150.0, steps=7)
         if self.abort_evt.is_set():
             return False
-        if right > left:                            # face the clearer side
-            with contextlib.suppress(Exception):
-                s.turn(-90.0, speed_deg_s=120.0)
-        side = "right" if right > left else "left"
-        self._event("detour_probe", {"left_mm": int(left), "right_mm": int(right),
-                                     "chose": side})
+        pick = self.vfh_pick(scan, target_rel_deg=target_rel_deg)
+        self._event("detour_scan", {"scan": scan, "pick": pick})
+        steer = pick.get("steer_deg") if pick.get("ok") else pick.get("least_bad_deg", 60.0)
+        with contextlib.suppress(Exception):
+            s.turn(float(steer), speed_deg_s=140.0)
         with contextlib.suppress(Exception):        # sidestep past the obstacle
             s.straight(150.0, speed_mm_s=110.0)
         return not self.abort_evt.is_set()
+
+    @staticmethod
+    def _target_rel(s, kw: dict) -> float:
+        """Goal bearing relative to current heading (deg, for the VFH pick).
+        0.0 when the target is unknowable (relative/bearing modes)."""
+        try:
+            st = dict(s._latest or {})
+            tx, ty = kw.get("x"), kw.get("y")
+            if tx is None or ty is None or kw.get("relative"):
+                return 0.0
+            dx = float(tx) - float(st["x"])
+            dy = float(ty) - float(st["y"])
+            b = math.degrees(math.atan2(dy, dx))
+            return ((b - float(st.get("heading", 0.0)) + 180.0) % 360.0) - 180.0
+        except Exception:
+            return 0.0
 
     def _servo_avoid(self, s, m: dict, kw: dict) -> dict:
         """servo_to + bounded detour retries. Blocked (prox-brake / stuck) →
@@ -321,7 +396,8 @@ class Pilot:
                and (r.get("refused") or r.get("stuck") or r.get("timed_out"))
                and not self.abort_evt.is_set()):
             detours -= 1
-            if not self._detour(s, r.get("refused") or "timed out short of target"):
+            if not self._detour(s, r.get("refused") or "timed out short of target",
+                                target_rel_deg=self._target_rel(s, kw)):
                 r["aborted"] = True
                 break
             r = s.servo_to(**kw, abort_event=self.abort_evt)
@@ -400,6 +476,50 @@ class Pilot:
         else:
             self._event("plan_fallback", str(pl.get("error"))[:160])
             self._m_servo(m)
+
+    def _m_explore(self, m: dict) -> None:
+        """FRONTIER EXPLORATION (2026-07-17 — the gap the research found):
+        drive to the nearest known-clear/unknown boundary, scan, let the
+        nav-map daemon absorb what the sensors saw, re-read frontiers, repeat.
+        Bounded by targets + overall deadline; every leg rides goto (planned,
+        detoured, hazard-aware). The map literally grows as I move."""
+        s = _session()
+        from brain import vector_planner
+        n_targets = max(1, min(int(m.get("targets") or 3), 8))
+        deadline = time.time() + float(m.get("timeout_s") or 180.0)
+        visited = 0
+        while visited < n_targets and time.time() < deadline:
+            if self.abort_evt.is_set():
+                self._event("aborted", {"explored": visited})
+                return
+            st = dict(s._latest or {})
+            if st.get("x") is None:
+                self._event("error", "no pose in stream", nudge=True)
+                return
+            hz = read_hazards(origin=st.get("origin"))
+            fr = vector_planner.frontiers((st["x"], st["y"]), hz)
+            if not fr.get("ok") or not fr.get("targets"):
+                self._event("explore_done",
+                            {"explored": visited,
+                             "note": fr.get("error") or "no frontiers left — "
+                                     "known space is closed"}, nudge=True)
+                return
+            tx, ty = fr["targets"][0]
+            self._event("frontier", {"target": [tx, ty],
+                                     "remaining": len(fr["targets"])})
+            m2 = dict(m)
+            m2.update(x=tx, y=ty, standoff_mm=80.0,
+                      timeout_s=float(m.get("timeout_s_leg") or 25.0))
+            self._m_goto(m2)
+            if self.abort_evt.is_set():
+                self._event("aborted", {"explored": visited})
+                return
+            with contextlib.suppress(Exception):   # survey so the map grows
+                for _ in range(4):
+                    s.turn(90.0, speed_deg_s=120.0)
+                    time.sleep(0.4)
+            visited += 1
+        self._event("explore_done", {"explored": visited}, nudge=True)
 
     def _m_retrace(self, m: dict) -> None:
         """ESCAPE THE WAY I CAME (2026-07-17): walk my own breadcrumb trail
