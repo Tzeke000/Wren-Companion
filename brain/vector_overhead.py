@@ -287,3 +287,133 @@ def to_desk_mm(center_px) -> dict:
     return {"ok": True,
             "x_mm": round((H[0][0] * x + H[0][1] * y + H[0][2]) / d, 1),
             "y_mm": round((H[1][0] * x + H[1][1] * y + H[1][2]) / d, 1)}
+
+
+# ---------------------------------------------------------------- cone referee
+# 2026-07-17 late: Zeke watched me drag cone 1 to cone 4 during a servo leg —
+# AGAIN (course-run repeat). Cones are ToF-invisible (thin) and dragging never
+# trips stuck-detect (motion continues). Every sensor I was listening to was
+# blind to it; the OVERHEAD eye sees the orange cones crisply on the lit floor.
+# This is the referee: snapshot cone centroids before a leg, compare after.
+# Zero calibration needed — pixel-space displacement IS the verdict.
+CONES_JSON = OUT_DIR / "cones_snapshot.json"
+
+
+def detect_cones(frame) -> list:
+    """Orange floor obstacles (training cones, and honestly the red shoe) in a
+    BGR overhead frame -> [{center_px, area}].
+
+    v2 (2026-07-17 late): absolute HSV thresholds FAILED — this webcam's warm
+    cast makes the lamp-lit beige floor read H15-19 S145-164, nearly identical
+    to the cones (measured in-process). Cones ARE separable as LOCAL redness
+    maxima: score = saturation gated to red-orange hue, subtract a large-blur
+    background (uniform floor + big furniture cancel out), threshold the
+    difference. Survives AWB drift because everything is relative-to-local."""
+    import cv2
+    import numpy as np
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    red_hue = ((h <= 14) | (h >= 170)) & (v >= 110)
+    score = np.where(red_hue, s, 0).astype(np.float32)
+    bg = cv2.blur(score, (61, 61))
+    diff = score - bg
+    mask = (diff > 55).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    cones = []
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                               cv2.CHAIN_APPROX_SIMPLE)
+    for c in cnts:
+        a = cv2.contourArea(c)
+        if not (10 <= a <= 900):         # cone at 640x480 ≈ 15-150 px²
+            continue
+        M = cv2.moments(c)
+        if M["m00"] <= 0:
+            continue
+        cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
+        # FLOOR GATE (this webcam is FIXED): furniture band = top + left edge.
+        # Keep only the driving floor: (y>150 and x>140) or far-left low y>270.
+        # Re-derive if the camera is ever re-aimed.
+        if not ((cy > 150 and cx > 140) or cy > 270):
+            continue
+        cones.append({"center_px": [round(cx, 1), round(cy, 1)],
+                      "area": round(a, 1)})
+    cones.sort(key=lambda d: d["center_px"][0])
+    return cones
+
+
+def cone_check(save: bool = True, drift_px: float = 12.0,
+               sample: list | None = None) -> dict:
+    """Detect cones now, compare against the previous snapshot (nearest-match),
+    then save the new snapshot. moved=[] is the clean bill; anything else means
+    I displaced the course since the last check. Call BEFORE a drive leg to
+    baseline, AFTER it to self-grade honestly (the drag detector)."""
+    import json as _json
+    try:
+        from brain.camera_live import read_live_frame
+        frame, ts = read_live_frame()
+    except Exception as e:
+        return {"ok": False, "error": f"camera read failed: {e!r}"[:180]}
+    if frame is None:
+        return {"ok": False, "error": "no frame from PC camera"}
+    cur = detect_cones(frame)
+    out = {"ok": True, "n_cones": len(cur), "cones": cur, "moved": [],
+           "prev_age_s": None}
+    if sample:
+        # debug: report median HSV around given pixel points (threshold tuning)
+        import cv2
+        import numpy as np
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        m1 = cv2.inRange(hsv, (3, 110, 90), (26, 255, 255))
+        m2 = cv2.inRange(hsv, (170, 110, 90), (180, 255, 255))
+        raw_mask = m1 | m2
+        opened = cv2.morphologyEx(raw_mask, cv2.MORPH_OPEN,
+                                  np.ones((3, 3), np.uint8))
+        pts = []
+        for xy in sample:
+            x, y = int(xy[0]), int(xy[1])
+            patch = hsv[max(0, y - 3):y + 4, max(0, x - 3):x + 4].reshape(-1, 3)
+            w = (slice(max(0, y - 7), y + 8), slice(max(0, x - 7), x + 8))
+            pts.append({"xy": [x, y],
+                        "hsv_med": np.median(patch, 0).astype(int).tolist(),
+                        "hsv_max_s": patch[patch[:, 1].argmax()].tolist(),
+                        "mask_px_raw": int((raw_mask[w] > 0).sum()),
+                        "mask_px_opened": int((opened[w] > 0).sum())})
+        out["samples"] = pts
+    prev = None
+    with contextlib.suppress(Exception):
+        rec = _json.loads(CONES_JSON.read_text(encoding="utf-8"))
+        prev = rec.get("cones")
+        out["prev_age_s"] = round(time.time() - float(rec.get("ts", 0)), 1)
+    if prev:
+        for p in prev:
+            px, py = p["center_px"]
+            best, bd = None, 1e9
+            for c in cur:
+                d = ((c["center_px"][0] - px) ** 2 +
+                     (c["center_px"][1] - py) ** 2) ** 0.5
+                if d < bd:
+                    best, bd = c, d
+            if best is None or bd > drift_px:
+                out["moved"].append(
+                    {"was_px": [px, py],
+                     "now_px": best["center_px"] if best else None,
+                     "drift_px": round(bd, 1) if best else None})
+        if len(cur) != len(prev):
+            out["count_changed"] = {"was": len(prev), "now": len(cur)}
+    if save:
+        with contextlib.suppress(Exception):
+            CONES_JSON.write_text(_json.dumps(
+                {"ts": time.time(), "cones": cur}), encoding="utf-8")
+    # always drop an annotated frame — the referee must be auditable
+    with contextlib.suppress(Exception):
+        import cv2
+        vis = frame.copy()
+        for c in cur:
+            x, y = int(c["center_px"][0]), int(c["center_px"][1])
+            cv2.circle(vis, (x, y), 10, (0, 255, 0), 2)
+            cv2.putText(vis, str(int(c["area"])), (x + 10, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        p = str(OUT_DIR / "cones_vis.jpg")
+        cv2.imwrite(p, vis)
+        out["vis"] = p
+    return out

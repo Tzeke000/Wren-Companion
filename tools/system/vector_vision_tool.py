@@ -86,6 +86,18 @@ def _body_overhead(params: dict, g: dict) -> dict:
     return vector_overhead.probe(save=bool(params.get("save", True)))
 
 
+def _body_cones(params: dict, g: dict) -> dict:
+    """CONE REFEREE (2026-07-17: Zeke watched me drag cone 1 to cone 4 —
+    thin cones are invisible to ToF and dragging never trips stuck-detect).
+    Overhead-webcam orange-cone snapshot + drift compare: call BEFORE a
+    drive leg to baseline, AFTER to self-grade. moved=[] = clean pass."""
+    from brain import vector_overhead
+    return vector_overhead.cone_check(
+        save=bool(params.get("save", True)),
+        drift_px=float(params.get("drift_px", 12.0)),
+        sample=params.get("sample"))
+
+
 def _guarded_behavior(s, fn, label: str, timeout_s: float) -> dict:
     """Run a blocking SDK behavior in a side thread with a join deadline —
     the dock-hang lesson (2026-07-17) applied to cube maneuvers. Suspends
@@ -230,10 +242,13 @@ def _body_landmarks(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
                 out["errors"] = md["errors"]
             return out
         # ---- list: what does the engine know right now?
+        # all=true drops the Custom filter (shows cube/charger too — useful to
+        # prove the Markers pipeline is live this session via native objects)
+        show_all = bool(params.get("all"))
         objs = []
         for o in list(getattr(s.robot.world, "all_objects", []) or []):
             tname = type(o).__name__
-            if "Custom" not in tname:
+            if not show_all and "Custom" not in tname:
                 continue
             d: dict[str, Any] = {"class": tname}
             with __import__("contextlib").suppress(Exception):
@@ -263,3 +278,4 @@ register_tool("body_landmarks", "My ROOM MARKERS (Circles2/3, Diamonds2/3, 90mm)
 register_tool("body_cube", "MY HANDS — cube find/dock/pickup/place/roll via firmware behaviors (hang-guarded). actions: status/connect/disconnect/lights/dock/pickup/place/roll", 2, _body_cube)
 register_tool("body_charger", "Engine's known charger pose — MUST be known before body_park (unseen charger = dock hang)", 1, _body_charger)
 register_tool("body_overhead", "OVERHEAD-EYE probe: PC-camera frame + ArUco marker detection (localization stage 1). Read the saved jpg to judge whether the view covers my driving area.", 1, _body_overhead)
+register_tool("body_cones", "CONE REFEREE via overhead webcam: snapshot orange-cone positions + drift-compare vs last snapshot (drag detector). Baseline before a leg, self-grade after.", 1, _body_cones)
