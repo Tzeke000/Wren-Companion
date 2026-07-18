@@ -643,7 +643,13 @@ class Pilot:
         with contextlib.suppress(Exception):
             from brain import vector_session as vs
             vs.close_session(reason="smart-park handoff to stock brain")
+        # DOCK-WATCH FIX (2026-07-18, the 22:55 miss): nerves.json goes STALE
+        # while/after MY session holds the conn, so the nerves-only watch missed
+        # a real dock and skipped re-possess. battery.json comes via wire-pod
+        # HTTP (~45s cadence, session-independent) — accept EITHER source when
+        # fresh, freshness window sized per source.
         nerves_p = REPO / "state" / "vector" / "nerves.json"
+        battery_p = REPO / "state" / "vector" / "battery.json"
         deadline = time.time() + float(m.get("wait_s") or 240.0)
         docked = False
         while time.time() < deadline and not self.abort_evt.is_set():
@@ -651,6 +657,12 @@ class Pilot:
                 n = json.loads(nerves_p.read_text(encoding="utf-8"))
                 if (time.time() - float(n.get("ts", 0)) < 5.0
                         and n.get("on_charger")):
+                    docked = True
+                    break
+            with contextlib.suppress(Exception):
+                b = json.loads(battery_p.read_text(encoding="utf-8"))
+                if (time.time() - float(b.get("ts", 0)) < 90.0
+                        and b.get("on_charger")):
                     docked = True
                     break
             time.sleep(2.0)
