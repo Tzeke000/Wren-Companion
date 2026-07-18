@@ -222,6 +222,43 @@ def _write_nerves(d: dict) -> None:
         pass
 
 
+# ---------------------------------------------------------------- pose trail
+# 2026-07-17 night (Zeke: "you need a way that even when the stock brain takes
+# over you're able to see what the stock brain is doing"). The observe conn
+# receives the engine's pose stream NO MATTER WHO DRIVES — this appends it to
+# a continuous on-disk trail so the odometry measuring-tape survives Iris's
+# session opens/closes, stock-brain wandering, and firmware docking. origin_id
+# changes mark engine relocalizations (pickup/sleep) = explicit stitch points.
+TRAIL_PATH = REPO / "state" / "vector" / "pose_trail.jsonl"
+_TRAIL_MAX_BYTES = 2_000_000
+_trail_last = {"t": 0.0, "x": None, "y": None}
+
+
+def _append_trail(robot, on_charger: bool) -> None:
+    try:
+        import json as _json
+        now = time.time()
+        p = robot.pose
+        x = round(float(p.position.x), 1)
+        y = round(float(p.position.y), 1)
+        h = round(float(p.rotation.angle_z.degrees), 1)
+        o = int(getattr(p, "origin_id", -1))
+        # write when moved >15mm OR every 5s (heartbeat) — keeps the file lean
+        lx, ly = _trail_last["x"], _trail_last["y"]
+        moved = (lx is None or ((x - lx) ** 2 + (y - ly) ** 2) ** 0.5 > 15.0)
+        if not moved and (now - _trail_last["t"]) < 5.0:
+            return
+        _trail_last.update(t=now, x=x, y=y)
+        if TRAIL_PATH.exists() and TRAIL_PATH.stat().st_size > _TRAIL_MAX_BYTES:
+            TRAIL_PATH.replace(TRAIL_PATH.with_suffix(".jsonl.1"))
+        with TRAIL_PATH.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps({"ts": round(now, 2), "x": x, "y": y,
+                                 "h": h, "o": o,
+                                 "dock": bool(on_charger)}) + "\n")
+    except Exception:
+        pass
+
+
 def _proprioception(robot) -> dict:
     """Vector's NATIVE body sensors (Zeke 2026-07-14: use the gyro/proximity/etc
     the body actually has). The REAL heading from the robot's own pose (gyro +
@@ -700,6 +737,7 @@ def _poll_loop(robot) -> None:
             nerves.update(_proprioception(robot))  # real heading + proximity + gyro/accel
             nerves.update(_charger_reader(robot))   # native home pose (dist + bearing)
             _write_nerves(nerves)
+            _append_trail(robot, charging)  # continuous pose tape (all drivers)
 
 
 def _battery_watch_loop() -> None:

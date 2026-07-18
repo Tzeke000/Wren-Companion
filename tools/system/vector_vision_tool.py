@@ -98,6 +98,44 @@ def _body_cones(params: dict, g: dict) -> dict:
         sample=params.get("sample"))
 
 
+def _body_trail(params: dict, g: dict) -> dict:
+    """POSE TAPE reader (2026-07-18, Zeke: 'see what the stock brain is doing').
+    The inhabit daemon's observe conn logs pose continuously to
+    state/vector/pose_trail.jsonl regardless of who drives. window_s (default
+    600) limits how far back; returns points (thinned), path length, origin
+    changes (stitch points), and current/last fix."""
+    import json as _json
+    from pathlib import Path
+    path = Path(r"D:\Wren-Companion\state\vector\pose_trail.jsonl")
+    if not path.exists():
+        return {"ok": False, "error": "no trail yet — daemon writes it after "
+                                      "its next restart (or robot hasn't moved)"}
+    window_s = float(params.get("window_s", 600))
+    import time as _t
+    cutoff = _t.time() - window_s
+    pts = []
+    with __import__("contextlib").suppress(Exception):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            with __import__("contextlib").suppress(Exception):
+                d = _json.loads(line)
+                if d.get("ts", 0) >= cutoff:
+                    pts.append(d)
+    if not pts:
+        return {"ok": True, "points": 0, "note": f"no fixes in last {window_s:.0f}s"}
+    dist = 0.0
+    origin_changes = []
+    for a, b in zip(pts, pts[1:]):
+        if a.get("o") == b.get("o"):
+            dist += ((b["x"] - a["x"]) ** 2 + (b["y"] - a["y"]) ** 2) ** 0.5
+        else:
+            origin_changes.append({"ts": b["ts"], "from": a.get("o"),
+                                   "to": b.get("o")})
+    thin = pts if len(pts) <= 40 else pts[:: max(1, len(pts) // 40)]
+    return {"ok": True, "points": len(pts), "path_mm": round(dist, 0),
+            "origin_changes": origin_changes, "first": pts[0], "last": pts[-1],
+            "trail": thin}
+
+
 def _guarded_behavior(s, fn, label: str, timeout_s: float) -> dict:
     """Run a blocking SDK behavior in a side thread with a join deadline —
     the dock-hang lesson (2026-07-17) applied to cube maneuvers. Suspends
@@ -282,3 +320,4 @@ register_tool("body_cube", "MY HANDS — cube find/dock/pickup/place/roll via fi
 register_tool("body_charger", "Engine's known charger pose — MUST be known before body_park (unseen charger = dock hang)", 1, _body_charger)
 register_tool("body_overhead", "OVERHEAD-EYE probe: PC-camera frame + ArUco marker detection (localization stage 1). Read the saved jpg to judge whether the view covers my driving area.", 1, _body_overhead)
 register_tool("body_cones", "CONE REFEREE via overhead webcam: snapshot orange-cone positions + drift-compare vs last snapshot (drag detector). Baseline before a leg, self-grade after.", 1, _body_cones)
+register_tool("body_trail", "POSE TAPE: continuous pose trail logged by the inhabit daemon regardless of who drives (me/stock/firmware). window_s= lookback; returns path length, origin stitch-points, last fix.", 1, _body_trail)
