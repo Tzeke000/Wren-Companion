@@ -252,7 +252,10 @@ def _body_landmarks(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
                 continue
             d: dict[str, Any] = {"class": tname}
             with __import__("contextlib").suppress(Exception):
-                ct = getattr(o, "custom_type", "")
+                # instance nests its type under .archetype (SDK CustomObject);
+                # fall back to a direct attr for archetype objects themselves
+                ct = getattr(getattr(o, "archetype", None), "custom_type", None) \
+                    or getattr(o, "custom_type", "")
                 d["object_type"] = str(ct)[:40]
                 d["marker"] = vs.marker_name_for_type(ct)
             with __import__("contextlib").suppress(Exception):

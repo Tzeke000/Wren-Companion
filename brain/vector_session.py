@@ -320,6 +320,19 @@ class BodySession:
                     self._reflex = f"marker defs: {md['defined']}/16 {md['errors'][:2]}"[:160]
             except Exception as e:
                 self._reflex = f"marker defines skipped: {e!r}"[:120]
+            # MARKER RANGE (2026-07-17 night): stock firmware CROPS custom-marker
+            # detection to 500mm (CropScheduler_MaxMarkerDetectionDist_mm) — the
+            # reason sightings were so rare. WireOS dev webserver on :8888 lets
+            # us raise it; console vars reset with the engine, so re-assert at
+            # every open. Best-effort — never blocks the open.
+            try:
+                import urllib.request
+                urllib.request.urlopen(
+                    "http://192.168.4.27:8888/consolevarset?"
+                    "key=CropScheduler_MaxMarkerDetectionDist_mm&value=2500",
+                    timeout=3).read()
+            except Exception:
+                pass
             self.connected = True
             self.error = None
             self.opened_ts = time.time()
