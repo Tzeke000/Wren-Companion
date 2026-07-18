@@ -212,37 +212,22 @@ def _body_landmarks(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
         return {"ok": False, "error": "no body session open"}
     action = str(params.get("action") or "list").lower()
     try:
-        from anki_vector.objects import CustomObjectMarkers, CustomObjectTypes
+        from brain import vector_session as vs
         if action == "define":
-            defs = [
-                ("Circles2", CustomObjectMarkers.Circles2, CustomObjectTypes.CustomType00),
-                ("Circles3", CustomObjectMarkers.Circles3, CustomObjectTypes.CustomType01),
-                ("Diamonds2", CustomObjectMarkers.Diamonds2, CustomObjectTypes.CustomType02),
-                ("Diamonds3", CustomObjectMarkers.Diamonds3, CustomObjectTypes.CustomType03),
-                # 2026-07-17 ~15:40: THE MISSING PAIR — I stared at Triangles4
-                # by the dock for 20 minutes wondering why detection was dead;
-                # it was never DEFINED (and my eye misread triangles as
-                # diamonds at that resolution). Zeke's layout has 6 markers.
-                ("Triangles4", CustomObjectMarkers.Triangles4, CustomObjectTypes.CustomType04),
-                ("Triangles5", CustomObjectMarkers.Triangles5, CustomObjectTypes.CustomType05),
-            ]
-            done, errs = [], []
-            for name, marker, ctype in defs:
-                try:
-                    r = s.robot.world.define_custom_wall(
-                        custom_object_type=ctype, marker=marker,
-                        width_mm=100.0, height_mm=100.0,
-                        marker_width_mm=90.0, marker_height_mm=90.0,
-                        is_unique=True)
-                    done.append(name if r is not None else f"{name}(?)")
-                except Exception as e:
-                    errs.append(f"{name}: {repr(e)[:100]}")
-            out: dict[str, Any] = {"ok": not errs, "defined": done,
-                                   "note": "firmware now reports pose when a "
-                                           "marker enters view (marker vision "
-                                           "must be on — auto at body_open)"}
-            if errs:
-                out["errors"] = errs
+            # ALL-16 define set (2026-07-17 mystery solved): engine log proved a
+            # marker outside the assumed 6-layout was physically in the room
+            # ('MARKER_SDK_3TRIANGLES' observed, "No objects in library"). We
+            # now define every printable marker so the ENGINE surveys for us.
+            # Single source of truth: vector_session.define_all_markers (also
+            # auto-runs at body_open).
+            md = vs.define_all_markers(s.robot)
+            out: dict[str, Any] = {"ok": not md.get("errors"),
+                                   "defined": md.get("defined"),
+                                   "note": "all 16 printable markers defined — "
+                                           "any placed sheet now self-identifies "
+                                           "in action=list when seen"}
+            if md.get("errors"):
+                out["errors"] = md["errors"]
             return out
         # ---- list: what does the engine know right now?
         objs = []
@@ -252,7 +237,9 @@ def _body_landmarks(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
                 continue
             d: dict[str, Any] = {"class": tname}
             with __import__("contextlib").suppress(Exception):
-                d["object_type"] = str(getattr(o, "custom_type", ""))[:40]
+                ct = getattr(o, "custom_type", "")
+                d["object_type"] = str(ct)[:40]
+                d["marker"] = vs.marker_name_for_type(ct)
             with __import__("contextlib").suppress(Exception):
                 d["is_visible"] = bool(o.is_visible)
                 d["last_seen_s_ago"] = round(float(

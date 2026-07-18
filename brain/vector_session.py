@@ -55,6 +55,55 @@ NERVES = FRAME_DIR / "nerves.json"
 HEAD_MIN_DEG, HEAD_MAX_DEG = -22.0, 45.0
 LIFT_MIN, LIFT_MAX = 0.0, 1.0
 
+# ---------------------------------------------------------------- room markers
+# ALL 16 printable SDK markers (4 shapes x counts 2-5), systematically mapped
+# onto CustomType00..15 (engine has 20 slots). WHY ALL 16 (2026-07-17 marker
+# mystery solved): engine log showed 'MARKER_SDK_3TRIANGLES' observed at 15:15
+# with "No objects in library use observed marker" — a marker NOT in our
+# assumed 6-marker layout was physically in the room. Defining everything
+# printable makes the ENGINE the surveyor: any sheet Zeke places anywhere is
+# recognized and self-identifies via body_landmarks list. Defs are free.
+MARKER_NAMES = [f"{shape}{n}" for shape in
+                ("Circles", "Diamonds", "Hexagons", "Triangles")
+                for n in (2, 3, 4, 5)]
+MARKER_SIZE_MM = 90.0     # symbol square on the calibrated sheets
+MARKER_WALL_MM = 100.0    # defined wall width/height
+
+
+def marker_name_for_type(custom_type: str | int) -> str:
+    """Reverse map: engine CustomTypeNN (enum name, str, or index) -> marker name."""
+    import re
+    s = str(custom_type)
+    m = re.search(r"CustomType(\d+)", s)
+    digits = m.group(1) if m else "".join(ch for ch in s if ch.isdigit())
+    try:
+        return MARKER_NAMES[int(digits)]
+    except Exception:
+        return s[:24]
+
+
+def define_all_markers(robot) -> dict:
+    """Define ALL 16 SDK markers as unique 100mm custom walls on this
+    connection (per-connection — engine deletes them at disconnect).
+    Returns {defined: n, errors: [...]}. Call after every connect."""
+    from anki_vector.objects import CustomObjectMarkers, CustomObjectTypes
+    n, errs = 0, []
+    for i, name in enumerate(MARKER_NAMES):
+        try:
+            marker = getattr(CustomObjectMarkers, name)
+            ctype = getattr(CustomObjectTypes, f"CustomType{i:02d}")
+            r = robot.world.define_custom_wall(
+                custom_object_type=ctype, marker=marker,
+                width_mm=MARKER_WALL_MM, height_mm=MARKER_WALL_MM,
+                marker_width_mm=MARKER_SIZE_MM, marker_height_mm=MARKER_SIZE_MM,
+                is_unique=True)
+            n += 1 if r is not None else 0
+            if r is None:
+                errs.append(f"{name}: engine refused")
+        except Exception as e:
+            errs.append(f"{name}: {repr(e)[:80]}")
+    return {"defined": n, "errors": errs}
+
 # driving safety + smooth-motion (ROS slow-planner/fast-loop split, 2026-07-15 research)
 MAX_WHEEL = 220.0        # mm/s per side cap — Vector's true hardware max (Zeke
                          # 2026-07-15: "go real max speed the 240"). Edge-guard +
@@ -261,6 +310,16 @@ class BodySession:
                     v.enable_custom_object_detection(True)
             except Exception as e:
                 self._reflex = f"marker vision skipped: {e!r}"[:120]
+            # ALL-16 MARKER DEFINES (2026-07-17 mystery): defs are per-connection
+            # and the engine deletes them at every disconnect — auto-define the
+            # full printable set so any placed sheet self-identifies. Closes the
+            # "undefined = invisible" scar class for good.
+            try:
+                md = define_all_markers(self.robot)
+                if md.get("errors"):
+                    self._reflex = f"marker defs: {md['defined']}/16 {md['errors'][:2]}"[:160]
+            except Exception as e:
+                self._reflex = f"marker defines skipped: {e!r}"[:120]
             self.connected = True
             self.error = None
             self.opened_ts = time.time()
