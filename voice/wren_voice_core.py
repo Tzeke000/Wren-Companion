@@ -1716,23 +1716,62 @@ def cmd_speak_interruptible(ctx, args: dict) -> str:
 BARGEIN_WATCH_CAP_S = 900.0   # backstop on one watch window; host ends it at turn end
 
 
-def _flush_play_queue(ctx) -> int:
-    """Drain every pending (unplayed) chunk from the play queue. Returns the count.
-    task_done() per item keeps play_queue.join() (cmd_speak wait=True) from hanging."""
-    n = 0
+def _drain_play_queue(ctx) -> list:
+    """Drain every pending (unplayed) chunk from the play queue and RETURN the
+    chunks (2026-07-19: false-barge fix — the drained text must be recoverable,
+    a flush that destroys the reply tail on a noise-onset is how six sentences
+    vanished mid-reply on Zeke). task_done() per item keeps play_queue.join()
+    (cmd_speak wait=True) from hanging."""
+    chunks: list = []
     try:
         while True:
-            ctx.play_queue.get_nowait()
+            item = ctx.play_queue.get_nowait()
             try:
                 ctx.play_queue.task_done()
             except Exception:
                 pass
-            n += 1
+            chunks.append(item)
     except queue.Empty:
         pass
     except Exception:
         pass
-    return n
+    return chunks
+
+
+def _flush_play_queue(ctx) -> int:
+    """Back-compat wrapper: drain and return only the count (callers that really
+    do want the chunks gone — stale-queue guard at new-turn edge — use this)."""
+    return len(_drain_play_queue(ctx))
+
+
+def _restore_after_false_barge(ctx, reason: str) -> bool:
+    """FALSE-ALARM RECOVERY (2026-07-19): the onset that cut my mouth turned out
+    not to be Zeke (unclear / empty / my own echo / transcription error). Put the
+    reply BACK: re-queue the sentence that was cut mid-play plus every drained
+    unplayed chunk, clear bargein_fired so cmd_speak stops dropping the rest of
+    the reply, and let the mouth finish what it was saying. Returns True if
+    anything was restored. The next REAL turn edge (bargein_hold True) still
+    supersedes via the stale-queue guard, so a resume can never ghost into a
+    later conversation turn."""
+    info = getattr(ctx, "barge_cut", None) or {}
+    chunks = list(info.get("chunks") or [])
+    cut = (info.get("cut") or "").strip()
+    if cut:
+        chunks.insert(0, cut)   # re-speak the interrupted sentence from its start
+    if not chunks:
+        return False
+    ctx.bargein_fired = False   # it wasn't a barge — un-mute the rest of the reply
+    ctx.barge_cut = None        # consumed — a later real barge reports fresh state
+    for c in chunks:
+        ctx.play_queue.put(c)
+    ctx.speaking = True
+    try:
+        set_state("speaking", "false alarm — resuming")
+    except Exception:
+        pass
+    print(f"[bargein_watch] FALSE-ALARM ({reason}): restored {len(chunks)} "
+          f"chunk(s) to the mouth (cut sentence re-queued)", flush=True)
+    return True
 
 
 def cmd_bargein_hold(ctx, args: dict) -> dict:
@@ -1825,8 +1864,12 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         heard_n = len(getattr(ctx, "played_chunks", None) or [])
         ctx.bargein_fired = True          # cmd_speak drops the rest of this reply
         _cancel_stall_bridge(ctx)         # no bridging phrase over his cut-in
-        n = _flush_play_queue(ctx)        # unplayed sentences never start
-        ctx.barge_cut = {"cut": cut_chunk, "played": heard_n, "flushed": n}
+        drained = _drain_play_queue(ctx)  # unplayed sentences never start — but
+                                          # KEEP them: if this onset turns out to
+                                          # be noise/echo, they go back (2026-07-19)
+        n = len(drained)
+        ctx.barge_cut = {"cut": cut_chunk, "played": heard_n, "flushed": n,
+                         "chunks": drained}
         try:
             _req.urlopen(ctx.server_url + "/stop", timeout=3).read()   # kill current audio
         except Exception:
@@ -1847,6 +1890,9 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
                                                device_substr=wl.DEFAULT_MIC_SUBSTR,
                                                min_rms=min_rms, stats=watch_stats)
     except Exception as e:
+        # If the onset already cut the mouth before the watcher died, give the
+        # reply back (no-op when no barge fired — barge_cut is None).
+        _restore_after_false_barge(ctx, f"watcher error {e!r:.60}")
         return f"[bargein_watch] watcher error: {e!r}"
 
     if audio is None or getattr(audio, "size", 0) == 0:
@@ -1864,8 +1910,12 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
     try:
         heard = (wl._transcribe_array(audio) or "").strip()
     except Exception as e:
+        # False-alarm path (2026-07-19): the cut already happened but we can't
+        # prove it was speech — give the reply back to the mouth.
+        _restore_after_false_barge(ctx, f"transcription error {e!r:.60}")
         return f"[bargein_watch] interrupted, transcription error: {e!r}"
     if not heard:
+        _restore_after_false_barge(ctx, "unclear/empty transcription")
         return "[bargein_watch] interrupted (unclear)"
     try:
         wl.append_transcript(heard)
@@ -1883,6 +1933,8 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
     if _svs is not None:
         print(f"[bargein_watch] SELF-VOICE dropped (iris {_svs:.2f}, "
               f"bar {self_drop_bar}): {heard[:80]!r}", flush=True)
+        # My own echo cut my own mouth — definitionally a false barge; resume.
+        _restore_after_false_barge(ctx, f"self-voice echo (iris {_svs:.2f})")
         return f"[bargein_watch] self_voice_dropped (iris {_svs:.2f})"
     # Playback-cursor marker (2026-07-08): tell the host (and me) exactly where the
     # cut landed. Host only checks startswith('[barge-in]'), so extra info is safe.
