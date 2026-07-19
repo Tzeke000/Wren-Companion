@@ -1,0 +1,2 @@
+scripts/vector_wifi_selfheal.sh text eol=lf
+scripts/vector_wifi_selfheal.service text eol=lf
