@@ -36,7 +36,26 @@ import requests
 
 ZEKE_USER_ID = "600008921008046120"
 REPO = Path(r"D:\Wren-Companion")
-BAT = REPO / "start_iris_v2_fable.bat"
+
+
+def _pick_bat() -> "Path":
+    """Which launcher an unattended boot should run. state/boot_launcher.txt
+    holds the bat filename (one line) so the regime can switch without editing
+    this script — Zeke directive 2026-07-19: deployment month runs OPUS
+    (start_iris_v2.bat) because it lasts longer per token. Falls back to the
+    Fable launcher if the config is missing/bad."""
+    try:
+        name = (REPO / "state" / "boot_launcher.txt").read_text(
+            encoding="utf-8").strip()
+        cand = REPO / name
+        if name.endswith(".bat") and cand.exists():
+            return cand
+    except Exception:
+        pass
+    return REPO / "start_iris_v2_fable.bat"
+
+
+BAT = _pick_bat()
 LOG = REPO / "state" / "tower_boot.log"
 OPERATOR_PORT = 5876
 NETWORK_WAIT_S = 300
