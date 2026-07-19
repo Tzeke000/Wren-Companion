@@ -1,0 +1,16 @@
+# vector_wifi_selfheal.service — systemd unit for WireOS (install to
+# /etc/systemd/system/, then: systemctl daemon-reload && systemctl enable --now
+# vector_wifi_selfheal). Pairs with vector_wifi_selfheal.sh in /data/local/iris/.
+# NOTE 2026-07-19: verify unit-path + Restart behavior against the live WireOS
+# systemd before enabling — written blind while the robot's wifi was down.
+[Unit]
+Description=Iris wifi self-heal watchdog (robot heals its own network)
+After=network.target
+
+[Service]
+ExecStart=/bin/sh /data/local/iris/vector_wifi_selfheal.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
