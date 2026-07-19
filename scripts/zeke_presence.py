@@ -106,6 +106,46 @@ def sweep() -> None:
             p.kill()
 
 
+ROSTER = REPO / "state" / "network_roster.json"
+
+
+def _arp_table() -> dict:
+    """{mac: ip} for the local /24 from the ARP table."""
+    out = {}
+    try:
+        raw = subprocess.run(["arp", "-a"], capture_output=True, text=True,
+                             timeout=10).stdout
+    except Exception:
+        return out
+    for line in raw.lower().splitlines():
+        m = re.match(r"\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f-]{17})", line)
+        if m and m.group(1).startswith(SUBNET + ".") and m.group(2) != "ff-ff-ff-ff-ff-ff":
+            out[m.group(2)] = m.group(1)
+    return out
+
+
+def roster_check(seen_unknown: set) -> None:
+    """NETWORK WATCHLIST (Zeke 2026-07-19): the network is small and known —
+    Wren's laptop, Vector, this tower, Quest 3, Zeke's phone, gateway. Any MAC
+    outside the roster = surface it ONCE per run (friend borrowing wifi or an
+    actual intruder — Zeke decides; we just never let it pass silently)."""
+    try:
+        roster = json.loads(ROSTER.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    known = {k.lower() for k in roster.get("known", {})}
+    for mac, ip in _arp_table().items():
+        if mac not in known and mac not in seen_unknown:
+            seen_unknown.add(mac)
+            log_event("unknown_device", {"mac": mac, "ip": ip})
+            notify_iris(
+                f"UNKNOWN DEVICE on the wifi: {mac} at {ip} — not in the "
+                f"roster (laptop/Vector/tower/Quest/phone/gateway). Could be a "
+                f"friend borrowing internet or an intruder. Worth a DM to Zeke "
+                f"to confirm; if he vouches, add it to "
+                f"state/network_roster.json.")
+
+
 def find_mac(mac: str) -> str | None:
     """Return the IP currently holding `mac` per the ARP table, else None."""
     try:
@@ -151,6 +191,7 @@ def main() -> int:
     last_ip: str | None = None
     misses = 0
     polls = 0
+    seen_unknown: set = set()
     log_event("start", {"mac": mac, "pid": os.getpid()})
     while True:
         polls += 1
@@ -159,6 +200,7 @@ def main() -> int:
                 ping(last_ip)
             if polls % SWEEP_EVERY == 1 or (present is None):
                 sweep()
+                roster_check(seen_unknown)
             ip = find_mac(mac)
             if ip:
                 last_ip = ip
