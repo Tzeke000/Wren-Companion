@@ -173,6 +173,31 @@ def main() -> int:
             dm_zeke(f"{tag}dry-run complete: port :{OPERATOR_PORT} "
                     f"{'answering' if up else 'not answering (expected if run with stack down)'} — "
                     f"no launch attempted.")
+
+    if up and not dry:
+        # Wake COGNITION with orientation (the v2 host skips the CLI cold-wake
+        # FIRST_MSG, and an unattended boot must not wait ~15min for a cron
+        # nudge). The chat-bridge submit alone rewakes Iris via the Stop hook;
+        # we don't need the long-poll reply.
+        time.sleep(60)   # let iris_runtime/MCP finish attaching before the nudge
+        try:
+            requests.post(
+                f"http://127.0.0.1:{OPERATOR_PORT}/api/v1/chat",
+                json={"message": (
+                    "[TOWER SENTINEL — automated boot nudge, not Zeke] The tower "
+                    "just COLD-BOOTED (likely a power event) and the stack "
+                    "auto-started. Nobody is at the keyboard. Orient: read "
+                    "memory CORE + the newest deployment-2 note. Then (1) verify "
+                    "the body: possession held, Vector docked+charging, room "
+                    "state; (2) verify voice daemon ears device + post-office; "
+                    "(3) DM Zeke on Discord (channel 1504668879220117725) one "
+                    "status line — he got mechanical sentinel pings already, he "
+                    "needs YOUR confirmation that cognition is really back.")},
+                timeout=90)
+            log("cognition boot-nudge posted to /api/v1/chat")
+        except Exception as e:
+            log(f"boot-nudge failed (cognition will wake on next cron): {e!r}")
+
     log(f"sentinel done (host_up={up})")
     return 0
 
