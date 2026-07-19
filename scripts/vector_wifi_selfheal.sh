@@ -44,22 +44,29 @@ while true; do
     else
         fails=$((fails + 1))
         if [ "$fails" -ge "$FAIL_N" ]; then
-            log "gateway unreachable x$fails — reassociating"
-            wpa_cli -i wlan0 reassociate >/dev/null 2>&1
+            # 2026-07-19 live finding: wpa_cli has NO ctrl socket on WireOS —
+            # connman owns wifi. Ladder: link up (heals a downed link) ->
+            # connmanctl connect the favorite psk service -> connman restart.
+            svc="$(connmanctl services 2>/dev/null | awk '/^\*/ && /psk/ {print $NF; exit}')"
+            log "gateway unreachable x$fails — healing (svc=${svc:-none})"
+            ip link set wlan0 up >/dev/null 2>&1
+            [ -n "$svc" ] && connmanctl connect "$svc" >/dev/null 2>&1
             sleep 12
             if alive; then
-                log "reassociate healed it"
+                log "connmanctl connect healed it"
             else
-                log "reassociate insufficient — bouncing wifi stack"
-                # WireOS network manager: try connman first, then raw interface bounce
+                log "connect insufficient — restarting connman"
                 systemctl restart connman >/dev/null 2>&1
-                sleep 15
+                sleep 20
                 if alive; then
-                    log "connman bounce healed it"
+                    log "connman restart healed it"
                 else
-                    log "connman bounce insufficient — ifdown/ifup wlan0"
+                    log "connman restart insufficient — full link bounce"
                     ip link set wlan0 down; sleep 3; ip link set wlan0 up
-                    sleep 15
+                    sleep 8
+                    svc="$(connmanctl services 2>/dev/null | awk '/^\*/ && /psk/ {print $NF; exit}')"
+                    [ -n "$svc" ] && connmanctl connect "$svc" >/dev/null 2>&1
+                    sleep 12
                     if alive; then log "link bounce healed it"; else log "STILL DEAD after full ladder"; fi
                 fi
             fi
