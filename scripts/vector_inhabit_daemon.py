@@ -51,6 +51,7 @@ from brain import iris_chat
 iris_chat.configure(REPO)
 
 SERIAL = "0dd1cdaf"
+ROBOT_IP = os.environ.get("IRIS_VECTOR_IP", "192.168.4.27")   # for reachability triage
 POLL_S = 0.2
 LOG = REPO / "state" / "vector" / "inhabit_daemon.log"
 
@@ -748,8 +749,10 @@ def _battery_watch_loop() -> None:
         stranding' (the deep-discharge cascade drops wifi before the cell dies,
         so a read failure while roaming is itself a danger signal)."""
     import json as _json
+    import subprocess as _sp
     import requests
     last_on_charger = True
+    lost_streak = 0   # consecutive lost_contact fires with no successful read
     while True:
         level = volts = on_charger = None
         ok = False
@@ -761,6 +764,8 @@ def _battery_watch_loop() -> None:
             on_charger = bool(d.get("is_on_charger_platform"))
             ok = True
             last_on_charger = on_charger
+            lost_streak = 0   # contact restored — next loss alarms promptly again
+            COOLDOWN["lost_contact"] = 600.0
         except Exception:
             ok = False
         try:
@@ -777,10 +782,33 @@ def _battery_watch_loop() -> None:
                   f"Dock NOW before I strand: get close via the tower cam, then "
                   f"trigger return-to-charger. This is the drain that killed me once.")
         elif not ok and not last_on_charger:
+            # 2026-07-19 fix: this alarm fired every 10min all afternoon while the
+            # cause was a KNOWN wifi flap and the body was hand-docked — the daemon
+            # can never learn "docked" while reads fail, so the alarm was stuck.
+            # (a) Escalating cooldown: 10min -> 20 -> 40 ... cap 2h, reset on any
+            #     successful read. First alarm stays prompt; repeats calm down.
+            # (b) Name the reachability so cognition can triage: a robot that
+            #     doesn't even ping is a NETWORK problem, not a battery cascade.
+            pingable = False
+            try:
+                pingable = _sp.run(
+                    ["ping", "-n", "1", "-w", "2000", ROBOT_IP],
+                    capture_output=True, timeout=6).returncode == 0
+            except Exception:
+                pass
+            reach = ("robot still answers ping (services down — battery cascade "
+                     "possible)" if pingable else
+                     "robot does NOT even ping (network/wifi drop — cascade "
+                     "unlikely to be the cause)")
+            n = lost_streak + 1
             nudge("lost_contact",
-                  "I can't read my body's battery AND last I knew I was OFF the "
-                  "charger. The low-battery cascade drops wifi before death, so this "
-                  "may be a strand in progress. Flag Zeke to seat me on the charger.")
+                  f"I can't read my body's battery AND last I knew I was OFF the "
+                  f"charger (alarm #{n} this outage; {reach}). If nothing has "
+                  f"changed since the last one, just note it — repeats back off "
+                  f"automatically. If this is the FIRST, flag Zeke to check the "
+                  f"charger seating.")
+            lost_streak = n
+            COOLDOWN["lost_contact"] = min(600.0 * (2 ** lost_streak), 7200.0)
         time.sleep(BATTERY_POLL_S)
 
 
