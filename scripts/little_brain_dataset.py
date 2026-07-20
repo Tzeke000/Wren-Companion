@@ -424,13 +424,27 @@ def v5_grounding_samples() -> list[dict]:
     return out
 
 
+def v6_stock_samples() -> list[dict]:
+    """v6 (2026-07-20 evening, Zeke: 'train her with all of vector's stock
+    data and then modify it so it fits our needs'). Stock behavior-tree
+    curriculum (358 JSONs harvested off the rooted robot) + the Iris
+    modification overlay. See little_brain_corpus_v6_stock.py."""
+    from little_brain_corpus_v6_stock import compose as compose_v6
+    out = []
+    for q, a in compose_v6():
+        out.append(_mk(SYSTEM_KNOW, q, a))
+        out.append(_mk(None, q, a))                        # bare twin
+    return out
+
+
 def main() -> int:
     tr = harvest_transcript()
     les = lesson_pairs()
     ident = v4_identity_samples()
     know = v4_knowledge_samples()
     ground = v5_grounding_samples()
-    data = tr + ident + know + ground + les
+    stock = v6_stock_samples()
+    data = tr + ident + know + ground + stock + les
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
@@ -441,6 +455,7 @@ def main() -> int:
           f"2 system-conditions each)")
     print(f"knowledge samples:{len(know)}")
     print(f"grounding samples:{len(ground)} (v5 sensor limits/judgments/refusals)")
+    print(f"stock samples:    {len(stock)} (v6 stock behavior-tree + Iris overlay)")
     print(f"lesson pairs:     {len(les)}")
     print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
     print(f"memory harvest:   still DROPPED (name-bleed source, per v3 verdict)")
