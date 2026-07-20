@@ -403,6 +403,24 @@ class Pilot:
             r = s.servo_to(**kw, abort_event=self.abort_evt)
         return r
 
+    # --- CEREBELLUM hooks (2026-07-20, GrowBot lessons): every predictable
+    # mission records its EXPECTED outcome first; completion scores reality
+    # against it. Observational v0 — errors ledger to predictions.jsonl,
+    # never steer. contextlib.suppress: the cerebellum may never break a limb.
+    def _cere_predict(self, m: dict, s):
+        with contextlib.suppress(Exception):
+            from brain import vector_cerebellum
+            return vector_cerebellum.predict_mission(m, dict(s._latest or {}))
+        return None
+
+    def _cere_check(self, pid, r: dict, s) -> None:
+        with contextlib.suppress(Exception):
+            from brain import vector_cerebellum
+            err = vector_cerebellum.check_mission(pid, r or {},
+                                                  dict(s._latest or {}))
+            if err is not None:
+                self._event("prediction_scored", err)
+
     def _m_servo(self, m: dict) -> None:
         s = _session()
         kw = dict(x=m.get("x"), y=m.get("y"),
@@ -411,7 +429,9 @@ class Pilot:
                   max_speed=m.get("max_speed"),
                   timeout_s=float(m.get("timeout_s") or 20.0),
                   relative=bool(m.get("relative")))
+        pid = self._cere_predict(m, s)
         r = self._servo_avoid(s, m, kw)
+        self._cere_check(pid, r, s)
         if r.get("aborted"):
             self._event("aborted", r)
         elif r.get("ok"):
@@ -429,9 +449,11 @@ class Pilot:
     def _m_route(self, m: dict) -> None:
         s = _session()
         pts = list(m.get("points") or [])
+        pid = self._cere_predict(m, s)          # whole-route expectation
         done = []
         for i, pt in enumerate(pts):
             if self.abort_evt.is_set():
+                self._cere_check(pid, {"aborted": True}, s)
                 self._event("aborted", {"leg": i, "done": done})
                 return
             kw = dict(x=float(pt[0]), y=float(pt[1]),
@@ -440,14 +462,17 @@ class Pilot:
                       timeout_s=float(m.get("timeout_s") or 20.0))
             r = self._servo_avoid(s, m, kw)
             if r.get("aborted"):
+                self._cere_check(pid, {"aborted": True}, s)
                 self._event("aborted", {"leg": i, "done": done})
                 return
             if not r.get("ok"):
+                self._cere_check(pid, r, s)
                 self._event("blocked", {"leg": i, "at": pt, "res": r,
                                         "done": done}, nudge=True)
                 return
             done.append(pt)
             self._event("waypoint", {"leg": i, "at": pt})
+        self._cere_check(pid, {"ok": True, "arrived": True}, s)
         self._event("route_done", {"legs": len(done)}, nudge=True)
 
     def _m_goto(self, m: dict) -> None:

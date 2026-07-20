@@ -855,6 +855,17 @@ class BodySession:
         trig = {1: "PettingLevel1", 2: "PettingLevel2",
                 3: "PettingLevel3", 4: "PettingLevel4"}.get(lvl, "PettingBlissLoop")
         self._log_reflex("pet", f"petted (level {lvl}) — I like this")
+        # REWARD CHANNEL (2026-07-20, TAMER-shaped — Zeke: "I can pet you and
+        # you can feel it"): petting IS the positive reward signal. First
+        # stroke of a bout feeds the lessons ledger with context (what I just
+        # did) + a real mood bump. express=False — the bliss anim below IS the
+        # expression; mood only once per bout, not per stroke.
+        if lvl == 1:
+            with contextlib.suppress(Exception):
+                from brain import vector_lessons
+                vector_lessons.record(+1, "petting",
+                                      "petted — whatever I just did, he liked",
+                                      express=False)
         self._set_eyes(0.11, 1.0)          # warm amber glow
         self._play_trigger(trig)
         self._set_eyes(0.58, 1.0)          # settle back to my blue
