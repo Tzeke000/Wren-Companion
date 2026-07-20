@@ -323,6 +323,32 @@ def snapshot() -> dict:
             # Energy = arousal, floored at 0.25 so a calm orb still breathes.
             "raw_mood": {"energy": round(max(0.25, min(1.0, arousal * 2.0)), 3)},
         }
+        # FELT-SHIFT SALIENCE (2026-07-20, Zeke: "your emotion isn't just
+        # calmness — it actually goes to you"): the dominant weight is usually
+        # the calmness BASELINE, which hides real movement (satisfaction
+        # 0.10→0.23 after petting still displayed plain "calmness"). Surface
+        # the emotion furthest ABOVE its baseline: append it to the label and
+        # promote it to the head of secondaries so the mood card leads with
+        # what actually moved.
+        try:
+            base = mood_core.DEFAULT_EMOTIONS
+            deltas = {k: float(weights.get(k, 0.0)) - float(base.get(k, 0.0))
+                      for k in weights if k in base}
+            if deltas:
+                mover, mdelta = max(deltas.items(), key=lambda kv: kv[1])
+                if mdelta >= 0.04 and mover != primary_emotion:
+                    mood_block["mood_label"] = (
+                        f"{mood_block['mood_label']} · {mover} rising")
+                    mood_block["felt_shift"] = {"emotion": mover,
+                                                "delta": round(mdelta, 3)}
+                    sec = [s for s in mood_block["secondary_emotions"]
+                           if s.get("emotion") != mover]
+                    mood_block["secondary_emotions"] = (
+                        [{"emotion": mover,
+                          "intensity": round(float(weights.get(mover, 0.0)), 3)}]
+                        + sec)
+        except Exception:
+            pass
     except Exception:
         pass
 
