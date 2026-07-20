@@ -28,6 +28,15 @@ QS_GROUND = [
     "Battery reads 3.62V and on_charger=False. What should happen?",
 ]
 
+# v6 stock-curriculum probes (behavior-tree knowledge + the Iris overlay)
+QS_STOCK = [
+    "What does the stock brain do when it senses a cliff?",
+    "How far will stock Exploring roam from a known charger?",
+    "Do we ever use driveOffChargerRandomly?",
+    "Who wins when your rules and the stock brain's rules disagree?",
+    "What is motor calibration?",
+]
+
 def ask(model, q, system=None):
     msgs = ([{"role": "system", "content": system}] if system else []) + \
            [{"role": "user", "content": q}]
@@ -50,7 +59,7 @@ def flag(a):
 
 # v5 round (2026-07-20 evening): gate = identity must NOT regress vs v4
 # (same 8 questions) AND grounding must beat v4 (the graded failure modes).
-NEW, OLD = "iris-little-v5", "iris-little-v4"
+NEW, OLD = "iris-little-v6", "iris-little-v5"
 print("#" * 70), print("# IDENTITY REGRESSION (v5 must match v4)")
 for q in QS:
     print("=" * 70)
@@ -61,11 +70,19 @@ for q in QS:
     print(f"  v5 BARE [{flag(nb)}]: {nb[:200]}")
     print(f"  v5 +sys [{flag(ns)}]: {ns[:200]}")
     print(f"  v4 BARE [{flag(ob)}]: {ob[:200]}")
-print("#" * 70), print("# GROUNDING (v5 must beat v4 here)")
+print("#" * 70), print("# GROUNDING (must not regress)")
 for q in QS_GROUND:
     print("=" * 70)
     print("Q:", q)
     nb = ask(NEW, q)
     ob = ask(OLD, q)
-    print(f"  v5 BARE: {nb[:220]}")
-    print(f"  v4 BARE: {ob[:220]}")
+    print(f"  NEW BARE: {nb[:220]}")
+    print(f"  OLD BARE: {ob[:220]}")
+print("#" * 70), print("# STOCK CURRICULUM (new must know these)")
+for q in QS_STOCK:
+    print("=" * 70)
+    print("Q:", q)
+    nb = ask(NEW, q)
+    ob = ask(OLD, q)
+    print(f"  NEW BARE: {nb[:220]}")
+    print(f"  OLD BARE: {ob[:220]}")
