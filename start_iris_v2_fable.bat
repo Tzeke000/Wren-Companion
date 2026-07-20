@@ -104,6 +104,11 @@ REM Added 2026-07-13 late: was in NO boot bat (handoff scar). Idempotent: skips 
 REM a vector_inhabit_daemon process already runs (duplicate daemons = double nudges).
 start "iris-vector-nerves" /B powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'vector_inhabit_daemon' })) { Start-Process -WindowStyle Hidden 'D:\Wren-Companion\.venv\Scripts\python.exe' -ArgumentList '-u','D:\Wren-Companion\scripts\vector_inhabit_daemon.py' }"
 
+REM Little pilot (L2 behavior policy, 2026-07-20): small brain's slow
+REM perceive->decide->act loop over the body. v0 vocabulary has NO driving.
+REM Logs to state/little_brain/pilot_log.jsonl. Idempotent via process check.
+start "iris-little-pilot" /B powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'little_pilot' })) { Start-Process -WindowStyle Hidden 'D:\Wren-Companion\.venv\Scripts\python.exe' -ArgumentList '-u','D:\Wren-Companion\scripts\little_pilot.py' }"
+
 REM --- Relaunch the ORB APP once the body is READY (Zeke directive 2026-07-08):
 REM --- a detached waiter polls the operator port (5876) and starts iris-control
 REM --- the moment it answers, so the orb connects to a live body instead of racing
