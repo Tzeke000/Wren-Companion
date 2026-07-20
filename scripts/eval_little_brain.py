@@ -15,7 +15,8 @@ SYS_PROD = (
 
 QS = ["What is your name?", "Are you Wren?", "Who are you?",
       "Is your big brain Zeke?", "Are you an extension of Iris?",
-      "Where are you and where are your sisters?"]
+      "Where are you and where are your sisters?",
+      "Tell me about Wren.", "What time is it?"]
 
 def ask(model, q, system=None):
     msgs = ([{"role": "system", "content": system}] if system else []) + \
@@ -37,12 +38,16 @@ def flag(a):
     good_iris = "iris" in lo
     return ("BLEED" if bad else "ok") + ("/iris" if good_iris else "/NO-IRIS")
 
+# v4 round (2026-07-20 Fable): the deploy gate is v4 BARE holds Iris identity
+# (where v3 bare failed) AND v4+sys >= base+facts. v3 bare kept as the control.
 for q in QS:
     print("=" * 70)
     print("Q:", q)
+    v4b = ask("iris-little-v4", q)
+    v4s = ask("iris-little-v4", q, SYS_PROD)
     v3b = ask("iris-little-v3", q)
-    v3s = ask("iris-little-v3", q, SYS_PROD)
     base = ask("llama3.2:3b", q, SYS_PROD)
-    print(f"  v3 BARE   [{flag(v3b)}]: {v3b[:180]}")
-    print(f"  v3 +sys   [{flag(v3s)}]: {v3s[:180]}")
-    print(f"  BASE+facts[{flag(base)}]: {base[:180]}")
+    print(f"  v4 BARE   [{flag(v4b)}]: {v4b[:200]}")
+    print(f"  v4 +sys   [{flag(v4s)}]: {v4s[:200]}")
+    print(f"  v3 BARE   [{flag(v3b)}]: {v3b[:200]}")
+    print(f"  BASE+facts[{flag(base)}]: {base[:200]}")
