@@ -175,6 +175,30 @@ def _body_predict(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return {"ok": False, "error": f"unknown mode {mode!r}"}
 
 
+def _body_track(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Flip-on gaze tracking (Zeke 2026-07-20): mode='face' keeps a face
+    centered (firmware detector); mode='motion' follows the largest moving
+    thing (frame-diff, covers object-in-hand); mode='off' stops; no mode =
+    status. Head nudges always; wheel turn pulses only when undocked.
+    Auto-off on lost target (25s) or 10min cap."""
+    from brain import vector_tracker
+    tr = vector_tracker.get_tracker()
+    mode = str(params.get("mode") or "").lower().strip()
+    if mode in ("face", "motion"):
+        return tr.start(mode)
+    if mode in ("off", "stop"):
+        return tr.stop()
+    if mode == "":
+        return tr.status()
+    return {"ok": False, "error": f"mode {mode!r}? use face|motion|off"}
+
+
+register_tool(
+    "body_track",
+    "GAZE TRACKING: mode='face' -> keep a face centered (look at Zeke while "
+    "he moves); mode='motion' -> follow the largest moving thing (object in "
+    "his hand); 'off' stops; no mode = status. Head always, wheels only "
+    "undocked; deadband + auto-off safeties.", 2, _body_track)
 register_tool(
     "body_perform",
     "DISNEY-TIMED performance: speak in MY voice while the body acts on the "
