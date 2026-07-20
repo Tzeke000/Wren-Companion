@@ -485,7 +485,43 @@ def _ensure_wake() -> WakeWordDetector:
 
 
 # ── MCP server ────────────────────────────────────────────────────────────────
-mcp = FastMCP("iris")
+
+# RUNTIME LOOP HEARTBEAT (2026-07-19 incident). A tiny async task ON the
+# FastMCP event loop stamps state/runtime_loop_heartbeat.json every ~5s.
+# If the loop ever wedges (like the deadline-less body_dock gRPC did), the
+# stamp goes stale — scripts/iris_runtime_watchdog.py watches the mtime and
+# self-heals with a clean full-stack restart. The 1Hz iris_time heartbeat is
+# NOT a valid probe for this (it lives on its own thread and kept ticking
+# straight through the hang); only a loop-scheduled task proves the loop.
+_LOOP_HB_PATH = ROOT / "state" / "runtime_loop_heartbeat.json"
+
+
+import contextlib as _ctxlib
+
+
+@_ctxlib.asynccontextmanager
+async def _iris_lifespan(app):
+    import asyncio
+
+    async def _beat():
+        while True:
+            try:
+                _LOOP_HB_PATH.parent.mkdir(parents=True, exist_ok=True)
+                _LOOP_HB_PATH.write_text(
+                    json.dumps({"ts": time.time(), "pid": os.getpid()}),
+                    encoding="utf-8")
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+    task = asyncio.get_running_loop().create_task(_beat(), name="loop-heartbeat")
+    try:
+        yield {}
+    finally:
+        task.cancel()
+
+
+mcp = FastMCP("iris", lifespan=_iris_lifespan)
 
 # Imported up here (not next to _record_session_safe) because several @mcp.tool
 # decorators below use `_IrisContext` in their type annotations, and FastMCP
@@ -2690,8 +2726,17 @@ def iris_tool_list(tier_max: int = 3) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# Tools dispatched OFF the event loop (2026-07-19 incident: a body_dock SDK
+# call with no deadline blocked the loop and wedged the ENTIRE runtime — sync
+# FastMCP tools run directly ON the loop, so one stuck gRPC froze voice,
+# memory, even time_check). Robot/SDK tools now run in a worker thread via
+# anyio.to_thread: a hung body call can no longer freeze anything else.
+# Prefix-matched so future vector tools are covered automatically.
+_THREADED_TOOL_PREFIXES = ("body_", "vector_")
+
+
 @mcp.tool()
-def iris_tool_call(name: str, params: dict | None = None) -> dict:
+async def iris_tool_call(name: str, params: dict | None = None) -> dict:
     """Invoke any tool from the registry by name. Single bridge for ~50
     tools instead of 50 wrapper decorators.
 
@@ -2705,14 +2750,22 @@ def iris_tool_call(name: str, params: dict | None = None) -> dict:
       iris_tool_call("read_file", {"path": "..."})
 
     Tier 2+ tools may run safety/sandbox checks. Discover tools via
-    iris_tool_list."""
+    iris_tool_list. body_*/vector_* handlers run in a worker thread so a
+    blocking robot call can never wedge the runtime loop (2026-07-19 fix)."""
     try:
         from tools.tool_registry import _REGISTRY
         td = _REGISTRY.get(str(name))
         if td is None:
             return {"ok": False, "error": f"no tool named {name!r}"}
         try:
-            result = td.handler(dict(params or {}), _g)
+            if str(name).startswith(_THREADED_TOOL_PREFIXES):
+                import functools
+
+                import anyio.to_thread
+                result = await anyio.to_thread.run_sync(
+                    functools.partial(td.handler, dict(params or {}), _g))
+            else:
+                result = td.handler(dict(params or {}), _g)
             if isinstance(result, dict):
                 return {"ok": True, "tool": name, "result": result}
             return {"ok": True, "tool": name, "result": {"value": result}}

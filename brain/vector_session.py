@@ -125,6 +125,20 @@ STUCK_TURN_DEG = 5.0        # ...and turned less than this
 _lock = threading.RLock()
 _session = None  # type: ignore  # module singleton (BodySession | None)
 
+# HARD SDK DEADLINES (2026-07-19 incident: body_dock's drive_on_charger() blocked
+# FOREVER on a dead deadline-less gRPC and — because sync FastMCP tools run ON the
+# runtime's event loop — wedged the ENTIRE iris_runtime: voice, memory, even
+# time_check. Zeke had to hand-restart the stack on deployment eve.)
+# Every SDK behavior call now runs in a disposable worker thread and FAILS by
+# its deadline instead of hanging. Generous ceilings: these fire only when the
+# connection is genuinely dead — a real dock takes ~55s, deadline is 150s.
+SDK_DEADLINES = {
+    "dock": 150.0, "undock": 60.0, "turn": 60.0, "straight": 90.0,
+    "pose": 120.0, "head": 25.0, "lift": 25.0, "eyes": 15.0,
+    "say": 60.0, "anim": 45.0,
+}
+SDK_LOCK_WAIT_S = 8.0   # max wait to ACQUIRE the sdk lock before fast-failing
+
 
 def _read_nerves(max_age_s: float = 2.5) -> dict:
     try:
@@ -218,6 +232,8 @@ class BodySession:
         self._stop = threading.Event()
         self._guard = None
         self._sdk_lock = threading.Lock()  # serialize our own SDK behavior calls
+        self._sdk_holder = None            # label of the call holding the lock
+        self._wedged = None                # {"call","ts","timeout_s"} once a call blows its deadline
         # FUSED SENSOR STREAM (Zeke 2026-07-15: "seeing should auto-stream to you
         # when you're in the body, and all the other senses too, ~camera rate").
         # A background thread samples EVERY sense continuously into a rolling
@@ -376,6 +392,18 @@ class BodySession:
 
     def _touch(self):
         self.last_activity = time.time()
+
+    @contextlib.contextmanager
+    def _sdk_locked(self, wait_s: float = 3.0):
+        """Timeout lock-acquire for internal/reflex SDK touches. Yields True if
+        acquired, False if not (caller skips). Never blocks forever behind a
+        wedged behavior call (2026-07-19 fix)."""
+        got = self._sdk_lock.acquire(timeout=wait_s)
+        try:
+            yield got
+        finally:
+            if got:
+                self._sdk_lock.release()
 
     def _require(self):
         if not self.connected or self.robot is None:
@@ -786,8 +814,9 @@ class BodySession:
 
     def _set_eyes(self, hue: float, sat: float = 1.0):
         with contextlib.suppress(Exception):
-            with self._sdk_lock:
-                self.robot.behavior.set_eye_color(hue=float(hue), saturation=float(sat))
+            with self._sdk_locked() as got:
+                if got:
+                    self.robot.behavior.set_eye_color(hue=float(hue), saturation=float(sat))
 
     def _play_trigger(self, trigger: str):
         """Play one of Vector's on-device animation triggers (eyes+sound+motion
@@ -795,7 +824,9 @@ class BodySession:
         REUSE the research pointed at — I supply the policy (which trigger, when),
         the firmware supplies the expression."""
         with contextlib.suppress(Exception):
-            with self._sdk_lock:
+            with self._sdk_locked() as got:
+                if not got:
+                    return
                 self.robot.anim.play_animation_trigger(trigger, loop_count=1)
             self._restore_head()
 
@@ -804,8 +835,9 @@ class BodySession:
 
     def _lift_to(self, ratio: float, speed: float = 8.0):
         with contextlib.suppress(Exception):
-            with self._sdk_lock:
-                self.robot.behavior.set_lift_height(float(ratio), max_speed=float(speed))
+            with self._sdk_locked() as got:
+                if got:
+                    self.robot.behavior.set_lift_height(float(ratio), max_speed=float(speed))
 
     # -- reactions: each maps onto Vector's own tuned triggers; consent decides
     #    calm-vs-protest, duration escalates intensity, every negative reaction
@@ -1194,6 +1226,65 @@ class BodySession:
             self.robot.motors.stop_all_motors()
         return {"ok": True, "stopped": True}
 
+    # ------------------------------------------------------ SDK hard deadline
+    def _sdk_call(self, label: str, fn, timeout_s: float = None,
+                  lock_wait_s: float = SDK_LOCK_WAIT_S) -> dict:
+        """Run one blocking SDK behavior call with a HARD client-side deadline.
+
+        2026-07-19 incident fix: the call executes in a disposable daemon
+        thread; the caller waits at most timeout_s then returns an error —
+        the runtime NEVER hangs on a dead gRPC again. Semantics on timeout:
+        the stuck worker keeps holding _sdk_lock (overlapping SDK behaviors
+        are worse than fast-failing), the session is flagged WEDGED, and all
+        later behavior calls fast-fail with recovery instructions until
+        body_close + body_open build a fresh session/lock. If the abandoned
+        worker eventually completes (gRPC finally errors/returns), it releases
+        the lock and clears the wedge flag itself — self-healing.
+        """
+        if timeout_s is None:
+            timeout_s = SDK_DEADLINES.get(label, 60.0)
+        if self._wedged:
+            return {"ok": False, "wedged": dict(self._wedged), "error":
+                    f"body session WEDGED since '{self._wedged.get('call')}' "
+                    f"blew its deadline — body_close then body_open to rebuild "
+                    f"(the robot itself is likely fine; check over ssh/daemon)"}
+        if not self._sdk_lock.acquire(timeout=max(0.5, float(lock_wait_s))):
+            return {"ok": False, "busy": True, "error":
+                    f"SDK busy: '{self._sdk_holder or '?'}' still running after "
+                    f"{lock_wait_s}s wait — retry shortly; if this repeats the "
+                    f"session is wedging (body_close + body_open)"}
+        self._sdk_holder = label
+        done = threading.Event()
+        box: dict = {}
+
+        def _run():
+            try:
+                box["res"] = fn()
+            except BaseException as e:   # noqa: BLE001 — must never kill silently
+                box["err"] = e
+            finally:
+                self._sdk_holder = None
+                # late completion of an abandoned call = the pipe unstuck itself
+                if (self._wedged or {}).get("call") == label:
+                    self._wedged = None
+                done.set()
+                self._sdk_lock.release()
+
+        threading.Thread(target=_run, name=f"sdk:{label}", daemon=True).start()
+        if not done.wait(timeout=max(1.0, float(timeout_s))):
+            self._wedged = {"call": label, "ts": round(time.time(), 1),
+                            "timeout_s": timeout_s}
+            self._reflex = f"SDK '{label}' blew {timeout_s:.0f}s deadline"[:160]
+            return {"ok": False, "timeout": True, "call": label, "error":
+                    f"'{label}' hit its {timeout_s:.0f}s HARD deadline and was "
+                    f"abandoned (runtime stays alive — this is the 07-19 fix "
+                    f"working). Session flagged WEDGED: body_close + body_open "
+                    f"to rebuild; if it re-wedges, reboot the robot (proven heal)."}
+        if "err" in box:
+            return {"ok": False, "call": label, "error": repr(box["err"])[:300]}
+        out = box.get("res")
+        return out if isinstance(out, dict) else {"ok": True, "res": out}
+
     # ---------------------------------------------------------------- behaviors
     def turn(self, angle_deg: float, speed_deg_s: float = 90.0) -> dict:
         """Gyro-exact turn (+left / -right). Restores head after."""
@@ -1202,19 +1293,18 @@ class BodySession:
         n = _read_nerves()
         if n.get("picked_up"):
             return {"ok": False, "refused": "picked up / no surface under treads"}
-        try:
-            from anki_vector.util import degrees
-            with self._sdk_lock:
-                res = self.robot.behavior.turn_in_place(
-                    degrees(float(angle_deg)),
-                    speed=degrees(float(speed_deg_s)),
-                    angle_tolerance=degrees(2.0))
-                out = _behavior_result(res)
-                self._restore_head()
+        from anki_vector.util import degrees
+
+        def _do():
+            res = self.robot.behavior.turn_in_place(
+                degrees(float(angle_deg)),
+                speed=degrees(float(speed_deg_s)),
+                angle_tolerance=degrees(2.0))
+            out = _behavior_result(res)
+            self._restore_head()
             out["angle_deg"] = angle_deg
             return out
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("turn", _do)
 
     def straight(self, dist_mm: float, speed_mm_s: float = 100.0) -> dict:
         """Encoder-exact straight (+fwd / -back). Cliff-safe behavior. Restores head."""
@@ -1223,20 +1313,19 @@ class BodySession:
         n = _read_nerves()
         if n.get("picked_up"):
             return {"ok": False, "refused": "picked up / no surface under treads"}
-        try:
-            from anki_vector.util import distance_mm, speed_mmps
-            with self._sdk_lock:
-                # should_play_anim=False suppresses the head-tilt idle animation at
-                # the source (research 2026-07-15); _restore_head is belt+suspenders.
-                res = self.robot.behavior.drive_straight(
-                    distance_mm(float(dist_mm)), speed_mmps(abs(float(speed_mm_s))),
-                    should_play_anim=False)
-                out = _behavior_result(res)
-                self._restore_head()
+        from anki_vector.util import distance_mm, speed_mmps
+
+        def _do():
+            # should_play_anim=False suppresses the head-tilt idle animation at
+            # the source (research 2026-07-15); _restore_head is belt+suspenders.
+            res = self.robot.behavior.drive_straight(
+                distance_mm(float(dist_mm)), speed_mmps(abs(float(speed_mm_s))),
+                should_play_anim=False)
+            out = _behavior_result(res)
+            self._restore_head()
             out["dist_mm"] = dist_mm
             return out
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("straight", _do)
 
     def go_to_pose(self, x: float, y: float, angle_deg: float = 0.0,
                    relative: bool = True) -> dict:
@@ -1245,19 +1334,18 @@ class BodySession:
         n = _read_nerves()
         if n.get("picked_up"):
             return {"ok": False, "refused": "picked up / no surface under treads"}
-        try:
-            from anki_vector.util import Pose, degrees
-            pose = Pose(x=float(x), y=float(y), z=0.0,
-                        angle_z=degrees(float(angle_deg)))
-            with self._sdk_lock:
-                res = self.robot.behavior.go_to_pose(
-                    pose, relative_to_robot=relative, num_retries=1)
-                out = _behavior_result(res)
-                self._restore_head()
+        from anki_vector.util import Pose, degrees
+        pose = Pose(x=float(x), y=float(y), z=0.0,
+                    angle_z=degrees(float(angle_deg)))
+
+        def _do():
+            res = self.robot.behavior.go_to_pose(
+                pose, relative_to_robot=relative, num_retries=1)
+            out = _behavior_result(res)
+            self._restore_head()
             out.update({"x": x, "y": y, "angle_deg": angle_deg, "relative": relative})
             return out
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("pose", _do)
 
     def head(self, angle_deg: float, speed_deg_s: float = None,
              accel_deg_s2: float = None) -> dict:
@@ -1266,25 +1354,24 @@ class BodySession:
         the fast default, small values (e.g. 30) for a slow deliberate tilt."""
         self._require()
         self._touch()
-        try:
-            import math
-            from anki_vector.util import degrees
-            a = max(HEAD_MIN_DEG, min(HEAD_MAX_DEG, float(angle_deg)))
-            kw = {}
-            if speed_deg_s is not None:
-                kw["max_speed"] = max(1.0, float(speed_deg_s)) * math.pi / 180.0
-            if accel_deg_s2 is not None:
-                kw["accel"] = max(1.0, float(accel_deg_s2)) * math.pi / 180.0
-            with self._sdk_lock:
-                res = self.robot.behavior.set_head_angle(degrees(a), **kw)
+        import math
+        from anki_vector.util import degrees
+        a = max(HEAD_MIN_DEG, min(HEAD_MAX_DEG, float(angle_deg)))
+        kw = {}
+        if speed_deg_s is not None:
+            kw["max_speed"] = max(1.0, float(speed_deg_s)) * math.pi / 180.0
+        if accel_deg_s2 is not None:
+            kw["accel"] = max(1.0, float(accel_deg_s2)) * math.pi / 180.0
+
+        def _do():
+            res = self.robot.behavior.set_head_angle(degrees(a), **kw)
             self._last_head_deg = a
             out = _behavior_result(res)
             out["head_deg"] = a
             if speed_deg_s is not None:
                 out["speed_deg_s"] = float(speed_deg_s)
             return out
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("head", _do)
 
     def lift(self, ratio: float, speed: float = None, accel: float = None) -> dict:
         """Set fork lift 0.0 (down) .. 1.0 (up). Optional speed/accel (rad/s,
@@ -1292,22 +1379,21 @@ class BodySession:
         self._require()
         self._touch()
         self._last_cmd_lift_ts = time.time()  # mark: this fork-move was ME
-        try:
-            r = max(LIFT_MIN, min(LIFT_MAX, float(ratio)))
-            kw = {}
-            if speed is not None:
-                kw["max_speed"] = max(0.1, float(speed))
-            if accel is not None:
-                kw["accel"] = max(0.1, float(accel))
-            with self._sdk_lock:
-                res = self.robot.behavior.set_lift_height(r, **kw)
+        r = max(LIFT_MIN, min(LIFT_MAX, float(ratio)))
+        kw = {}
+        if speed is not None:
+            kw["max_speed"] = max(0.1, float(speed))
+        if accel is not None:
+            kw["accel"] = max(0.1, float(accel))
+
+        def _do():
+            res = self.robot.behavior.set_lift_height(r, **kw)
             out = _behavior_result(res)
             out["lift_ratio"] = r
             if speed is not None:
                 out["speed"] = float(speed)
             return out
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("lift", _do)
 
     # ---------------------------------------------------------- expression (SDK-native)
     def eyes(self, hue: float, sat: float = 1.0) -> dict:
@@ -1315,31 +1401,29 @@ class BodySession:
         (my blue ~0.58). This replaces the wire-pod vector_eyes path."""
         self._require()
         self._touch()
-        try:
-            h = max(0.0, min(1.0, float(hue)))
-            s = max(0.0, min(1.0, float(sat)))
-            with self._sdk_lock:
-                self.robot.behavior.set_eye_color(hue=h, saturation=s)
+        h = max(0.0, min(1.0, float(hue)))
+        s = max(0.0, min(1.0, float(sat)))
+
+        def _do():
+            self.robot.behavior.set_eye_color(hue=h, saturation=s)
             return {"ok": True, "hue": h, "sat": s}
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("eyes", _do)
 
     def say(self, text: str, vector_voice: bool = True) -> dict:
         """Speak text through Vector's own speaker (SDK-native TTS). Restores head.
         Replaces the wire-pod vector_say path (stock Vector voice)."""
         self._require()
         self._touch()
-        try:
-            txt = str(text)[:600]
-            with self._sdk_lock:
-                res = self.robot.behavior.say_text(
-                    txt, use_vector_voice=bool(vector_voice))
-                self._restore_head()
+        txt = str(text)[:600]
+
+        def _do():
+            res = self.robot.behavior.say_text(
+                txt, use_vector_voice=bool(vector_voice))
+            self._restore_head()
             out = _behavior_result(res)
             out["said"] = txt
             return out
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("say", _do)
 
     def anim(self, name: str, loops: int = 1) -> dict:
         """Play a built-in animation/trigger by name (chirps, expressions) —
@@ -1348,47 +1432,49 @@ class BodySession:
         Restores head after."""
         self._require()
         self._touch()
-        try:
-            nm = str(name)
-            lc = max(1, int(loops))
-            with self._sdk_lock:
-                try:
-                    res = self.robot.anim.play_animation_trigger(nm, loop_count=lc)
-                except Exception:
-                    res = self.robot.anim.play_animation(nm, loop_count=lc)
-                self._restore_head()
+        nm = str(name)
+        lc = max(1, int(loops))
+
+        def _do():
+            try:
+                res = self.robot.anim.play_animation_trigger(nm, loop_count=lc)
+            except Exception:
+                res = self.robot.anim.play_animation(nm, loop_count=lc)
+            self._restore_head()
             out = _behavior_result(res)
             out["anim"] = nm
             return out
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("anim", _do)
 
     def dock(self) -> dict:
-        """NATIVE reliable dock seat (drive_on_charger). ~55s from across room."""
+        """NATIVE reliable dock seat (drive_on_charger). ~55s from across room.
+        HARD 150s deadline (this exact call wedged the whole runtime 2026-07-19).
+        For unattended re-seating prefer the inhabit daemon's dock (isolated
+        connection, proven robust while the runtime was dead)."""
         self._require()
         self._touch()
-        try:
-            with self._sdk_lock:
-                res = self.robot.behavior.drive_on_charger()
+
+        def _do():
+            res = self.robot.behavior.drive_on_charger()
             return _behavior_result(res)
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("dock", _do)
 
     def undock(self) -> dict:
         self._require()
         self._touch()
-        try:
-            with self._sdk_lock:
-                res = self.robot.behavior.drive_off_charger()
+
+        def _do():
+            res = self.robot.behavior.drive_off_charger()
             return _behavior_result(res)
-        except Exception as e:
-            return {"ok": False, "error": repr(e)[:300]}
+        return self._sdk_call("undock", _do)
 
     # ---------------------------------------------------------------- status
     def snapshot(self) -> dict:
         return {
             "connected": self.connected,
             "priority": getattr(self, "_priority", "default"),
+            "wedged": dict(self._wedged) if self._wedged else None,
+            "sdk_busy": self._sdk_holder,
             "feed_ok": self.feed_ok,
             "wheels": list(self._wheels),
             "last_head_deg": self._last_head_deg,
@@ -1398,63 +1484,68 @@ class BodySession:
         }
 
     def status(self) -> dict:
-        """Full status incl. REAL battery (SDK get_battery_state -> true is_charging)."""
+        """Full status incl. REAL battery (SDK get_battery_state -> true is_charging).
+        Live gRPC reads run under a 25s hard deadline — a hung behavior/dead pipe
+        yields live_error instead of wedging the caller (2026-07-19 fix)."""
         out = {"ok": True, **self.snapshot()}
         if not self.connected:
             return out
         self._touch()
-        # battery — real is_charging + unambiguous full-ness (volts>=4.05 & no
-        # suggested charge time; is_charging alone flickers near full).
-        try:
-            with self._sdk_lock:
+
+        def _do():
+            # battery — real is_charging + unambiguous full-ness (volts>=4.05 & no
+            # suggested charge time; is_charging alone flickers near full).
+            try:
                 bs = self.robot.get_battery_state()
-            volts = round(float(getattr(bs, "battery_volts", 0.0)), 3)
-            sec = float(getattr(bs, "suggested_charger_sec", 0.0) or 0.0)
-            out["battery"] = {
-                "volts": volts,
-                "level": getattr(bs, "battery_level", None),
-                "is_charging": bool(getattr(bs, "is_charging", False)),
-                "is_on_charger_platform": bool(getattr(bs, "is_on_charger_platform", False)),
-                "suggested_charger_sec": sec,
-                "full": volts >= 4.05 and sec == 0.0,
-            }
-        except Exception as e:
-            out["battery_error"] = repr(e)[:200]
-        # authoritative SDK status flags
-        try:
-            with self._sdk_lock:
+                volts = round(float(getattr(bs, "battery_volts", 0.0)), 3)
+                sec = float(getattr(bs, "suggested_charger_sec", 0.0) or 0.0)
+                out["battery"] = {
+                    "volts": volts,
+                    "level": getattr(bs, "battery_level", None),
+                    "is_charging": bool(getattr(bs, "is_charging", False)),
+                    "is_on_charger_platform": bool(getattr(bs, "is_on_charger_platform", False)),
+                    "suggested_charger_sec": sec,
+                    "full": volts >= 4.05 and sec == 0.0,
+                }
+            except Exception as e:
+                out["battery_error"] = repr(e)[:200]
+            # authoritative SDK status flags
+            try:
                 st = self.robot.status
-            out["flags"] = {k: bool(getattr(st, k)) for k in (
-                "is_cliff_detected", "is_picked_up", "is_being_held",
-                "are_wheels_moving", "is_on_charger", "is_charging", "is_falling")}
-        except Exception:
-            pass
-        # SDK pose — gyro/tread-fused heading (retires my odometry hack within a
-        # session). origin_id changes = pose was thrown away (pickup/cliff) → re-anchor.
-        try:
-            with self._sdk_lock:
+                out["flags"] = {k: bool(getattr(st, k)) for k in (
+                    "is_cliff_detected", "is_picked_up", "is_being_held",
+                    "are_wheels_moving", "is_on_charger", "is_charging", "is_falling")}
+            except Exception:
+                pass
+            # SDK pose — gyro/tread-fused heading (retires my odometry hack within a
+            # session). origin_id changes = pose was thrown away (pickup/cliff) → re-anchor.
+            try:
                 p = self.robot.pose
-            out["pose"] = {
-                "x_mm": round(float(p.position.x), 1),
-                "y_mm": round(float(p.position.y), 1),
-                "heading_deg": round(float(p.rotation.angle_z.degrees), 1),
-                "valid": bool(getattr(p, "is_valid", True)),
-                "origin_id": getattr(p, "origin_id", None),
-            }
-        except Exception:
-            pass
-        # front time-of-flight proximity
-        try:
-            with self._sdk_lock:
+                out["pose"] = {
+                    "x_mm": round(float(p.position.x), 1),
+                    "y_mm": round(float(p.position.y), 1),
+                    "heading_deg": round(float(p.rotation.angle_z.degrees), 1),
+                    "valid": bool(getattr(p, "is_valid", True)),
+                    "origin_id": getattr(p, "origin_id", None),
+                }
+            except Exception:
+                pass
+            # front time-of-flight proximity
+            try:
                 pr = self.robot.proximity.last_sensor_reading
-            out["proximity"] = {
-                "distance_mm": round(float(pr.distance.distance_mm), 0),
-                "found_object": bool(pr.found_object),
-                "signal_quality": round(float(pr.signal_quality), 3),
-                "unobstructed": bool(pr.unobstructed),
-            }
-        except Exception:
-            pass
+                out["proximity"] = {
+                    "distance_mm": round(float(pr.distance.distance_mm), 0),
+                    "found_object": bool(pr.found_object),
+                    "signal_quality": round(float(pr.signal_quality), 3),
+                    "unobstructed": bool(pr.unobstructed),
+                }
+            except Exception:
+                pass
+            return {"ok": True}
+
+        r = self._sdk_call("status_live", _do, timeout_s=25.0)
+        if not (isinstance(r, dict) and r.get("ok")):
+            out["live_error"] = (r or {}).get("error")
         out["nerves"] = _read_nerves()
         return out
 
