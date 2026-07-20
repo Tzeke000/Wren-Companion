@@ -27,6 +27,14 @@ ROOT = (Path(__file__).resolve().parent.parent / "state" / "vector" /
 SKIP_DIRS = ("devBehaviors", "blackjack", "alexa", "clock", "danceToTheBeat",
              "onboarding", "appBehaviors")
 
+# v6b (2026-07-20 late): v6's 120 auto pairs DILUTED the safety signal — the
+# 3.62V-off-charger answer regressed to "O.K." and stock numbers confabulated.
+# Same failure mode as the v1/v2 memory harvest, in miniature: telegraphic
+# trivia crowds out load-bearing knowledge. Whitelist only the families that
+# matter to OUR body's life; everything else stays facts-file material.
+CORE_DIRS = ("reactions", "driveOffCharger", "exploring", "sleeping",
+             "cubeSpinner", "putDownBlock", "knowledge")
+
 _COND_NL = {
     "OnCharger": "the body is on the charger",
     "OffTreadsState": "the body's tread state matches",
@@ -83,6 +91,8 @@ def auto_pairs() -> list[tuple[str, str]]:
     for p in sorted(ROOT.rglob("*.json")):
         if any(s in p.parts for s in SKIP_DIRS):
             continue
+        if not any(c in p.parts for c in CORE_DIRS):
+            continue  # v6b: core families only — density beats coverage
         try:
             d = json.loads(_strip_comments(p.read_text(encoding="utf-8")))
         except Exception:
