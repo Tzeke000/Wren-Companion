@@ -41,7 +41,9 @@ DATA = REPO / "state" / "little_brain" / "train.jsonl"
 OUT = REPO / "state" / "little_brain" / "adapter"
 BASE = "unsloth/Llama-3.2-3B-Instruct"
 
-MAX_SEQ = 1024
+MAX_SEQ = 512   # 1024->512 (2026-07-20 launch): samples are speech-sized —
+                # p99 well under 512 tokens — and halving seq roughly halves
+                # activation VRAM; the run shares the card with the voice stack
 EPOCHS = 3
 LR = 2e-4
 RANK = 16
