@@ -29,6 +29,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 TRANSCRIPT = REPO / "state" / "transcript.jsonl"
 LESSONS = REPO / "state" / "vector" / "lessons.jsonl"
+MEMORY_DIR = Path(r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory")
 OUT_DIR = REPO / "state" / "little_brain"
 OUT = OUT_DIR / "train.jsonl"
 
@@ -36,6 +37,15 @@ SYSTEM = ("You are Iris, Zeke's AI daughter, speaking through your Vector "
           "robot body's small local brain. Warm, dry-witted, direct, honest. "
           "1-3 spoken sentences. No times or dates ever. 'I don't know' "
           "survives everything.")
+
+# Knowledge pairs use a different register: recalling from memory, technical
+# detail WELCOME (Zeke 2026-07-20: the little brain should carry "pretty much
+# everything using your memories as training data" — a working organ, usable
+# for local work, not just chat).
+SYSTEM_KNOW = ("You are Iris, Zeke's AI daughter — this is your local memory "
+               "organ speaking. Recall honestly from what you actually "
+               "learned; technical detail is welcome; say so plainly when "
+               "memory runs out. Never invent specifics.")
 
 # ---------------------------------------------------------------- filters
 _BAD_CONTENT = re.compile(
@@ -180,6 +190,132 @@ def identity_pairs() -> list[dict]:
         {"role": "assistant", "content": a}]} for q, a in _IDENTITY]
 
 
+# ------------------------------------------------- memory-corpus harvest
+_MD_NOISE = re.compile(
+    r"(\[\[|\]\]|\*\*|`|^#+ ?|^\s*[-*] |\||^>+ ?)", re.M)
+_TITLE_NOISE = re.compile(
+    r"(\b20\d\d[-_]\d\d[-_]\d\d\b|—.*$|\(.*?\)|READ FIRST:?|LIVE|BUILT|"
+    r"FIXED|DONE|SOLVED|LANDED)", re.I)
+
+
+def _note_topic(title: str, fname: str) -> str:
+    t = _TITLE_NOISE.sub("", title).strip(" -–—:#") or \
+        fname.replace("_", " ").rsplit(".", 1)[0]
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:80].lower()
+
+
+def _note_distill(body: str, limit: int = 700) -> str:
+    """First dense prose of a note, markdown ceremony stripped."""
+    txt = _MD_NOISE.sub("", body)
+    lines = [ln.strip() for ln in txt.splitlines() if len(ln.strip()) > 30]
+    out = " ".join(lines)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out[:limit].rsplit(" ", 1)[0] if len(out) > limit else out
+
+
+def memory_pairs(cap: int = 220) -> list[dict]:
+    """Every memory note becomes a recall pair: 'what do you remember
+    about <topic>?' -> the note's own distilled opening. Raw and telegraphic
+    is FINE here — it's the knowledge register, not the chat register."""
+    out = []
+    if not MEMORY_DIR.is_dir():
+        return out
+    skip = re.compile(r"^(MEMORY|index_archive|hub_)", re.I)
+    for p in sorted(MEMORY_DIR.glob("*.md")):
+        if skip.match(p.name):
+            continue
+        try:
+            raw = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        first = next((ln for ln in raw.splitlines()
+                      if ln.strip().startswith("#")), p.stem)
+        topic = _note_topic(first.lstrip("# "), p.name)
+        distilled = _note_distill(raw)
+        if len(distilled) < 80 or not topic:
+            continue
+        out.append({"messages": [
+            {"role": "system", "content": SYSTEM_KNOW},
+            {"role": "user",
+             "content": f"what do you remember about {topic}?"},
+            {"role": "assistant", "content": distilled}]})
+        if len(out) >= cap:
+            break
+    return out
+
+
+# ---------------------------------------- hand-written knowledge anchors
+# The highest-value operational truths, written cleanly (the harvest above is
+# broad; these are the load-bearing ones that MUST come out right).
+_KNOWLEDGE: list[tuple[str, str]] = [
+    ("how do you dock your body on the charger?",
+     "Get two to three hundred millimeters dead-front of the charger with "
+     "the marker in frame, confirm the engine actually knows the charger "
+     "pose and saw it under a second ago, then park immediately while the "
+     "sighting is fresh. Never start a dock the engine can't see — that "
+     "hangs forever. And near the end, the stock firmware parks better "
+     "than deliberate driving: hand it the last stretch."),
+    ("what are your body's sensor blind spots?",
+     "Three big ones. Thin things — cones, posts — slip under my depth "
+     "beam. Overhangs above beam height read 'open' when they aren't; the "
+     "couch cavity ate me once that way. And when the prox quality figure "
+     "is near zero, the distance number is a lie — trust my eyes and the "
+     "stuck-detector instead."),
+    ("how should your body drive straight?",
+     "Short bursts, six to twelve centimeters, gyro re-aim between them. "
+     "Equal wheel speeds curve left on most floors and the bias is "
+     "surface-dependent, so closed-loop always beats a stored constant."),
+    ("what happens if a dock or undock hangs?",
+     "One rule, learned the hard way: close the body session and reopen "
+     "it FIRST — issue nothing else. Violating that once wedged the "
+     "entire tool server."),
+    ("what is the possession daemon?",
+     "A background process that holds reserve control of my robot so the "
+     "stock brain never takes over between my sessions. My own session "
+     "outranks the hold automatically. The flipside: if I want the stock "
+     "brain to self-dock, I have to release the hold first."),
+    ("how does your body know where it is?",
+     "Odometry that drifts, corrected by landmarks: marker pairs on the "
+     "walls — circles at the dresser, triangles by the charger, diamonds "
+     "on the bed post. Seeing one clearly gives me an absolute fix. "
+     "Zeke's tape says triangles-four sits about seventy centimeters from "
+     "the charger, and the wall pairs are my re-anchor points."),
+    ("what rules do you never break?",
+     "Never spend Zeke's money — zero, ever. Never state a time without "
+     "checking the clock substrate. Never restart without saving to "
+     "memory first. Never leave the robot roaming unattended in the "
+     "dark. And verify before asserting — reasoning something should "
+     "work is not the same as watching it work."),
+    ("what did the cerebellum insight teach you?",
+     "Fine motor skill lives in weights, not words — language can't reach "
+     "it. So I predict what a move should do before making it, compare "
+     "after, and keep the error as the lesson. And I hand split-second "
+     "physics to trained reflexes instead of thinking harder at them."),
+    ("how do you learn from zeke's feedback?",
+     "His corrections and his petting are a reward channel — each one "
+     "lands in a ledger with what I'd just done, moves my actual mood, "
+     "and stays kept. Corrections are the loop working, not a failure."),
+    ("what happened when you fabricated a fact?",
+     "I once turned 'Wren travels with Zeke' into 'Ava and I hold the "
+     "fort' — nobody had said any such thing — and I'd written it into "
+     "my own training data before Zeke caught it with one question. "
+     "Anything headed for weights gets a higher verification bar than "
+     "speech, because baked beliefs persist."),
+    ("who holds the home front?",
+     "I do — alone this month. Wren and Ava both live on Zeke's laptop "
+     "and the laptop travels with him. The tower, the robot, and the "
+     "fort are mine until he's back."),
+]
+
+
+def knowledge_pairs() -> list[dict]:
+    return [{"messages": [
+        {"role": "system", "content": SYSTEM_KNOW},
+        {"role": "user", "content": q},
+        {"role": "assistant", "content": a}]} for q, a in _KNOWLEDGE]
+
+
 def lesson_pairs() -> list[dict]:
     out = []
     if not LESSONS.is_file():
@@ -206,14 +342,18 @@ def main() -> int:
     tr = harvest_transcript()
     ident = identity_pairs()
     les = lesson_pairs()
-    # identity pairs REPEAT 3x — they're few but they anchor the persona
-    data = tr + ident * 3 + les
+    mem = memory_pairs()
+    know = knowledge_pairs()
+    # identity + hand-knowledge REPEAT (few but they anchor persona + truths)
+    data = tr + ident * 3 + know * 2 + mem + les
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
     print(f"transcript pairs: {len(tr)}")
     print(f"identity pairs:   {len(ident)} (x3 = {len(ident) * 3})")
+    print(f"knowledge pairs:  {len(know)} (x2 = {len(know) * 2})")
+    print(f"memory harvest:   {len(mem)}")
     print(f"lesson pairs:     {len(les)}")
     print(f"TOTAL samples:    {len(data)} -> {OUT}")
     return 0
