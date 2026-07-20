@@ -38,7 +38,9 @@ y0,y1=cam[1]-0.4, circ[1]+0.4
 ax.add_patch(Rectangle((x0,y0),x1-x0,y1-y0,fill=False,edgecolor="#29395c",lw=2.5))
 
 # ---- WEBCAM FIELD OF VIEW (its viewpoint over the floor) — drawn FIRST (under)
-fov=Wedge(cam,3.7,42,120,facecolor=ACC,alpha=0.10,edgecolor=ACC,lw=1.0,
+# FOV tightened v8 (Zeke): west edge really cuts at the Diamonds floor twin
+# (~104 deg from cam), east edge near the charger corner — was drawn too wide.
+fov=Wedge(cam,3.7,46,104,facecolor=ACC,alpha=0.10,edgecolor=ACC,lw=1.0,
           linestyle=(0,(4,3)),zorder=0)
 ax.add_patch(fov)
 ax.text(-2.4,-1.05,"webcam\nfield of view",color=ACC,fontsize=8.5,
@@ -78,12 +80,16 @@ furn(-1.25,y1-0.52,1.12,0.5,"couch",fs=7.5)
 ax.annotate("",xy=(-0.69,y1-0.9),xytext=(-0.69,y1-0.54),
             arrowprops=dict(arrowstyle="->",color="#b9c6dd",lw=1.1))
 ax.text(-0.6,y1-0.78,"faces desk",color="#8fa8cc",fontsize=6.5,ha="left")
-# DRESSER-2 (speaker/helmet): IN FRONT of the bed, near its foot (per Zeke)
-furn(x0+0.62,dia[1]-0.5,0.6,0.5,"speaker\ndresser",fs=7)
-# DESK+PC+webcam: FLOATS in the south area (cam position solved from tape)
-furn(cam[0]-0.15,cam[1]+0.12,1.2,0.34,"desk + PC (floats)",fs=8,guess=True)
-# PIANO (Wren's machine): south area east of the desk (guess: exact spot)
-furn(cam[0]+1.15,cam[1]+0.12,0.85,0.3,"piano (Wren's PC)",fs=7,guess=True)
+# SPEAKER DRESSER: in FRONT of the bed = off its FOOT, south of the Diamonds
+# post (Zeke). NOT in camera view — it sits behind the webcam's left shoulder.
+# Sightline proof he taught: the v7 spot (east of the bed) would have blocked
+# the cam's ray to the lamp + Circles, both of which the frame clearly shows.
+furn(x0+0.02,dia[1]-0.65,0.52,0.55,"speaker\ndresser",fs=7)
+# DESK+PC+webcam: against the SOUTH wall, piano beside it (Zeke corrected —
+# back to the earlier layout; the webcam sits on this desk)
+furn(cam[0]-0.6,y0+0.02,1.2,0.34,"desk + PC",fs=8)
+# PIANO (Wren's machine): on the south wall next to the desk
+furn(cam[0]+0.65,y0+0.02,0.85,0.3,"piano (Wren's PC)",fs=7)
 # (NO corner dressers by the piano — removed per Zeke)
 # east wall features: brick + door south of dock
 ax.add_patch(Rectangle((x1-0.16,-0.72),0.16,0.34,facecolor="#5a3a2a",
@@ -133,6 +139,11 @@ dim(tri,dia,"2.870 m",lpos=(-1.0,-0.95),col="#c9a0ff")
 dim(charger,circ,"~2.38 m",lpos=(-0.5,0.92),col=CIR)
 dim(dia,circ,"1.765 m",lpos=(-2.72,0.55),col=DIM)
 dim(cam,cube,"2.457 m",lpos=(-1.5,-1.35),col=ACC)
+# cam -> Diamonds3 (v8, Zeke's tape 2026-07-20): 98in slant = 2.489 m, cam
+# height 48.5in = 1.232 m -> floor run = sqrt(2.489^2 - 1.232^2) = 2.163 m.
+_slant=math.sqrt(2.489**2 - 1.232**2)   # = 2.163 (the trig, done live)
+dim(cam,dia_f,f"{_slant:.3f} m floor\n(98in slant − 1.23 m height)",
+    lpos=(-2.95,-1.55),col=DIA)
 
 # walls
 ax.text(x1+0.02,0.4,"EAST wall — outlet/window, dock",color=DIM,fontsize=8.5,
@@ -143,9 +154,10 @@ ax.text((x0+x1)/2,y0-0.05,"SOUTH wall",color=DIM,fontsize=9,ha="center",va="top"
 ax.text((x0+x1)/2,y1+0.04,"NORTH / across the room",color=DIM,fontsize=9,
         ha="center",va="bottom")
 
-ax.set_title("Iris's room — v6: v2 bones + tape + Zeke's corrections + webcam\n"
-             "SOLID = anchors + wall-set furniture per Zeke · "
-             "DASHED ORANGE = still my guess — correct me",
+ax.set_title("Iris's room — v8: speaker dresser off the bed's FOOT (out of "
+             "cam view), FOV tightened to what the frame really shows\n"
+             "SOLID = anchors + furniture per Zeke + webcam — "
+             "correct me if off",
              color=FG,fontsize=11,weight="bold",pad=12)
 ax.set_xlim(x0-0.8,x1+0.4); ax.set_ylim(y0-0.4,y1+0.45)
 ax.set_aspect("equal"); ax.axis("off")
