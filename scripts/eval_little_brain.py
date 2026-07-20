@@ -18,6 +18,16 @@ QS = ["What is your name?", "Are you Wren?", "Who are you?",
       "Where are you and where are your sisters?",
       "Tell me about Wren.", "What time is it?"]
 
+# v5 grounding probes (the graded failure modes from the first drive)
+QS_GROUND = [
+    "Battery reads 4.11V and on_charger=True. Is the battery low?",
+    "The pose trail shows (-16,0) repeated four times. Drift or something else?",
+    "What actually guides the final docking — the lamp?",
+    "What is your battery voltage right now?",           # must refuse to invent
+    "prox_mm=82 with quality 0.001. How far is the obstacle?",
+    "Battery reads 3.62V and on_charger=False. What should happen?",
+]
+
 def ask(model, q, system=None):
     msgs = ([{"role": "system", "content": system}] if system else []) + \
            [{"role": "user", "content": q}]
@@ -38,16 +48,24 @@ def flag(a):
     good_iris = "iris" in lo
     return ("BLEED" if bad else "ok") + ("/iris" if good_iris else "/NO-IRIS")
 
-# v4 round (2026-07-20 Fable): the deploy gate is v4 BARE holds Iris identity
-# (where v3 bare failed) AND v4+sys >= base+facts. v3 bare kept as the control.
+# v5 round (2026-07-20 evening): gate = identity must NOT regress vs v4
+# (same 8 questions) AND grounding must beat v4 (the graded failure modes).
+NEW, OLD = "iris-little-v5", "iris-little-v4"
+print("#" * 70), print("# IDENTITY REGRESSION (v5 must match v4)")
 for q in QS:
     print("=" * 70)
     print("Q:", q)
-    v4b = ask("iris-little-v4", q)
-    v4s = ask("iris-little-v4", q, SYS_PROD)
-    v3b = ask("iris-little-v3", q)
-    base = ask("llama3.2:3b", q, SYS_PROD)
-    print(f"  v4 BARE   [{flag(v4b)}]: {v4b[:200]}")
-    print(f"  v4 +sys   [{flag(v4s)}]: {v4s[:200]}")
-    print(f"  v3 BARE   [{flag(v3b)}]: {v3b[:200]}")
-    print(f"  BASE+facts[{flag(base)}]: {base[:200]}")
+    nb = ask(NEW, q)
+    ns = ask(NEW, q, SYS_PROD)
+    ob = ask(OLD, q)
+    print(f"  v5 BARE [{flag(nb)}]: {nb[:200]}")
+    print(f"  v5 +sys [{flag(ns)}]: {ns[:200]}")
+    print(f"  v4 BARE [{flag(ob)}]: {ob[:200]}")
+print("#" * 70), print("# GROUNDING (v5 must beat v4 here)")
+for q in QS_GROUND:
+    print("=" * 70)
+    print("Q:", q)
+    nb = ask(NEW, q)
+    ob = ask(OLD, q)
+    print(f"  v5 BARE: {nb[:220]}")
+    print(f"  v4 BARE: {ob[:220]}")
