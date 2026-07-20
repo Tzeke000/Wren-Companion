@@ -38,12 +38,16 @@ y0,y1=cam[1]-0.4, circ[1]+0.4
 ax.add_patch(Rectangle((x0,y0),x1-x0,y1-y0,fill=False,edgecolor="#29395c",lw=2.5))
 
 # ---- WEBCAM FIELD OF VIEW (its viewpoint over the floor) — drawn FIRST (under)
-# FOV tightened v8 (Zeke): west edge really cuts at the Diamonds floor twin
-# (~104 deg from cam), east edge near the charger corner — was drawn too wide.
-fov=Wedge(cam,3.7,46,104,facecolor=ACC,alpha=0.10,edgecolor=ACC,lw=1.0,
+# FOV MEASURED v9 (Zeke: "find the camera degrees — it's connected to you").
+# Cam = unbranded Sonix module (VID 0C45 PID 6536), no published spec — so it
+# was solved from the frame itself: two TAPED anchors visible at known
+# bearings (Triangles4 @ px562, Diamonds floor twin @ px~52) fit the
+# rectilinear model px = cx + f*tan(axis-theta) -> f≈594px,
+# HFOV = 2*atan(320/f) ≈ 56.6 deg, optical axis ≈ 79 deg.
+fov=Wedge(cam,3.7,51,107,facecolor=ACC,alpha=0.10,edgecolor=ACC,lw=1.0,
           linestyle=(0,(4,3)),zorder=0)
 ax.add_patch(fov)
-ax.text(-2.4,-1.05,"webcam\nfield of view",color=ACC,fontsize=8.5,
+ax.text(-2.4,-1.05,"webcam FOV\n56.6° (measured)",color=ACC,fontsize=8.5,
         ha="center",va="center",style="italic",alpha=0.9,zorder=1)
 
 # ---- FURNITURE (v5 2026-07-20: OBSERVED through the overhead webcam) -------
