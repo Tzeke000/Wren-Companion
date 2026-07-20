@@ -289,6 +289,32 @@ def _act(d: dict, goals: dict) -> str:
     return "noop"
 
 
+_hist: list[dict] = []   # last cycles for contact-health rules (v0.3)
+
+
+def _contact_health(bat: dict, nrv: dict) -> str | None:
+    """CHARGE-CONTACT TRACKER (v0.3, 2026-07-20 incident): catches
+    seated-but-not-charging, fossil feeds, and charging-lies — the three
+    ways today's contact failure could have been caught early."""
+    _hist.append({"volts": bat.get("volts"), "on_chg": nrv.get("on_charger"),
+                  "accel": tuple(nrv.get("accel") or [])})
+    del _hist[:-6]
+    if len(_hist) < 3:
+        return None
+    # A: off-charger sustained 2+ cycles (~5 min) — earlier than the volt rule
+    if all(h["on_chg"] is False for h in _hist[-2:]):
+        return "OFF CHARGER sustained 5+ min — seated-but-loose or wandered; needs re-seat"
+    # B: accel identical 3 cycles = sensor feed FOSSIL (fresh ts, dead values)
+    if len({h["accel"] for h in _hist[-3:]}) == 1 and _hist[-1]["accel"]:
+        return "SENSOR FEED FOSSIL — accel frozen 3 cycles; daemon needs a bounce; distrust all files"
+    # C: 'charging' but volts strictly falling 4 cycles = contact lie
+    v = [h["volts"] for h in _hist[-4:] if h["volts"]]
+    if (len(v) == 4 and all(a > b for a, b in zip(v, v[1:]))
+            and _hist[-1]["on_chg"]):
+        return f"CHARGING LIE — on_charger true but volts falling {v[0]}->{v[-1]}; contact suspect"
+    return None
+
+
 def _hard_escalations(bat: dict, nrv: dict, goals: dict) -> str | None:
     """Sensor -> alert with NO model in the loop. Returns alert text or None.
     Charger truth = NERVES (1Hz live); battery.json's flag can freeze stale
@@ -327,6 +353,11 @@ def main() -> int:
             pos, goals = _read_json(POSSESSION), _read_json(GOALS)
 
             hard = _hard_escalations(bat, nrv, goals)
+            contact = _contact_health(bat, nrv)
+            if contact:
+                _append(ALERTS, {"ts": time.time(), "kind": "CONTACT",
+                                 "text": contact})
+                hard = hard or contact
             if hard:
                 _append(ALERTS, {"ts": time.time(), "kind": "HARD", "text": hard})
 
