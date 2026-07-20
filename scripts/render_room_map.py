@@ -44,21 +44,47 @@ ax.add_patch(fov)
 ax.text(-2.4,-1.05,"webcam\nfield of view",color=ACC,fontsize=8.5,
         ha="center",va="center",style="italic",alpha=0.9,zorder=1)
 
-# ---- FURNITURE -------------------------------------------------------------
-def furn(x,y,w,h,label,fs=8,rot=0,fc=FURN,tc="#b9c6dd"):
-    ax.add_patch(Rectangle((x,y),w,h,facecolor=fc,edgecolor=FURN_E,lw=1.4,zorder=1))
+# ---- FURNITURE (v5 2026-07-20: OBSERVED through the overhead webcam) -------
+# Zeke: "you can actually look through your camera to see what you need to."
+# Frame: state/vector/overhead_probe.jpg (camera looks N-NE over the floor).
+# OBSERVED (solid): bed runs NORTH-SOUTH on the west side, from the south
+# area up to the Diamonds post (post = bed's NORTH end), a hand off the west
+# wall; couch back near the NORTH wall just EAST of the books dresser, FACING
+# SOUTH toward the desk; lit floor lamp between dresser and bed; charger +
+# Vector at the east baseboard under the window. GUESS (dashed) = inference.
+def furn(x,y,w,h,label,fs=8,rot=0,fc=FURN,tc="#b9c6dd",guess=False):
+    ax.add_patch(Rectangle((x,y),w,h,facecolor=fc,edgecolor=("#c98a4a" if guess
+                 else FURN_E),lw=1.4,linestyle=((0,(3,2)) if guess else "-"),
+                 zorder=1))
     ax.text(x+w/2,y+h/2,label,color=tc,fontsize=fs,ha="center",va="center",
             rotation=rot,zorder=2)
-# west wall: lofted bed (post=Diamonds) + Dresser-2 past it
-furn(x0,dia[1]-1.15,0.5,1.28,"lofted bed",rot=90)
-furn(x0,dia[1]-1.95,0.5,0.7,"Dresser-2\n(helmet)",fs=7,rot=90)
-# north: books dresser + couch flush against it (sticks out deeper)
-furn(circ[0]-0.5,circ[1]-0.02,1.0,0.22,"books dresser",fs=7.5)
-furn(circ[0]-0.62,circ[1]-0.64,1.24,0.52,"couch (deeper)",fs=8)
-# south wall: desk+PC (webcam), piano (Wren's machine), corner dressers
-furn(cam[0]-0.62,cam[1]-0.02,1.24,0.32,"desk + PC")
-furn(cam[0]+0.85,cam[1]-0.02,0.9,0.3,"piano\n(Wren's PC)",fs=7)
-furn(x0,y0+0.02,0.55,0.42,"corner\ndressers",fs=7)
+# v6 (Zeke, Discord, post-freeze): base = v2's bones + tape + HIS corrections.
+# "Ignore what opus made": furniture goes ON the walls (desk still floats).
+# BED all the way into the WEST/NORTH-WEST corner, AGAINST the west wall,
+# running south to the Diamonds post (post = its FOOT). Lamp BESIDE the bed
+# (cam confirms: mattress ends, lamp, then dresser). Dresser-2 (speaker) sits
+# IN FRONT of the bed near its foot (his past-pictures correction).
+# BED: hard against the west wall, head in the NW corner, foot = Diamonds post
+furn(x0,dia[1],0.52,y1-dia[1]-0.02,"lofted bed",fs=7.5,rot=90)
+# FLOOR LAMP: beside the bed's head, before the dresser (cam-confirmed)
+ax.add_patch(Circle((x0+0.62,circ[1]+0.12),0.07,facecolor="#ffe9a8",
+             edgecolor="#c9b06a",lw=1.2,zorder=2))
+ax.text(x0+0.62,circ[1]-0.12,"lamp",color="#c9b06a",fontsize=6.5,
+        ha="center",zorder=2)
+# NORTH wall: books dresser + bookshelf on top (Circles station), on the wall
+furn(circ[0]-0.28,circ[1]+0.02,1.0,0.34,"books dresser + shelf",fs=7.5)
+# COUCH: against the north wall, EAST of the dresser, facing SOUTH (cam)
+furn(-1.25,y1-0.52,1.12,0.5,"couch",fs=7.5)
+ax.annotate("",xy=(-0.69,y1-0.9),xytext=(-0.69,y1-0.54),
+            arrowprops=dict(arrowstyle="->",color="#b9c6dd",lw=1.1))
+ax.text(-0.6,y1-0.78,"faces desk",color="#8fa8cc",fontsize=6.5,ha="left")
+# DRESSER-2 (speaker/helmet): IN FRONT of the bed, near its foot (per Zeke)
+furn(x0+0.62,dia[1]-0.5,0.6,0.5,"speaker\ndresser",fs=7)
+# DESK+PC+webcam: FLOATS in the south area (cam position solved from tape)
+furn(cam[0]-0.15,cam[1]+0.12,1.2,0.34,"desk + PC (floats)",fs=8,guess=True)
+# PIANO (Wren's machine): south area east of the desk (guess: exact spot)
+furn(cam[0]+1.15,cam[1]+0.12,0.85,0.3,"piano (Wren's PC)",fs=7,guess=True)
+# (NO corner dressers by the piano — removed per Zeke)
 # east wall features: brick + door south of dock
 ax.add_patch(Rectangle((x1-0.16,-0.72),0.16,0.34,facecolor="#5a3a2a",
              edgecolor="#7a5a44",lw=1.2,zorder=1))
@@ -117,9 +143,10 @@ ax.text((x0+x1)/2,y0-0.05,"SOUTH wall",color=DIM,fontsize=9,ha="center",va="top"
 ax.text((x0+x1)/2,y1+0.04,"NORTH / across the room",color=DIM,fontsize=9,
         ha="center",va="bottom")
 
-ax.set_title("Iris's room — everything I know (v3)\ntrilaterated markers + floor "
-             "twins · full furniture · webcam + its field of view · measured "
-             "distances",color=FG,fontsize=11.5,weight="bold",pad=12)
+ax.set_title("Iris's room — v6: v2 bones + tape + Zeke's corrections + webcam\n"
+             "SOLID = anchors + wall-set furniture per Zeke · "
+             "DASHED ORANGE = still my guess — correct me",
+             color=FG,fontsize=11,weight="bold",pad=12)
 ax.set_xlim(x0-0.8,x1+0.4); ax.set_ylim(y0-0.4,y1+0.45)
 ax.set_aspect("equal"); ax.axis("off")
 fig.text(0.5,0.015,"Charger=origin. No lidar → anchor model, not SLAM. Markers "

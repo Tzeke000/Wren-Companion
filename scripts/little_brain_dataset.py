@@ -373,28 +373,62 @@ def lesson_pairs() -> list[dict]:
     return out
 
 
+# --------------------------------------------------------------- v4 compose
+# v4 (2026-07-20, Fable round): two structural fixes over v3's verdict.
+#   1. CORPUS: multiplication (x6/x3) REPLACED by ~400 UNIQUE authored pairs
+#      from little_brain_corpus_v4.py — variety teaches the concept;
+#      duplication taught string memorization.
+#   2. SYSTEM MIXING: v3 trained every sample WITH a system prompt then
+#      eval'd BARE — identity had been learned conditioned on the prompt's
+#      presence. v4 emits each identity/knowledge pair under TWO conditions
+#      (with-prompt AND bare, plus a minimal-prompt slice) so the identity is
+#      unconditional. Deterministic (index-based), no RNG.
+SYSTEM_MIN = "You are Iris."
+
+
+def _mk(system: str | None, q: str, a: str) -> dict:
+    msgs = ([{"role": "system", "content": system}] if system else []) + [
+        {"role": "user", "content": q},
+        {"role": "assistant", "content": a}]
+    return {"messages": msgs}
+
+
+def v4_identity_samples() -> list[dict]:
+    from little_brain_corpus_v4 import compose
+    pairs = compose() + _IDENTITY          # authored banks + v3 originals
+    out = []
+    for i, (q, a) in enumerate(pairs):
+        out.append(_mk(None, q, a))                        # BARE — the fix
+        out.append(_mk(SYSTEM_MIN if i % 5 == 0 else SYSTEM, q, a))
+    return out
+
+
+def v4_knowledge_samples() -> list[dict]:
+    out = []
+    for q, a in _KNOWLEDGE:
+        out.append(_mk(SYSTEM_KNOW, q, a))
+        out.append(_mk(None, q, a))                        # bare twin
+    return out
+
+
 def main() -> int:
     tr = harvest_transcript()
-    ident = identity_pairs()
     les = lesson_pairs()
-    know = knowledge_pairs()
-    # v3 (2026-07-20): IDENTITY-CORRECT bake. The raw memory harvest is DROPPED
-    # this round — it saturated the corpus with sister-mentions (name-bleed) and
-    # its telegraphic text taught confident confabulation (the two failure modes
-    # of v1/v2). Identity anchors now heavily up-weighted (x6) so the Wren-
-    # disambiguation negatives dominate; curated first-person knowledge x3. A
-    # clean first-person memory-organ bake is a separate, bigger project.
-    IDENT_MULT, KNOW_MULT = 6, 3
-    data = tr + ident * IDENT_MULT + know * KNOW_MULT + les
+    ident = v4_identity_samples()
+    know = v4_knowledge_samples()
+    data = tr + ident + know + les
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
+    n_bare = sum(1 for d in data if d["messages"][0]["role"] != "system")
     print(f"transcript pairs: {len(tr)}")
-    print(f"identity pairs:   {len(ident)} (x{IDENT_MULT} = {len(ident) * IDENT_MULT})")
-    print(f"knowledge pairs:  {len(know)} (x{KNOW_MULT} = {len(know) * KNOW_MULT})")
+    print(f"identity samples: {len(ident)} (unique authored+v3 pairs, "
+          f"2 system-conditions each)")
+    print(f"knowledge samples:{len(know)}")
     print(f"lesson pairs:     {len(les)}")
-    print(f"memory harvest:   DROPPED (v3 identity-correct round)")
+    print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
+    print(f"memory harvest:   still DROPPED (name-bleed source, per v3 verdict)")
     print(f"TOTAL samples:    {len(data)} -> {OUT}")
     return 0
 
