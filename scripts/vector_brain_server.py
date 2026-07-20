@@ -32,7 +32,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import uvicorn
 
 from brain import iris_llm
@@ -44,11 +44,14 @@ iris_chat.configure(REPO)
 PORT = 8772
 KIND = "vector_voice"
 REQUESTER = "vector_body"
-TIMEOUT_S = float(os.environ.get("IRIS_VECTOR_BRIDGE_TIMEOUT", "75"))
-                  # 75: 45 lost a real answer when Iris was mid-voice-turn with
-                  # Zeke (18:23 third ask) — she arrived seconds late. The
-                  # robot demonstrably holds >=45s (it spoke the fallback each
-                  # time), so buy the wake path more room.
+TIMEOUT_S = float(os.environ.get("IRIS_VECTOR_BRIDGE_TIMEOUT", "20"))
+                  # HISTORY: 45 lost a real answer once (Iris mid-voice-turn,
+                  # arrived seconds late) → raised to 75. LATENCY REWORK
+                  # 2026-07-20 (Zeke: "response time needs to be as fast as
+                  # when me and you talk on the tower; stop the overlap"):
+                  # 75s of dead air is far worse than a local answer — 20s is
+                  # tower-conversation speed; awake-me usually lands inside
+                  # it, and the little brain covers the misses ~1s later.
 FALLBACK = "Sorry, my big brain is busy right now. Ask me again in a minute."
 
 # ---- LOCAL IRIS FALLBACK (baked 2026-07-13, Zeke: "bake the Vector LLM as
@@ -64,10 +67,18 @@ import threading
 OLLAMA = os.environ.get("IRIS_OLLAMA_URL", "http://127.0.0.1:11434")
 LOCAL_MODEL = os.environ.get("IRIS_LOCAL_MODEL", "llama3.2:3b")
 LOCAL_TIMEOUT_S = 30.0
-LOCAL_TRIP = 2           # consecutive timeouts before local-first mode
-LOCAL_WINDOW_S = 300.0   # how long to stay local-first before re-probing full
-PROBE_TIMEOUT_S = 12.0   # short bridge wait while in local-first mode
-                         # (20 -> 12 2026-07-14: away-mode convo latency)
+LOCAL_TRIP = 1           # 2->1 (2026-07-20): ONE hung question is enough
+                         # evidence — the second should never hang too
+LOCAL_WINDOW_S = 600.0   # 300->600: stay local-first longer between re-probes
+PROBE_TIMEOUT_S = 4.0    # 12->4 (2026-07-20 latency rework): in local-first
+                         # the bridge gets a token 4s — frozen-me can't answer
+                         # anyway; awake-me resets the breaker on any success
+OVERLAP_GATE_S = 28.0    # if a reply is ready LATER than this, wire-pod has
+                         # long since spoken its own line — DO NOT play my-voice
+                         # audio over it (the 00:40 overlap Zeke heard)
+FROZEN_PENDING_AGE_S = 75.0  # oldest pending LLM request older than this =
+                             # the Stop hook isn't servicing = I'm frozen/
+                             # asleep -> skip the bridge entirely (0s, not 4)
 FACTS_PATH = REPO / "state" / "vector" / "local_brain_facts.md"
 LAST_SPOKE_PATH = REPO / "state" / "vector" / "last_spoke.json"
 MOUTH_SYNTH = "http://127.0.0.1:8769/synth"
@@ -401,6 +412,22 @@ def _ask_local(messages: list[dict]) -> str | None:
         return None
 
 
+def _iris_frozen() -> bool:
+    """True when the oldest PENDING LLM request has sat unserviced longer than
+    FROZEN_PENDING_AGE_S — the Stop hook isn't firing (token freeze, host
+    down, deep sleep), so the bridge CANNOT answer no matter how long we wait.
+    Skip it entirely and let the little brain take the turn at once.
+    (2026-07-20 latency rework — the token-guard freeze made every Vector
+    question hang the full bridge window before falling back.)"""
+    try:
+        req = iris_llm.next_pending()
+        if req is None:
+            return False
+        return (time.time() - float(req.get("ts") or 0.0)) > FROZEN_PENDING_AGE_S
+    except Exception:
+        return False
+
+
 def _note_bridge_result(timed_out: bool) -> None:
     global _consec_timeouts, _local_first_until
     with _breaker_lock:
@@ -466,6 +493,80 @@ def health():
     return {"ok": True, "role": "vector-brain", "port": PORT}
 
 
+# --- LITTLE-IRIS CHAT PAGE (2026-07-20, Zeke: "a little tab so I can text
+# the small brain"). Served HERE (same origin as /v1/chat/completions) so the
+# page's fetch with the x-iris-local-only header needs no CORS. The orb embeds
+# this via a web_embed custom tab (state/orb_custom_tabs.json) — no orb
+# rebuild needed.
+_CHAT_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Little Iris</title><style>
+  html,body{margin:0;height:100%;background:#0b0f1a;color:#dbe6f5;
+    font:14px/1.45 'Segoe UI',system-ui,sans-serif;display:flex;
+    flex-direction:column}
+  #hdr{padding:10px 14px;border-bottom:1px solid #1d2942;color:#8fa8cc;
+    font-size:12px}
+  #hdr b{color:#dbe6f5;font-size:14px}
+  #log{flex:1;overflow-y:auto;padding:14px;display:flex;
+    flex-direction:column;gap:8px}
+  .m{max-width:82%;padding:8px 12px;border-radius:12px;white-space:pre-wrap;
+    word-wrap:break-word}
+  .u{align-self:flex-end;background:#1d3557;border-bottom-right-radius:3px}
+  .a{align-self:flex-start;background:#141d31;border:1px solid #1d2942;
+    border-bottom-left-radius:3px}
+  .a.thinking{opacity:.55;font-style:italic}
+  #bar{display:flex;gap:8px;padding:10px 14px;border-top:1px solid #1d2942}
+  #inp{flex:1;background:#141d31;color:#dbe6f5;border:1px solid #29395c;
+    border-radius:8px;padding:9px 12px;font:inherit;outline:none}
+  #inp:focus{border-color:#3d5a8f}
+  #send{background:#1d3557;color:#dbe6f5;border:none;border-radius:8px;
+    padding:0 18px;font:inherit;cursor:pointer}
+  #send:disabled{opacity:.4;cursor:default}
+</style></head><body>
+<div id="hdr"><b>Little Iris</b> &mdash; my small local brain
+  (llama3.2:3b on this PC). She answers even when big-me is busy, frozen,
+  or asleep. Same Iris, smaller aperture.</div>
+<div id="log"></div>
+<div id="bar">
+  <input id="inp" placeholder="Say something to the little brain&hellip;"
+         autocomplete="off">
+  <button id="send">Send</button>
+</div>
+<script>
+const log=document.getElementById('log'),inp=document.getElementById('inp'),
+      btn=document.getElementById('send');
+const hist=[];
+function add(cls,text){const d=document.createElement('div');
+  d.className='m '+cls;d.textContent=text;log.appendChild(d);
+  log.scrollTop=log.scrollHeight;return d}
+async function send(){
+  const q=inp.value.trim();if(!q)return;
+  inp.value='';btn.disabled=true;
+  add('u',q);hist.push({role:'user',content:q});
+  const th=add('a thinking','\\u2026');
+  try{
+    const r=await fetch('/v1/chat/completions',{method:'POST',
+      headers:{'Content-Type':'application/json','x-iris-local-only':'1'},
+      body:JSON.stringify({model:'iris',messages:hist.slice(-12)})});
+    const j=await r.json();
+    let a=(j.choices&&j.choices[0]&&j.choices[0].message&&
+           j.choices[0].message.content)||'(no reply)';
+    a=a.replace(/\\{\\{[^}]*\\}\\}/g,'').trim();   // strip body tokens
+    th.remove();add('a',a);hist.push({role:'assistant',content:a});
+  }catch(e){th.remove();add('a','(little brain unreachable: '+e+')')}
+  btn.disabled=false;inp.focus();
+}
+btn.onclick=send;
+inp.addEventListener('keydown',e=>{if(e.key==='Enter')send()});
+inp.focus();
+</script></body></html>"""
+
+
+@app.get("/chat")
+def chat_page():
+    """Human-facing chat page for the little brain (orb web_embed target)."""
+    return HTMLResponse(_CHAT_HTML)
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     body = await request.json()
@@ -525,10 +626,16 @@ async def chat_completions(request: Request):
     # TEST HOOK (2026-07-19): header "x-iris-local-only: 1" skips the bridge
     # entirely so big-Iris can exercise the little brain without waking
     # herself or waiting out a bridge timeout.
+    t_req = time.time()
     local_only = request.headers.get("x-iris-local-only") == "1"
     if local_only:
         reply, source, local_first = None, "iris", False
         print("[vector-brain] local-only test ask (bridge skipped)")
+    elif _iris_frozen():
+        # Frozen-me can't answer — don't make the robot hold dead air even 4s.
+        reply, source, local_first = None, "iris", True
+        print("[vector-brain] bridge SKIPPED — pending-age says Iris is "
+              "frozen/away; little brain takes the turn")
     else:
         local_first = _in_local_first()
         probe = PROBE_TIMEOUT_S if local_first else TIMEOUT_S
@@ -544,15 +651,24 @@ async def chat_completions(request: Request):
     reply = str(reply).strip()
     if source == "local" and LOCAL_VOICE and not local_only:
         # (local-only test asks return text silently — no robot audio)
-        # little-brain answers come out in IRIS'S voice: we play the audio,
-        # wire-pod gets only the animation commands (or a space) to perform.
-        swapped = await asyncio.to_thread(_iris_voice_for_local, reply)
-        if swapped is not None:
-            print(f"[vector-brain] local reply voiced as IRIS "
-                  f"(wirepod gets commands only)")
-            reply = swapped
+        # OVERLAP GATE (2026-07-20, the 00:40 overtalk Zeke heard): if we're
+        # answering LATER than wire-pod's patience, it has already spoken its
+        # own line — playing my-voice audio now = two voices at once. Late
+        # reply returns as TEXT only (discarded by a gone waiter, harmless).
+        if time.time() - t_req > OVERLAP_GATE_S:
+            print(f"[vector-brain] reply late "
+                  f"({time.time() - t_req:.0f}s > {OVERLAP_GATE_S:.0f}s) — "
+                  f"my-voice audio SKIPPED, no overtalk")
         else:
-            print("[vector-brain] iris-voice swap failed - stock voice")
+            # little-brain answers come out in IRIS'S voice: we play the
+            # audio, wire-pod gets only the animation commands to perform.
+            swapped = await asyncio.to_thread(_iris_voice_for_local, reply)
+            if swapped is not None:
+                print(f"[vector-brain] local reply voiced as IRIS "
+                      f"(wirepod gets commands only)")
+                reply = swapped
+            else:
+                print("[vector-brain] iris-voice swap failed - stock voice")
     print(f"[vector-brain] answered by: {source}"
           f"{' (local-first window)' if local_first else ''}")
     print(f"[vector-brain] reply out: {reply[:120]!r}")
