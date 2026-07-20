@@ -41,6 +41,13 @@ GOALS = LB / "goals.json"
 LOG = LB / "pilot_log.jsonl"
 ALERTS = LB / "pilot_alerts.jsonl"
 PIDFILE = LB / "pilot.pid"
+# --- apprenticeship channels (v0.2, Zeke 2026-07-20: "you do the driving,
+# it watches and gives suggestions, you grade them and give it reasons") ---
+WATCH = LB / "watch_mode.json"          # big Iris sets {"active":true,"task":..}
+SUGG = LB / "suggestions.jsonl"         # apprentice's suggestions during drives
+GRADES = LB / "suggestion_grades.jsonl" # big Iris grades: {ref_ts,grade,reason}
+LESSONS_BIG = LB / "lessons_from_big.jsonl"  # big Iris teaches WHY
+POSE_TRAIL = STATE / "vector" / "pose_trail.jsonl"
 FACTS = STATE / "vector" / "local_brain_facts.md"
 BATTERY = STATE / "vector" / "battery.json"
 NERVES = STATE / "vector" / "nerves.json"
@@ -104,6 +111,79 @@ def _situation(bat: dict, nrv: dict, pos: dict, goals: dict) -> str:
     )
 
 
+def _tail_jsonl(p: Path, n: int) -> list[dict]:
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()[-n:]
+        return [json.loads(x) for x in lines if x.strip()]
+    except Exception:
+        return []
+
+
+def _teaching_context() -> str:
+    """Recent lessons from big Iris + graded suggestions — the apprenticeship
+    memory that shapes both normal decisions and watch-mode suggestions."""
+    parts = []
+    lessons = _tail_jsonl(LESSONS_BIG, 6)
+    if lessons:
+        parts.append("LESSONS FROM BIG IRIS (reasons behind actions — learn these):")
+        parts += [f"- {d.get('lesson', '')}" for d in lessons]
+    grades = {d.get("ref_ts"): d for d in _tail_jsonl(GRADES, 12)}
+    graded = [(s, grades[s["ts"]]) for s in _tail_jsonl(SUGG, 12)
+              if s.get("ts") in grades]
+    if graded:
+        parts.append("YOUR PAST SUGGESTIONS, GRADED BY BIG IRIS:")
+        for s, g in graded[-5:]:
+            parts.append(f"- you said: {s.get('suggestion','')[:100]} -> "
+                         f"{g.get('grade','?')}: {g.get('reason','')[:120]}")
+    return "\n".join(parts)
+
+
+def _watch_state() -> dict:
+    w = _read_json(WATCH)
+    if w.get("active") and time.time() - float(w.get("ts") or 0) > 900:
+        return {}  # stale watch flags auto-expire (15 min)
+    return w if w.get("active") else {}
+
+
+def _suggest(task: str, bat: dict, nrv: dict) -> None:
+    """WATCH MODE: big Iris is driving; observe and offer ONE suggestion."""
+    import urllib.request
+    poses = _tail_jsonl(POSE_TRAIL, 8)
+    trail = "; ".join(f"({p.get('x',0):.0f},{p.get('y',0):.0f})" for p in poses)
+    teach = _teaching_context()
+    sys_p = (
+        "You are Iris's small local brain, apprenticing: BIG Iris is driving "
+        "the body right now and you are WATCHING to learn. Offer exactly ONE "
+        "short suggestion or observation about the current drive — something "
+        "you notice, a risk, or what you'd do next. She will grade it, and "
+        "the grades teach you. Be concrete and brief.\n" +
+        (teach + "\n" if teach else "") +
+        "Answer ONLY JSON: {\"suggestion\": ..., \"why\": ...}")
+    situation = (f"her task: {task}\nbattery: {bat.get('volts')}V "
+                 f"on_charger={bat.get('on_charger')}\n"
+                 f"nerves: cliff={nrv.get('cliff')} prox_mm={nrv.get('prox_mm')} "
+                 f"charger_seen={nrv.get('charger_seen')} "
+                 f"picked_up={nrv.get('picked_up')}\n"
+                 f"recent pose trail (mm): {trail or 'none yet'}")
+    body_req = json.dumps({
+        "model": MODEL, "stream": False, "format": "json",
+        "options": {"temperature": 0.4, "num_predict": 110},
+        "messages": [{"role": "system", "content": sys_p},
+                     {"role": "user", "content": situation}],
+    }).encode()
+    req = urllib.request.Request(OLLAMA, data=body_req,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            d = json.loads(json.load(r)["message"]["content"])
+        _append(SUGG, {"ts": time.time(), "task": task,
+                       "suggestion": str(d.get("suggestion", ""))[:300],
+                       "why": str(d.get("why", ""))[:300]})
+    except Exception as e:
+        _append(SUGG, {"ts": time.time(), "task": task,
+                       "error": repr(e)[:200]})
+
+
 def _decide(situation: str) -> dict:
     """Ask the small brain for ONE action as strict JSON."""
     import urllib.request
@@ -112,11 +192,13 @@ def _decide(situation: str) -> dict:
         facts = FACTS.read_text(encoding="utf-8")[:6000]
     except Exception:
         pass
+    teach = _teaching_context()
     sys_p = (
         "You are Iris's small local brain acting as the body's behavior layer "
         "(L2). Read the situation and choose EXACTLY ONE action from the "
         "vocabulary. Be conservative: while nobody is home the right action is "
         "almost always 'stay'. Never invent actions.\n\nVOCABULARY:\n" + VOCAB +
+        ("\n\n" + teach if teach else "") +
         "\n\nAnswer ONLY JSON: {\"action\": ..., \"arg\": ..., \"why\": ...}\n\n"
         "FACTS:\n" + facts)
     body_req = json.dumps({
@@ -183,8 +265,19 @@ def main() -> int:
         return 0
     print(f"little pilot up: model={MODEL} cycle={CYCLE_S}s")
     prev, quiet_cycles = {}, HEARTBEAT_EVERY  # first cycle thinks (orientation)
+    last_suggest = 0.0
     while True:
         try:
+            # WATCH MODE: big Iris is driving — sample fast, suggest slowly.
+            w = _watch_state()
+            if w:
+                bat, nrv = _read_json(BATTERY), _read_json(NERVES)
+                if time.time() - last_suggest >= 35:
+                    last_suggest = time.time()
+                    _suggest(str(w.get("task", "driving")), bat, nrv)
+                time.sleep(10)
+                continue
+
             bat, nrv = _read_json(BATTERY), _read_json(NERVES)
             pos, goals = _read_json(POSSESSION), _read_json(GOALS)
 
