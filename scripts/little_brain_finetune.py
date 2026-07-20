@@ -92,7 +92,9 @@ def main() -> int:
         num_train_epochs=EPOCHS,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
-        learning_rate=LR, lr_scheduler_type="cosine", warmup_ratio=0.05,
+        learning_rate=LR, lr_scheduler_type="cosine", warmup_steps=4,
+        # (warmup_ratio deprecated in transformers 5.x; 4 steps ≈ 5% of the
+        #  ~78 total steps at 209 samples / batch 1 / accum 8 / 3 epochs)
         logging_steps=5, save_strategy="no",
         bf16=True, max_length=MAX_SEQ,
         gradient_checkpointing=True,
