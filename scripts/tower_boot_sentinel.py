@@ -194,6 +194,24 @@ def main() -> int:
                     f"no launch attempted.")
 
     if up and not dry:
+        # VECTOR SDK HEALTH + AUTO-HEAL (2026-07-19: after this exact cold-boot
+        # path, every tower-side SDK client wedged on ListAnimations; the
+        # proven heal was a full robot reboot). Probe observe-mode and, if the
+        # wedge signature shows, reboot the robot over root ssh and re-probe.
+        # Bounded subprocess so a hung probe can NEVER stall the sentinel.
+        try:
+            py = REPO / ".venv" / "Scripts" / "python.exe"
+            r = subprocess.run(
+                [str(py), str(REPO / "scripts" / "vector_sdk_health.py"),
+                 "--heal", "--dm"],
+                cwd=str(REPO), capture_output=True, text=True, timeout=480)
+            log(f"vector_sdk_health rc={r.returncode} "
+                f"out={(r.stdout or '')[-300:]!r}")
+        except subprocess.TimeoutExpired:
+            log("vector_sdk_health probe timed out (bounded) — continuing boot")
+        except Exception as e:
+            log(f"vector_sdk_health launch failed: {e!r}")
+
         # Wake COGNITION with orientation (the v2 host skips the CLI cold-wake
         # FIRST_MSG, and an unattended boot must not wait ~15min for a cron
         # nudge). The chat-bridge submit alone rewakes Iris via the Stop hook;

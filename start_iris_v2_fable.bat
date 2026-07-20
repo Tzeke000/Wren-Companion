@@ -53,7 +53,10 @@ REM --- own"). Match by SCRIPT NAME across everything I need clean: voice stack
 REM --- (watchdog + daemon + StyleTTS2 mouth), iris_runtime itself, AND any prior
 REM --- iris_body_host (no double-cognition). Now elevated, this reaches an elevated
 REM --- orphan too. SPARES sibling_postoffice (Wren's lifeline) + anything else by name.
-powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voice_watchdog|wren_voice_daemon|wren_styletts_server|iris_runtime|iris_body_host' } | ForEach-Object { Write-Host ('[start_iris_v2_fable.bat] killing stale PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+REM --- NOTE (2026-07-19): the runtime match is iris_runtime\.py (not bare
+REM --- iris_runtime) so the loop-liveness watchdog iris_runtime_watchdog.py
+REM --- SURVIVES the restarts it itself triggers.
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voice_watchdog|wren_voice_daemon|wren_styletts_server|iris_runtime\.py|iris_body_host' } | ForEach-Object { Write-Host ('[start_iris_v2_fable.bat] killing stale PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
 REM --- Kill any stale ORB APP too (Zeke directive 2026-07-08): a ghost iris-control
 REM --- wedged at its splash screen holds the app's single-instance lock, so every
@@ -77,6 +80,12 @@ REM Voice stack (StyleTTS2 mouth :8769 + voice daemon :8770) via the watchdog,
 REM same as start_iris.bat. The watchdog has a named-mutex singleton guard, so a
 REM second launch is a safe no-op if it's already up from a prior boot.
 start "iris-voice-watchdog" /B "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\voice_watchdog.py"
+
+REM Runtime loop-liveness watchdog (2026-07-19: a deadline-less body_dock gRPC
+REM wedged the whole runtime event loop on deployment eve). Watches the loop
+REM heartbeat file; on a wedge it DMs Zeke, writes an auto-handoff note, and
+REM cleanly restarts this stack. Named-mutex singleton = safe double-launch.
+start "iris-runtime-watchdog" /B "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\iris_runtime_watchdog.py"
 
 REM Post-office (letters :5877) + its monitor. Added 2026-07-06: no launcher started
 REM it, so any boot without a manual run left the letters channel dead (Zeke caught
