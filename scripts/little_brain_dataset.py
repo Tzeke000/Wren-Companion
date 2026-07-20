@@ -411,12 +411,26 @@ def v4_knowledge_samples() -> list[dict]:
     return out
 
 
+def v5_grounding_samples() -> list[dict]:
+    """v5 (2026-07-20, post first graded drive — Zeke: 'what she was bad at
+    we fix... limits max and min... what's good we leave alone'). Sensor
+    ranges/judgments/refusals from little_brain_corpus_v5; v4 identity
+    content above stays byte-identical."""
+    from little_brain_corpus_v5 import compose as compose_v5
+    out = []
+    for i, (q, a) in enumerate(compose_v5()):
+        out.append(_mk(SYSTEM_KNOW, q, a))
+        out.append(_mk(None, q, a))                        # bare twin
+    return out
+
+
 def main() -> int:
     tr = harvest_transcript()
     les = lesson_pairs()
     ident = v4_identity_samples()
     know = v4_knowledge_samples()
-    data = tr + ident + know + les
+    ground = v5_grounding_samples()
+    data = tr + ident + know + ground + les
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
@@ -426,6 +440,7 @@ def main() -> int:
     print(f"identity samples: {len(ident)} (unique authored+v3 pairs, "
           f"2 system-conditions each)")
     print(f"knowledge samples:{len(know)}")
+    print(f"grounding samples:{len(ground)} (v5 sensor limits/judgments/refusals)")
     print(f"lesson pairs:     {len(les)}")
     print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
     print(f"memory harvest:   still DROPPED (name-bleed source, per v3 verdict)")
