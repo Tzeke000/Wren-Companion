@@ -185,7 +185,31 @@ def write_incident_note(age: float, action: str) -> None:
         log(f"incident note write failed: {e!r}")
 
 
+def kill_stale_launcher_loops() -> None:
+    """Kill lingering start_iris*.bat cmd.exe loops BEFORE spawning the new bat.
+
+    Why: the launcher bats have their own respawn loop. If we only kill the
+    host, the old bat resurrects its session in parallel with the one we
+    spawn — two full sessions 7s apart (2026-07-19 23:23:58 double-spawn
+    race: watchdog launched start_iris_v2.bat/Opus while the old
+    start_iris_v2_fable.bat loop respawned Fable). Killing a cmd.exe on
+    Windows does NOT cascade to its children, so shared services the bat
+    started (voice watchdog, post-office, daemons) survive this sweep.
+    """
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | "
+          "Where-Object { $_.CommandLine -match 'start_iris' } | "
+          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+          "-ErrorAction SilentlyContinue }")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       timeout=30, capture_output=True)
+        log("stale start_iris*.bat cmd loops swept (double-spawn guard)")
+    except Exception as e:
+        log(f"launcher-loop sweep failed (continuing to relaunch): {e!r}")
+
+
 def restart_stack() -> None:
+    kill_stale_launcher_loops()
     bat = pick_bat()
     flags = (subprocess.CREATE_NEW_CONSOLE
              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
