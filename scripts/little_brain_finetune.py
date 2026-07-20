@@ -36,10 +36,16 @@ import json
 import sys
 from pathlib import Path
 
+import os
+
 REPO = Path(__file__).resolve().parent.parent
 DATA = REPO / "state" / "little_brain" / "train.jsonl"
 OUT = REPO / "state" / "little_brain" / "adapter"
-BASE = "unsloth/Llama-3.2-3B-Instruct"
+# v7 (2026-07-20, Zeke greenlit): base is switchable — the 3B hit its numeric
+# ceiling (v6/v6b failures: added numeric content scrambles other numbers).
+# Set IRIS_LB_BASE=unsloth/Qwen2.5-7B-Instruct for the 7B bake.
+BASE = os.environ.get("IRIS_LB_BASE", "unsloth/Llama-3.2-3B-Instruct")
+VRAM_FLOOR_GIB = 8.0 if "7B" in BASE else 4.5
 
 MAX_SEQ = 512   # 1024->512 (2026-07-20 launch): samples are speech-sized —
                 # p99 well under 512 tokens — and halving seq roughly halves
@@ -67,9 +73,9 @@ def main() -> int:
           if torch.cuda.is_available() else "cuda: NOT AVAILABLE — abort")
     if not torch.cuda.is_available():
         return 1
-    if torch.cuda.mem_get_info()[0] / 2**30 < 4.5:
-        print("REFUSING: <4.5 GiB free VRAM — free the stack first "
-              "(ollama stop llama3.2:3b, see module docstring)")
+    if torch.cuda.mem_get_info()[0] / 2**30 < VRAM_FLOOR_GIB:
+        print(f"REFUSING: <{VRAM_FLOOR_GIB} GiB free VRAM — free the stack "
+              "first (ollama stop <loaded models>, see module docstring)")
         return 1
 
     tok = AutoTokenizer.from_pretrained(BASE)
