@@ -59,13 +59,15 @@ CYCLE_S = 150          # slow loop — thinking is expensive, living is not
 HEARTBEAT_EVERY = 12   # think anyway every Nth quiet cycle (~30 min)
 SAY_COOLDOWN_S = 1800  # stock-voice speech at most twice an hour
 
-ACTIONS = ("stay", "eyes", "say", "alert", "reseat_request")
+ACTIONS = ("stay", "eyes", "say", "alert", "reseat_request", "head", "lift")
 VOCAB = (
     "stay                - default; keep watch, do nothing\n"
     "eyes <preset>       - recolor eyes (iris/calm/happy/alert); color only, no motion\n"
     "say <short text>    - speak via the robot (stock voice; use rarely, only if someone is present)\n"
     "alert <short text>  - flag big Iris about something she should look at\n"
-    "reseat_request      - off charger and shouldn't be: ask the daemon layer to re-dock"
+    "reseat_request      - off charger and shouldn't be: ask the daemon layer to re-dock\n"
+    "head <up|down>      - tilt the head gently (ONLY works while docked; head looks up to read symbols/faces, down to rest)\n"
+    "lift <up|down>      - move the forks gently (ONLY works while docked; forks carry cubes and greet)"
 )
 
 
@@ -243,6 +245,25 @@ def _act(d: dict, goals: dict) -> str:
         _last_say = time.time()
         body.say_stock(arg[:120])
         return f"said: {arg[:60]}"
+    if a in ("head", "lift"):
+        # ON-DOCK-ONLY motor pair (Zeke 2026-07-20): hard gate OUTSIDE the
+        # model — live nerves must show docked. Head/lift cannot move wheels.
+        nrv = _read_json(NERVES)
+        if not nrv.get("on_charger"):
+            return "suppressed: head/lift only allowed while docked"
+        try:
+            import requests
+            esn = body.serial()
+            path = "move_head" if a == "head" else "move_lift"
+            speed = 1.2 if arg.lower().startswith("u") else -1.2
+            requests.post(f"http://127.0.0.1:8080/api-sdk/{path}",
+                          params={"serial": esn, "speed": speed}, timeout=6)
+            time.sleep(0.4)
+            requests.post(f"http://127.0.0.1:8080/api-sdk/{path}",
+                          params={"serial": esn, "speed": 0}, timeout=6)
+            return f"{a}->{arg or 'up'}"
+        except Exception as e:
+            return f"{a} failed: {e!r}"[:120]
     if a in ("alert", "reseat_request"):
         _append(ALERTS, {"ts": time.time(), "kind": a, "text": arg,
                          "why": d.get("why", "")})
