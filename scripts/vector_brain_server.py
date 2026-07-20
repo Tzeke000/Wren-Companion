@@ -117,8 +117,11 @@ def _load_facts() -> str:
     little brain (edit state/vector/local_brain_facts.md, no restart)."""
     try:
         txt = FACTS_PATH.read_text(encoding="utf-8").strip()
+        # Cap raised 2000 -> 6000 (2026-07-19 re-bake): the facts file grew
+        # past 2000 chars and the little brain was silently seeing only the
+        # first ~40% of it. llama3.2 context is plenty for 6KB.
         return ("\n\nCURRENT FACTS (maintained by your big brain, trust "
-                "these):\n" + txt[:2000]) if txt else ""
+                "these):\n" + txt[:6000]) if txt else ""
     except Exception:
         return ""
 
@@ -300,16 +303,26 @@ _ollama_spawn_ts = 0.0
 
 
 def _ensure_ollama() -> bool:
-    """True if the local LLM server answers; if not, spawn `ollama serve`
-    detached (60s spawn cooldown). The tray app's Startup entry usually
-    handles this — this is the belt to that suspender, so the reflex brain
-    survives any boot where the tray flaked (observed 2026-07-13)."""
+    """True if the local LLM server answers AND has models; if not, (re)spawn
+    `ollama serve` detached (60s spawn cooldown). The tray app's Startup
+    entry usually handles this — this is the belt to that suspender, so the
+    reflex brain survives any boot where the tray flaked (observed
+    2026-07-13).
+
+    2026-07-19 sharpening: probe /api/tags, not /api/version. An ENV-BLIND
+    ollama (started without OLLAMA_MODELS, models live on D:) answers
+    /api/version 200 with ZERO models and the old probe called it healthy —
+    the little brain was silently model-less all day. If the server is up
+    but empty, kill it and respawn with the env pinned."""
     global _ollama_spawn_ts
     import requests
+    env_blind = False
     try:
-        r = requests.get(f"{OLLAMA}/api/version", timeout=3)
+        r = requests.get(f"{OLLAMA}/api/tags", timeout=3)
         if r.status_code == 200:
-            return True
+            if r.json().get("models"):
+                return True
+            env_blind = True   # up, but sees no models — broken for us
     except Exception:
         pass
     if not _OLLAMA_EXE.exists():
@@ -320,6 +333,13 @@ def _ensure_ollama() -> bool:
     _ollama_spawn_ts = now
     try:
         import subprocess
+        if env_blind:
+            # kill the model-less server so our env-pinned spawn can bind
+            subprocess.run(["taskkill", "/F", "/IM", "ollama.exe",
+                            "/IM", "ollama app.exe"],
+                           capture_output=True, timeout=15)
+            print("[vector-brain] killed env-blind ollama (0 models)")
+            time.sleep(2)
         env = dict(os.environ)
         env.setdefault("OLLAMA_MODELS", r"D:\C_Offload\ollama_models")
         subprocess.Popen(
@@ -502,11 +522,19 @@ async def chat_completions(request: Request):
     # Route: full Iris (bridge) -> local Iris (Ollama) -> canned line.
     # In local-first mode (breaker tripped) the bridge only gets a short
     # probe so questions stop hanging the full timeout while she's away.
-    local_first = _in_local_first()
-    probe = PROBE_TIMEOUT_S if local_first else TIMEOUT_S
-    reply = await asyncio.to_thread(_ask_with_nudge, probe)
-    _note_bridge_result(timed_out=(reply is None))
-    source = "iris"
+    # TEST HOOK (2026-07-19): header "x-iris-local-only: 1" skips the bridge
+    # entirely so big-Iris can exercise the little brain without waking
+    # herself or waiting out a bridge timeout.
+    local_only = request.headers.get("x-iris-local-only") == "1"
+    if local_only:
+        reply, source, local_first = None, "iris", False
+        print("[vector-brain] local-only test ask (bridge skipped)")
+    else:
+        local_first = _in_local_first()
+        probe = PROBE_TIMEOUT_S if local_first else TIMEOUT_S
+        reply = await asyncio.to_thread(_ask_with_nudge, probe)
+        _note_bridge_result(timed_out=(reply is None))
+        source = "iris"
     if not reply or not str(reply).strip():
         reply = await asyncio.to_thread(_ask_local, messages)
         source = "local"
@@ -514,7 +542,8 @@ async def chat_completions(request: Request):
         reply = FALLBACK
         source = "canned"
     reply = str(reply).strip()
-    if source == "local" and LOCAL_VOICE:
+    if source == "local" and LOCAL_VOICE and not local_only:
+        # (local-only test asks return text silently — no robot audio)
         # little-brain answers come out in IRIS'S voice: we play the audio,
         # wire-pod gets only the animation commands (or a space) to perform.
         swapped = await asyncio.to_thread(_iris_voice_for_local, reply)
