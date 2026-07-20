@@ -97,9 +97,12 @@ def _single_instance() -> bool:
 
 
 def _situation(bat: dict, nrv: dict, pos: dict, goals: dict) -> str:
+    on_chg = nrv.get("on_charger") if "on_charger" in nrv else bat.get("on_charger")
+    stale = " (battery file may be stale; charger flag from live nerves)" \
+        if bat.get("on_charger") != on_chg else ""
     return (
         f"battery: {bat.get('volts', '?')}V level {bat.get('level', '?')} "
-        f"on_charger={bat.get('on_charger')}\n"
+        f"on_charger={on_chg}{stale}\n"
         f"nerves: cliff={nrv.get('cliff')} picked_up={nrv.get('picked_up')} "
         f"touched={nrv.get('touched')} falling={nrv.get('falling')} "
         f"prox_mm={nrv.get('prox_mm')} charger_seen={nrv.get('charger_seen')}\n"
@@ -248,9 +251,12 @@ def _act(d: dict, goals: dict) -> str:
 
 
 def _hard_escalations(bat: dict, nrv: dict, goals: dict) -> str | None:
-    """Sensor -> alert with NO model in the loop. Returns alert text or None."""
+    """Sensor -> alert with NO model in the loop. Returns alert text or None.
+    Charger truth = NERVES (1Hz live); battery.json's flag can freeze stale
+    (2026-07-20: cached 4.0072265/off-charger for an hour while docked)."""
     volts = float(bat.get("volts") or 0)
-    if bat.get("ok") and not bat.get("on_charger") and volts and volts < 3.7:
+    on_chg = nrv.get("on_charger") if "on_charger" in nrv else bat.get("on_charger")
+    if bat.get("ok") and not on_chg and volts and volts < 3.7:
         return f"LOW BATTERY OFF CHARGER: {volts}V — needs re-seat (daemon layer)"
     if nrv.get("picked_up") and goals.get("nobody_home", True):
         return "PICKED UP while nobody should be home — check the room"
