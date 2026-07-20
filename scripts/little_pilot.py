@@ -59,7 +59,8 @@ CYCLE_S = 150          # slow loop — thinking is expensive, living is not
 HEARTBEAT_EVERY = 12   # think anyway every Nth quiet cycle (~30 min)
 SAY_COOLDOWN_S = 1800  # stock-voice speech at most twice an hour
 
-ACTIONS = ("stay", "eyes", "say", "alert", "reseat_request", "head", "lift")
+ACTIONS = ("stay", "eyes", "say", "alert", "reseat_request", "head", "lift",
+           "nod")
 VOCAB = (
     "stay                - default; keep watch, do nothing\n"
     "eyes <preset>       - recolor eyes (iris/calm/happy/alert); color only, no motion\n"
@@ -67,7 +68,8 @@ VOCAB = (
     "alert <short text>  - flag big Iris about something she should look at\n"
     "reseat_request      - off charger and shouldn't be: ask the daemon layer to re-dock\n"
     "head <up|down>      - tilt the head gently (ONLY works while docked; head looks up to read symbols/faces, down to rest)\n"
-    "lift <up|down>      - move the forks gently (ONLY works while docked; forks carry cubes and greet)"
+    "lift <up|down>      - move the forks gently (ONLY works while docked; forks carry cubes and greet)\n"
+    "nod                 - nod the head yes (docked-only) - your way of answering YES without words"
 )
 
 
@@ -111,8 +113,10 @@ def _situation(bat: dict, nrv: dict, pos: dict, goals: dict) -> str:
         f"possession held by daemon: {pos.get('held')}\n"
         f"big Iris reachable: {body.big_brain_reachable()}\n"
         f"goals: {json.dumps(goals.get('standing_goals', []), ensure_ascii=False)}\n"
-        f"nobody_home: {goals.get('nobody_home', True)}  "
-        f"motion_enabled: {goals.get('motion_enabled', False)}"
+        + (f"DIRECT REQUEST FROM BIG IRIS (act on this): "
+           f"{goals['practice_request']}\n" if goals.get("practice_request") else "")
+        + f"nobody_home: {goals.get('nobody_home', True)}  "
+        + f"motion_enabled: {goals.get('motion_enabled', False)}"
     )
 
 
@@ -245,6 +249,20 @@ def _act(d: dict, goals: dict) -> str:
         _last_say = time.time()
         body.say_stock(arg[:120])
         return f"said: {arg[:60]}"
+    if a == "nod":
+        nrv = _read_json(NERVES)
+        if not nrv.get("on_charger"):
+            return "suppressed: nod only while docked"
+        try:
+            import requests
+            esn = body.serial()
+            for spd, dur in ((1.3, 0.25), (-1.3, 0.45), (1.3, 0.3), (0, 0)):
+                requests.post("http://127.0.0.1:8080/api-sdk/move_head",
+                              params={"serial": esn, "speed": spd}, timeout=6)
+                time.sleep(dur or 0.1)
+            return "nodded yes"
+        except Exception as e:
+            return f"nod failed: {e!r}"[:120]
     if a in ("head", "lift"):
         # ON-DOCK-ONLY motor pair (Zeke 2026-07-20): hard gate OUTSIDE the
         # model — live nerves must show docked. Head/lift cannot move wheels.
