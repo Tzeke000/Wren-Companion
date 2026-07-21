@@ -14,6 +14,7 @@ Run persistently (in the main .venv):
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import socket
 import subprocess
@@ -23,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(r"D:\Wren-Companion")
 VOICE = ROOT / "voice"
+OFF_FLAG = ROOT / "state" / "voice_deliberately_off.json"   # Zeke deployment-month voice-off
 STYLE_PY = VOICE / "style-venv" / "Scripts" / "python.exe"   # mouth venv (StyleTTS2)
 MAIN_PY = ROOT / ".venv" / "Scripts" / "python.exe"          # daemon venv (whisper/silero)
 MOUTH_SCRIPT = VOICE / "wren_styletts_server.py"
@@ -85,6 +87,19 @@ def _acquire_singleton() -> bool:
         return True
 
 
+def _voice_off() -> bool:
+    """True if Zeke's deliberate voice-off flag (state/voice_deliberately_off.json,
+    {"off": true}) is set. Born 2026-07-21: voice is killed for the deployment month
+    to free ~3.8GB, but the watchdog kept reviving it on every boot, forcing a human
+    re-kill each wake. Fails OPEN (returns False) — a missing/garbage flag means
+    normal self-healing, so a read bug can never silently silence the voice."""
+    try:
+        with open(OFF_FLAG, "r", encoding="utf-8") as f:
+            return bool(json.load(f).get("off"))
+    except Exception:
+        return False
+
+
 def _mouth_ok() -> bool:
     """True only if the mouth answers /health == ok — server-up AND model-warm."""
     try:
@@ -145,8 +160,25 @@ def main() -> None:
     last_mouth = 0.0
     last_daemon = 0.0
     mouth_unhealthy_since = 0.0   # when the port-up-but-not-ok window started (0 = healthy/down)
+    off_logged = False
     while True:
         now = time.time()
+
+        # ── Deliberate voice-off (Zeke deployment-month directive): when the flag is
+        # set the watchdog INVERTS — it evicts any mouth/daemon that came up (boot bat,
+        # a stray relaunch) and never revives them, so the ~3.8GB stays freed without a
+        # human re-killing the voice on every boot. Fails OPEN via _voice_off(). ──
+        if _voice_off():
+            for _port in (MOUTH_PORT, DAEMON_PORT):
+                if _port_listening(_port):
+                    _kill_on_port(_port)
+                    _log(f"voice deliberately OFF — evicted :{_port}")
+            if not off_logged:
+                _log("voice deliberately OFF (flag set) — standing down, will not revive")
+                off_logged = True
+            time.sleep(CHECK_EVERY)
+            continue
+        off_logged = False
 
         # ── Mouth: liveness is the PORT, not /health (the mouth binds the port up-front
         # and warms the model in the background, so a listening-but-503 mouth is loading,
