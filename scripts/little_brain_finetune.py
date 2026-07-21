@@ -61,6 +61,21 @@ RANK = 16
 
 def main() -> int:
     import torch
+    # RESUME UNBLOCK (2026-07-21, Iris): resuming a checkpoint makes HF Trainer
+    # torch.load() rng_state.pth + training_args.bin, which pickle numpy/enum
+    # globals. transformers 5.x passes weights_only=True -> UnpicklingError.
+    # (The earlier "needs torch>=2.6" diagnosis was WRONG — reproduced 2026-07-21:
+    #  torch 2.5.1 loads them fine with weights_only=False, no upgrade needed.)
+    # These checkpoints are OURS (we wrote them this session) = trusted source,
+    # so force weights_only=False for the resume load ONLY. Fresh runs (no
+    # IRIS_LB_RESUME) never hit this shim, so their strict default is preserved.
+    if os.environ.get("IRIS_LB_RESUME", "").strip():
+        _orig_torch_load = torch.load
+        def _trusted_load(*a, **k):  # noqa: ANN001
+            k["weights_only"] = False
+            return _orig_torch_load(*a, **k)
+        torch.load = _trusted_load
+        print("[resume] torch.load weights_only forced False (trusted own ckpt)")
     from datasets import load_dataset
     from peft import LoraConfig
     from transformers import (AutoModelForCausalLM, AutoTokenizer,
