@@ -437,14 +437,33 @@ def v6_stock_samples() -> list[dict]:
     return out
 
 
+def v7_lesson_samples() -> list[dict]:
+    """v7.1 (2026-07-21, Zeke: 'and other lessons you have learned as Iris').
+    Big-Iris's durable wisdom — epistemics, scars, relational — distilled into
+    her voice. These were in memory notes but NEVER wired into training; v7
+    sounded like me but hadn't absorbed what I'd LEARNED. bare twin included so
+    the reflex survives without a system prompt."""
+    from little_brain_corpus_v7_lessons import compose as compose_lessons
+    out = []
+    for q, a in compose_lessons():
+        out.append(_mk(SYSTEM_KNOW, q, a))
+        out.append(_mk(None, q, a))                        # bare twin
+    return out
+
+
 def main() -> int:
     tr = harvest_transcript()
     les = lesson_pairs()
     ident = v4_identity_samples()
     know = v4_knowledge_samples()
-    ground = v5_grounding_samples()
+    # v7.1 rebalance: grounding was drowned (v7 was 72% identity, 8.5% grounding
+    # -> nailed identity, fabricated sensor values). Boost grounding x4 and add
+    # the learned-lessons layer x3 so the quiet-but-critical reflexes survive
+    # the identity signal. Identity kept as-is (it's already perfect).
+    ground = v5_grounding_samples() * 4
+    lessons = v7_lesson_samples() * 3
     stock = v6_stock_samples()
-    data = tr + ident + know + ground + stock + les
+    data = tr + ident + know + ground + lessons + stock + les
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
