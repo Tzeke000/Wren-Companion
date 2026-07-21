@@ -47,9 +47,13 @@ OUT = REPO / "state" / "little_brain" / "adapter"
 BASE = os.environ.get("IRIS_LB_BASE", "unsloth/Llama-3.2-3B-Instruct")
 VRAM_FLOOR_GIB = 8.0 if "7B" in BASE else 4.5
 
-MAX_SEQ = 512   # 1024->512 (2026-07-20 launch): samples are speech-sized —
+MAX_SEQ = int(os.environ.get("IRIS_LB_SEQ", "512"))
+                # 1024->512 (2026-07-20 launch): samples are speech-sized —
                 # p99 well under 512 tokens — and halving seq roughly halves
-                # activation VRAM; the run shares the card with the voice stack
+                # activation VRAM. Env-overridable since the 7B bake: at seq
+                # 512 the 7B spilled into driver sysmem fallback (12.06/12.29
+                # GiB, 100% util, ~0.004 steps/s = thrash) — IRIS_LB_SEQ=320
+                # keeps it resident.
 EPOCHS = 3
 LR = 2e-4
 RANK = 16
@@ -90,11 +94,16 @@ def main() -> int:
     model.config.use_cache = False
 
     ds = load_dataset("json", data_files=str(DATA), split="train")
+    # IRIS_LB_ATTN_ONLY=1 (7B-on-12GB): dropping the FFN adapters removes the
+    # biggest gradient-memory consumers; attn-only LoRA still carries
+    # persona/knowledge at this scale.
+    targets = (["q_proj", "k_proj", "v_proj", "o_proj"]
+               if os.environ.get("IRIS_LB_ATTN_ONLY") == "1" else
+               ["q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj"])
     peft_cfg = LoraConfig(
         r=RANK, lora_alpha=RANK * 2, lora_dropout=0.05, bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"])
+        task_type="CAUSAL_LM", target_modules=targets)
     cfg = SFTConfig(
         output_dir=str(OUT.parent / "checkpoints"),
         num_train_epochs=EPOCHS,
@@ -106,6 +115,7 @@ def main() -> int:
         logging_steps=5, save_strategy="no",
         bf16=True, max_length=MAX_SEQ,
         gradient_checkpointing=True,
+        optim=os.environ.get("IRIS_LB_OPTIM", "adamw_torch"),
         report_to=[])
     trainer = SFTTrainer(model=model, args=cfg, train_dataset=ds,
                          peft_config=peft_cfg, processing_class=tok)
