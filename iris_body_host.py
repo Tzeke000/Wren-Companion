@@ -807,7 +807,27 @@ async def voice_reader(queue, loop, mic_gate):
         print("\n[host] voice call_start failed (non-fatal, ears still on): " + repr(e), file=sys.stderr)
     print("[host] voice ears: ON - listening via the daemon's rich pipeline (prosody + smart-turn)."
           + ("  barge-in: ON (headphones mode)." if BARGEIN_ON else ""))
+    # Deliberate-off gate + failure backoff (2026-07-20, Zeke in Parsec: the
+    # month-long voice kill turned this loop into "voice listen failed" spam
+    # every 2s — the daemon is dead ON PURPOSE). Flag file wins: sleep quietly.
+    _voff_flag = r"D:\Wren-Companion\state\voice_deliberately_off.json"
+    _voff_warned = False
+    _fail_streak = 0
     while True:
+        try:
+            if os.path.isfile(_voff_flag):
+                if not _voff_warned:
+                    print("[host] voice ears: deliberately OFF (flag file) — "
+                          "sleeping quietly, no error spam.", flush=True)
+                    _voff_warned = True
+                await asyncio.sleep(30.0)
+                continue
+            elif _voff_warned:
+                _voff_warned = False
+                print("[host] voice ears: flag cleared — resuming listen loop.",
+                      flush=True)
+        except Exception:
+            pass
         # Barge-in (2026-07-08): while a SPEAKING turn is in flight (gate cleared),
         # don't hold the mic shut — WATCH it. Headphones mean my TTS never reaches the
         # mic, so confirmed speech here is Zeke talking over me: the daemon stops the
@@ -833,9 +853,20 @@ async def voice_reader(queue, loop, mic_gate):
         await mic_gate.wait()            # gate 1: don't open the mic while I'm in a turn
         try:
             text = await loop.run_in_executor(None, _daemon_listen_once)
+            _fail_streak = 0
         except Exception as e:
-            print("\n[host] voice listen failed (non-fatal): " + repr(e), file=sys.stderr)
-            await asyncio.sleep(2.0)
+            # Backoff (2026-07-20): repeated failures = daemon down. Log the
+            # first few, then go quiet with a capped exponential sleep so an
+            # accidentally-dead daemon can't spam the session either.
+            _fail_streak += 1
+            if _fail_streak <= 3:
+                print("\n[host] voice listen failed (non-fatal): " + repr(e),
+                      file=sys.stderr)
+                if _fail_streak == 3:
+                    print("[host] voice listen: 3 consecutive failures — "
+                          "daemon likely down; going quiet with backoff.",
+                          file=sys.stderr)
+            await asyncio.sleep(min(60.0, 2.0 * (2 ** min(_fail_streak, 5))))
             continue
         # Gate 2 (rewritten 2026-07-09): the ORIGINAL rule dropped any utterance whose
         # listen window saw the mic_gate clear ("a turn spoke during this listen -> the
