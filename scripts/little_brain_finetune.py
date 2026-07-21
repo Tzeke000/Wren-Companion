@@ -129,7 +129,8 @@ def main() -> int:
         #  ~78 total steps at 209 samples / batch 1 / accum 8 / 3 epochs)
         logging_steps=5,
         save_strategy=os.environ.get("IRIS_LB_SAVE", "no"),
-        save_steps=50, save_total_limit=2,
+        save_steps=int(os.environ.get("IRIS_LB_SAVE_STEPS", "25")),
+        save_total_limit=int(os.environ.get("IRIS_LB_SAVE_LIMIT", "3")),
         bf16=True, max_length=MAX_SEQ,
         gradient_checkpointing=True,
         optim=os.environ.get("IRIS_LB_OPTIM", "adamw_torch"),
