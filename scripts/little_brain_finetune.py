@@ -112,14 +112,25 @@ def main() -> int:
         learning_rate=LR, lr_scheduler_type="cosine", warmup_steps=4,
         # (warmup_ratio deprecated in transformers 5.x; 4 steps ≈ 5% of the
         #  ~78 total steps at 209 samples / batch 1 / accum 8 / 3 epochs)
-        logging_steps=5, save_strategy="no",
+        logging_steps=5,
+        save_strategy=os.environ.get("IRIS_LB_SAVE", "no"),
+        save_steps=50, save_total_limit=2,
         bf16=True, max_length=MAX_SEQ,
         gradient_checkpointing=True,
         optim=os.environ.get("IRIS_LB_OPTIM", "adamw_torch"),
         report_to=[])
     trainer = SFTTrainer(model=model, args=cfg, train_dataset=ds,
                          peft_config=peft_cfg, processing_class=tok)
-    trainer.train()
+    # IRIS_LB_RESUME (2026-07-21, post-power-blip): resume a killed bake from its
+    # last checkpoint instead of restarting from step 0. "1"/"true"/"auto" -> let
+    # HF find the latest checkpoint in output_dir; a path -> that exact checkpoint.
+    # Unset (default) -> None -> fresh run, so future bakes are unaffected.
+    _resume = os.environ.get("IRIS_LB_RESUME", "").strip()
+    resume_arg = (True if _resume.lower() in ("1", "true", "auto")
+                  else (_resume or None))
+    if resume_arg:
+        print(f"RESUMING from checkpoint (resume_from_checkpoint={resume_arg})")
+    trainer.train(resume_from_checkpoint=resume_arg)
     trainer.save_model(str(OUT))
     print(f"adapter saved -> {OUT}")
     (OUT.parent / "Modelfile").write_text(
