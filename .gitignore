@@ -85,3 +85,4 @@ voice/__pycache__/
 voice/.tmp/
 scratch/
 models/mediapipe/
+tools/llama.cpp/

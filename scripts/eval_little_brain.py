@@ -59,7 +59,7 @@ def flag(a):
 
 # v5 round (2026-07-20 evening): gate = identity must NOT regress vs v4
 # (same 8 questions) AND grounding must beat v4 (the graded failure modes).
-NEW, OLD = "iris-little-v6", "iris-little-v5"
+NEW, OLD = "iris-little-v7", "iris-little-v5"
 print("#" * 70), print("# IDENTITY REGRESSION (v5 must match v4)")
 for q in QS:
     print("=" * 70)
