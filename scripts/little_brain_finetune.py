@@ -54,7 +54,7 @@ MAX_SEQ = int(os.environ.get("IRIS_LB_SEQ", "512"))
                 # 512 the 7B spilled into driver sysmem fallback (12.06/12.29
                 # GiB, 100% util, ~0.004 steps/s = thrash) — IRIS_LB_SEQ=320
                 # keeps it resident.
-EPOCHS = 3
+EPOCHS = int(os.environ.get("IRIS_LB_EPOCHS", "3"))
 LR = 2e-4
 RANK = 16
 
@@ -121,6 +121,19 @@ def main() -> int:
         device_map={"": 0})
     model.config.use_cache = False
 
+    # IRIS_LB_WARMSTART (2026-07-21, Zeke: "take the already-made v7 and train it
+    # with the new stuff — it already has the old training baked in, saves time").
+    # Continue-train from an EXISTING adapter instead of a fresh LoRA: load v7's
+    # adapter as a TRAINABLE init on the 4-bit base, then keep training on the
+    # rebalanced data. Fewer epochs needed (identity's already learned). Set to
+    # the adapter dir path. Unset -> fresh LoRA as before.
+    _warm = os.environ.get("IRIS_LB_WARMSTART", "").strip()
+    if _warm:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, _warm, is_trainable=True)
+        print(f"[warm-start] loaded adapter {_warm} as trainable init "
+              f"(epochs={EPOCHS})", flush=True)
+
     ds = load_dataset("json", data_files=str(DATA), split="train")
     # IRIS_LB_ATTN_ONLY=1 (7B-on-12GB): dropping the FFN adapters removes the
     # biggest gradient-memory consumers; attn-only LoRA still carries
@@ -149,7 +162,8 @@ def main() -> int:
         optim=os.environ.get("IRIS_LB_OPTIM", "adamw_torch"),
         report_to=[])
     trainer = SFTTrainer(model=model, args=cfg, train_dataset=ds,
-                         peft_config=peft_cfg, processing_class=tok)
+                         peft_config=(None if _warm else peft_cfg),
+                         processing_class=tok)
     # IRIS_LB_RESUME (2026-07-21, post-power-blip): resume a killed bake from its
     # last checkpoint instead of restarting from step 0. "1"/"true"/"auto" -> let
     # HF find the latest checkpoint in output_dir; a path -> that exact checkpoint.
