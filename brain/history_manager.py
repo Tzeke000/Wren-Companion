@@ -6,7 +6,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fury import HistoryManager
+try:
+    # Legacy Ava-era chat-history auto-compaction (summarizes old turns via
+    # a local mistral model). `fury` is an external dep that never came across
+    # in the Wren/Iris fork; the Iris regime replaced this path with iris_llm.
+    # Guard the import so a missing `fury` DISABLES compaction instead of
+    # crash-on-import killing the whole avaagent body daemon (2026-07-22).
+    from fury import HistoryManager
+except ImportError:
+    HistoryManager = None
 
 
 class AvaHistoryManager:
@@ -111,6 +119,9 @@ class AvaHistoryManager:
 
     def _run_fury_compaction(self, messages: list[dict[str, str]]) -> str:
         if not messages:
+            return ""
+        if HistoryManager is None:
+            # fury unavailable in this fork — skip compaction, return no summary.
             return ""
         mgr = HistoryManager(
             history=[],

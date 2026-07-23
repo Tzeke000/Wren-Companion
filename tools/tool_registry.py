@@ -25,6 +25,26 @@ ToolHandler = Callable[[dict[str, Any], dict[str, Any]], ToolResult]
 _POLL_INTERVAL = 5.0
 _TOOLS_ROOT = Path(__file__).parent
 
+# Only these subdirectories are scanned for tool modules. The registry
+# exec()s every .py it finds, so the scan MUST be limited to dirs we own.
+# 2026-07-22: tools/llama.cpp (full upstream clone kept for GGUF conversion)
+# sat inside tools/, and the old `_TOOLS_ROOT.rglob("*.py")` tried to import
+# ~1000 foreign files at every boot AND every 5s watcher poll — one of them
+# blocks forever, which stalled bootstrap mid-scan (registry stuck at 19
+# tools, orb_http/5876 never started) and wedged iris_tool_reload behind it.
+_TOOL_CATEGORIES = ("system", "web", "creative", "games", "ava_built", "dev")
+
+
+def _iter_tool_files() -> list[Path]:
+    """All candidate tool files: category dirs (recursive) + tools/ top level."""
+    files: list[Path] = []
+    for cat in _TOOL_CATEGORIES:
+        d = _TOOLS_ROOT / cat
+        if d.is_dir():
+            files.extend(d.rglob("*.py"))
+    files.extend(_TOOLS_ROOT.glob("*.py"))
+    return sorted(f for f in files if "__pycache__" not in f.parts)
+
 
 @dataclass
 class ToolDef:
@@ -97,7 +117,7 @@ def _scan_and_reload() -> list[dict[str, Any]]:
     """Scan tools/ for new or modified .py files and reload them."""
     results: list[dict[str, Any]] = []
     skip = {"__init__.py", "tool_registry.py"}
-    for py_file in sorted(_TOOLS_ROOT.rglob("*.py")):
+    for py_file in _iter_tool_files():
         if py_file.name in skip or py_file.name.startswith("_"):
             continue
         try:

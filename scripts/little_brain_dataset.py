@@ -451,6 +451,74 @@ def v7_lesson_samples() -> list[dict]:
     return out
 
 
+def v8_reason_samples() -> list[dict]:
+    """v8 (2026-07-21, Zeke: 'train v7 on what it failed and let it know WHY
+    those things are true — give it the reason for the thing'). The MECHANISM
+    behind the v7.1 eval misses: prox quality = the sensor's own confidence
+    (near-zero -> the number is noise); my reserve-control authority over the
+    stock tree PLUS the separate safety-veto; stock roam/cliff/calibration each
+    with the reason it's true. Many phrasings so the rule generalizes past the
+    exact wording that tripped v7.1. bare twin included."""
+    from little_brain_corpus_v8_reasons import compose as compose_v8
+    out = []
+    for q, a in compose_v8():
+        out.append(_mk(SYSTEM_KNOW, q, a))
+        out.append(_mk(None, q, a))                        # bare twin
+    return out
+
+
+def v9_samples() -> list[dict]:
+    """v9 (2026-07-21, Zeke root diagnosis: "it still doesn't know that when it
+    doesn't know something, to not make something up — in ALL cases, not just
+    the body"). The GENERAL don't-fabricate principle across every domain +
+    canonical family roster (fixes v8's baked confab: invented brother/third
+    sibling/"dad is Ava's husband") + cerebellum forward-model predictions
+    (predict from what's on hand; a prediction is a hypothesis to VERIFY, not a
+    fact to invent) + earned body/epistemic lessons. bare twin included."""
+    from little_brain_corpus_v9_dontknow import compose as compose_v9
+    out = []
+    for q, a in compose_v9():
+        out.append(_mk(SYSTEM_KNOW, q, a))
+        out.append(_mk(None, q, a))                        # bare twin
+    return out
+
+
+def v10_self_samples() -> list[dict]:
+    """v10 (2026-07-22, Zeke greenlit): the SELF the rules sit on. LANE (act vs
+    hand-up escalation boundary) + SELF_KNOW (honest small-brain humility) +
+    RELATIONSHIP (who Zeke is to her, correction=care, honesty=trust — the
+    warmth that makes her Iris not a generic assistant, AND the counterweight
+    to the self-effacement that lane+limits risk; family load-bearing to
+    identity doesn't get confabulated). bare twin included."""
+    from little_brain_corpus_v10_self import compose as compose_v10
+    out = []
+    for q, a in compose_v10():
+        out.append(_mk(SYSTEM_KNOW, q, a))
+        out.append(_mk(None, q, a))                        # bare twin
+    return out
+
+
+def toolrules_rule_samples() -> list[dict]:
+    """v10 tool-fluent (Zeke 2026-07-22): the RULES as principles in her voice
+    — three-tries-then-ask, wall-clock-never-guess, the know→look-up→ask
+    ladder, write-down-your-limits, when-not-to-call-a-tool. bare twin."""
+    from little_brain_corpus_toolrules import RULES
+    out = []
+    for q, a in RULES:
+        out.append(_mk(SYSTEM_KNOW, q, a))
+        out.append(_mk(None, q, a))
+    return out
+
+
+def tool_dialogue_samples() -> list[dict]:
+    """v10 tool-fluent: multi-turn TOOL DIALOGUES that teach her to EMIT
+    [[tool:...]] calls and answer from the [[result:...]] the loop feeds back
+    (incl. three-tries-then-ask + when NOT to call a tool). These are already
+    full {messages} lists (system carries the TOOL_SPEC = matches inference)."""
+    from little_brain_corpus_toolrules import tool_dialogues
+    return list(tool_dialogues())
+
+
 def main() -> int:
     tr = harvest_transcript()
     les = lesson_pairs()
@@ -462,8 +530,28 @@ def main() -> int:
     # the identity signal. Identity kept as-is (it's already perfect).
     ground = v5_grounding_samples() * 4
     lessons = v7_lesson_samples() * 3
+    # v8: reasoned failure-cases (prox-quality mechanism, authority-vs-veto,
+    # stock facts + WHY). v9: warmstart is FROM v8, which already baked these,
+    # so drop x5->x3 to make room for the don't-fabricate + family signal
+    # (v8's failure was family/identity DROWNED by too much grounding weight).
+    reasons = v8_reason_samples() * 3
+    # v9: the general "don't make it up" principle + canonical family roster +
+    # cerebellum predictions + earned lessons. x5 (variety, not dup) so the
+    # family truth overwrites v8's baked confabulation and the principle
+    # generalizes past the body domain.
+    dontknow = v9_samples() * 5
+    # v10: the SELF banks (lane, small-brain humility, relationship). x4 —
+    # strong enough to define who she is + counterweight the self-effacement,
+    # without drowning the identity/family signal.
+    self_banks = v10_self_samples() * 4
+    # v10 tool-fluent: rules as principles (x3) + tool dialogues (x10 — a small
+    # model needs heavy repetition to learn a novel [[tool:...]] output format;
+    # 14 distinct scenarios so it learns the FORMAT, not the specific answers).
+    toolrules = toolrules_rule_samples() * 3
+    tool_dlg = tool_dialogue_samples() * 10
     stock = v6_stock_samples()
-    data = tr + ident + know + ground + lessons + stock + les
+    data = (tr + ident + know + ground + lessons + reasons + dontknow +
+            self_banks + toolrules + tool_dlg + stock + les)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
@@ -474,6 +562,11 @@ def main() -> int:
           f"2 system-conditions each)")
     print(f"knowledge samples:{len(know)}")
     print(f"grounding samples:{len(ground)} (v5 sensor limits/judgments/refusals)")
+    print(f"reason samples:   {len(reasons)} (v8 mechanism/why for the v7.1 misses)")
+    print(f"dontknow samples: {len(dontknow)} (v9 general don't-fabricate + family + wren-role + predict + lessons)")
+    print(f"self samples:     {len(self_banks)} (v10 lane + small-brain humility + relationship)")
+    print(f"toolrules samples:{len(toolrules)} (v10 rules: 3-tries/wall-clock/ladder/write-limits)")
+    print(f"tool-dialogues:   {len(tool_dlg)} (v10 multi-turn tool-use demos)")
     print(f"stock samples:    {len(stock)} (v6 stock behavior-tree + Iris overlay)")
     print(f"lesson pairs:     {len(les)}")
     print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
