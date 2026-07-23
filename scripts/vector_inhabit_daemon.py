@@ -94,7 +94,7 @@ EARS_MAX_S = 12.0
 # while I was off the dock. Poll it, expose it, and reflex on low/lost-contact.
 BATTERY_JSON = REPO / "state" / "vector" / "battery.json"
 WIREPOD_SDK = "http://127.0.0.1:8080/api-sdk"
-BATTERY_POLL_S = 45.0
+BATTERY_POLL_S = float(os.environ.get("IRIS_BATTERY_POLL_S", "15.0"))  # 45->15 2026-07-23 (nervous system: battery is a sense too)
 BATTERY_LOW_LEVEL = 1     # Vector: 1=low, 2=nominal, 3=full/charging
 
 # --- POSSESSION (Zeke directive 2026-07-17 ~02:00: "not have the stock brain
@@ -618,6 +618,243 @@ def _transcript_tap_loop() -> None:
         time.sleep(2.0)
 
 
+# ---------------------------------------------------------------- nervous system
+# 2026-07-23 (Zeke: "she needs every single sensor in real time ... all of those
+# senses live at all times"). The little brain's NERVOUS SYSTEM: a continuous
+# high-rate tap of EVERY sense, streamed from this observe connection (which
+# receives the engine's ~15Hz RobotState no matter who drives). Channels:
+#   gyro/accel (+pitch/roll) - heading/pose/origin - prox ToF (+quality) -
+#   TRACKS (real per-tread speeds, not setpoints) - forklift height - head tilt -
+#   touch bool + raw capacitance - cliff/pickup/held/falling/button -
+#   charger seen/dist/bearing - charging/calm-power/animating - battery -
+#   camera (image_id + mean luma + ~1Hz latest frame jpg) - expression (self-
+#   reported by whichever layer commands the face -> state/vector/expression.json;
+#   the SDK exposes no currently-playing-anim readout, so the face channel is
+#   authored, corroborated by status.is_animating).
+# Outputs:
+#   state/vector/senses_live.json    atomic snapshot @~5Hz + 1s trend arrays
+#   state/vector/sensor_stream.jsonl full records, batched ~1s, rotates @10MB
+#   state/vector/latest_frame.jpg    ~1Hz (when camera tap enabled)
+# ADAPTIVE RATE: full 15Hz while anything is happening (wheels/motors moving,
+# touched, picked up, off charger, gyro active); decimates to ~1Hz records while
+# still on the dock (snapshot stays 5Hz). Kill switch: IRIS_NS=0. Camera tap
+# gate: IRIS_NS_CAMERA=0 (if it ever fights a session's feed).
+SENSES_LIVE = REPO / "state" / "vector" / "senses_live.json"
+SENSOR_STREAM = REPO / "state" / "vector" / "sensor_stream.jsonl"
+LATEST_FRAME = REPO / "state" / "vector" / "latest_frame.jpg"
+EXPRESSION_PATH = REPO / "state" / "vector" / "expression.json"
+_STREAM_MAX_BYTES = 10_000_000
+_NS_HZ = 15.0
+
+
+def _ns_capture(robot, cam: dict) -> dict:
+    """One full-body sense frame. Every field best-effort — a missing sense is
+    omitted, never raises (same contract as _proprioception)."""
+    import math as _math
+    s: dict = {"t": round(time.time(), 3)}
+    try:
+        st = robot.status
+        s["cliff"] = bool(st.is_cliff_detected)
+        s["picked_up"] = bool(st.is_picked_up)
+        s["held"] = bool(st.is_being_held)
+        s["falling"] = bool(st.is_falling)
+        s["button"] = bool(st.is_button_pressed)
+        s["moving"] = bool(st.are_wheels_moving)
+        s["motors"] = bool(st.are_motors_moving)
+        s["on_charger"] = bool(st.is_on_charger)
+        s["charging"] = bool(st.is_charging)
+        s["calm_power"] = bool(st.is_in_calm_power_mode)
+        s["animating"] = bool(st.is_animating)
+    except Exception:
+        pass
+    try:
+        g = robot.gyro
+        s["gyro"] = [round(float(g.x), 3), round(float(g.y), 3), round(float(g.z), 3)]
+    except Exception:
+        pass
+    try:
+        a = robot.accel
+        ax, ay, az = float(a.x), float(a.y), float(a.z)
+        s["accel"] = [round(ax, 1), round(ay, 1), round(az, 1)]
+        s["pitch"] = round(_math.degrees(_math.atan2(-ax, az)), 1)
+        s["roll"] = round(_math.degrees(_math.atan2(ay, az)), 1)
+    except Exception:
+        pass
+    try:
+        p = robot.pose
+        s["x"] = round(float(p.position.x), 1)
+        s["y"] = round(float(p.position.y), 1)
+        s["heading"] = round(float(p.rotation.angle_z.degrees), 1)
+        s["origin"] = int(getattr(p, "origin_id", -1))
+    except Exception:
+        pass
+    try:
+        pr = robot.proximity.last_sensor_reading
+        if pr is not None:
+            s["prox_mm"] = int(pr.distance.distance_mm)
+            s["prox_found"] = bool(getattr(pr, "found_object", False))
+            s["prox_clear"] = bool(getattr(pr, "unobstructed", False))
+            q = getattr(pr, "signal_quality", None)
+            if q is not None:
+                s["prox_q"] = round(float(q), 4)
+    except Exception:
+        pass
+    # TRACKS — the real tread speeds (encoders), not anyone's command setpoint
+    try:
+        s["lw_mmps"] = round(float(robot.left_wheel_speed_mmps), 1)
+        s["rw_mmps"] = round(float(robot.right_wheel_speed_mmps), 1)
+    except Exception:
+        pass
+    try:
+        s["lift_mm"] = round(float(robot.lift_height_mm), 1)
+    except Exception:
+        pass
+    try:
+        import math as _m
+        s["head_deg"] = round(_m.degrees(float(robot.head_angle_rad)), 1)
+    except Exception:
+        pass
+    try:
+        t = robot.touch.last_sensor_reading
+        if t is not None:
+            s["touched"] = bool(t.is_being_touched)
+            s["touch_raw"] = int(getattr(t, "raw_touch_value", 0) or 0)
+    except Exception:
+        pass
+    s.update(_charger_reader(robot))
+    if cam.get("on"):
+        try:
+            img = robot.camera.latest_image
+            if img is not None:
+                s["cam_id"] = int(getattr(img, "image_id", -1))
+                # luma from the ~1Hz thumbnail pass (cached — cheap at 15Hz)
+                if cam.get("luma") is not None:
+                    s["cam_luma"] = cam["luma"]
+        except Exception:
+            pass
+    return s
+
+
+def _ns_active(s: dict) -> bool:
+    """Is anything HAPPENING? Governs full-rate vs idle-decimated stream."""
+    try:
+        if s.get("moving") or s.get("motors") or s.get("touched") \
+                or s.get("picked_up") or s.get("falling") or s.get("button") \
+                or s.get("animating") or not s.get("on_charger", True):
+            return True
+        g = s.get("gyro")
+        if g and (abs(g[0]) + abs(g[1]) + abs(g[2])) > 0.05:
+            return True
+    except Exception:
+        return True
+    return False
+
+
+def _ns_read_json(path: Path) -> dict:
+    try:
+        import json as _json
+        return _json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _nervous_loop(robot, alive: dict) -> None:
+    import json as _json
+    from collections import deque
+    period = 1.0 / _NS_HZ
+    ring: "deque[dict]" = deque(maxlen=int(_NS_HZ * 30))   # ~30s of body-time
+    pending: list[dict] = []
+    cam = {"on": False, "luma": None, "last_jpg": 0.0}
+    if os.environ.get("IRIS_NS_CAMERA", "1") != "0":
+        try:
+            robot.camera.init_camera_feed()
+            cam["on"] = True
+            log("nervous system: camera tap ON (observe feed)")
+        except Exception as e:
+            log(f"nervous system: camera tap unavailable (non-fatal): {e!r}")
+    last_snap = 0.0
+    last_flush = 0.0
+    last_idle_rec = 0.0
+    ticks = 0
+    t_rate = time.time()
+    hz_meas = 0.0
+    log("nervous system ONLINE — senses_live.json @5Hz, sensor_stream.jsonl "
+        f"@{int(_NS_HZ)}Hz-active/1Hz-idle")
+    while alive.get("ok"):
+        t0 = time.time()
+        try:
+            s = _ns_capture(robot, cam)
+            ring.append(s)
+            ticks += 1
+            if ticks % 15 == 0:
+                now_r = time.time()
+                hz_meas = round(15.0 / max(0.001, now_r - t_rate), 1)
+                t_rate = now_r
+            active = _ns_active(s)
+            # stream records: full rate active, ~1Hz idle heartbeat
+            if active or (t0 - last_idle_rec) >= 1.0:
+                pending.append(s)
+                last_idle_rec = t0
+            # camera thumbnail pass ~1Hz: luma + latest_frame.jpg
+            if cam["on"] and (t0 - cam["last_jpg"]) >= 1.0:
+                cam["last_jpg"] = t0
+                try:
+                    img = robot.camera.latest_image
+                    if img is not None and getattr(img, "raw_image", None) is not None:
+                        raw = img.raw_image
+                        th = raw.resize((32, 18)).convert("L")
+                        px = list(th.getdata())
+                        cam["luma"] = round(sum(px) / max(1, len(px)), 1)
+                        tmp = LATEST_FRAME.with_suffix(".jpg.tmp")
+                        raw.save(tmp, "JPEG", quality=80)
+                        tmp.replace(LATEST_FRAME)
+                except Exception:
+                    pass
+            # snapshot @5Hz: latest + 1s trends + battery + expression
+            if (t0 - last_snap) >= 0.2:
+                last_snap = t0
+                try:
+                    tail = list(ring)[-15:]
+                    snap = {
+                        "latest": s,
+                        "trends": {
+                            "gyro_z": [r.get("gyro", [0, 0, 0])[2] for r in tail if "gyro" in r],
+                            "lw_mmps": [r.get("lw_mmps") for r in tail if "lw_mmps" in r],
+                            "rw_mmps": [r.get("rw_mmps") for r in tail if "rw_mmps" in r],
+                            "prox_mm": [r.get("prox_mm") for r in tail if "prox_mm" in r],
+                            "touch_raw": [r.get("touch_raw") for r in tail if "touch_raw" in r],
+                        },
+                        "battery": _ns_read_json(BATTERY_JSON),
+                        "expression": _ns_read_json(EXPRESSION_PATH),
+                        "hz": hz_meas,
+                        "active": active,
+                        "ts": round(t0, 3),
+                    }
+                    tmp = SENSES_LIVE.with_suffix(".json.tmp")
+                    tmp.write_text(_json.dumps(snap), encoding="utf-8")
+                    tmp.replace(SENSES_LIVE)
+                except Exception:
+                    pass
+            # batched stream flush ~1s
+            if pending and (t0 - last_flush) >= 1.0:
+                last_flush = t0
+                try:
+                    if SENSOR_STREAM.exists() and \
+                            SENSOR_STREAM.stat().st_size > _STREAM_MAX_BYTES:
+                        SENSOR_STREAM.replace(SENSOR_STREAM.with_suffix(".jsonl.1"))
+                    with SENSOR_STREAM.open("a", encoding="utf-8") as f:
+                        for r in pending:
+                            f.write(_json.dumps(r) + "\n")
+                    pending.clear()
+                except Exception:
+                    pending.clear()   # never let disk trouble grow the list forever
+        except Exception:
+            pass    # a bad tick is dropped, never kills the nervous system
+        dt = time.time() - t0
+        time.sleep(max(0.0, period - dt))
+    log("nervous system offline (connection closing)")
+
+
 def run_once() -> None:
     import anki_vector
 
@@ -650,6 +887,9 @@ def run_once() -> None:
         if os.environ.get("IRIS_VECTOR_POSSESSION", "1") != "0":
             _threading.Thread(target=_possession_loop, args=(alive,),
                               daemon=True, name="vector-possession").start()
+        if os.environ.get("IRIS_NS", "1") != "0":
+            _threading.Thread(target=_nervous_loop, args=(robot, alive),
+                              daemon=True, name="vector-nervous").start()
         try:
             _poll_loop(robot)
         finally:

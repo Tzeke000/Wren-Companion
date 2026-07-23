@@ -33,6 +33,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO))   # for brain.little_brain_tools (senses_now)
 import vector_intent_exec as body  # serial/say_stock/set_eyes/big_brain_reachable
 
 STATE = REPO / "state"
@@ -53,6 +54,11 @@ FACTS = STATE / "vector" / "local_brain_facts.md"
 BATTERY = STATE / "vector" / "battery.json"
 NERVES = STATE / "vector" / "nerves.json"
 POSSESSION = STATE / "vector" / "possession_status.json"
+# --- NERVOUS SYSTEM (2026-07-23, Zeke: "every single sensor in real time"):
+# the inhabit daemon's high-rate tap. The pilot PULSES on this at ~1s — live
+# edge events wake the full think cycle instantly instead of waiting ~150s.
+SENSES = STATE / "vector" / "senses_live.json"
+SENSE_POLL_S = float(os.environ.get("IRIS_SENSE_POLL_S", "1.0"))
 # --- REFLEX LAYER (2026-07-23, Zeke: "keep working towards small brain = reflexes") ---
 REFLEX_SHADOW = LB / "reflex_shadow.jsonl"   # shadow log: what the reflex WOULD do, disarmed
 # webcam mean-brightness floor for "light enough to see the charger marker".
@@ -112,11 +118,25 @@ def _single_instance() -> bool:
     return True
 
 
+def _senses_line() -> str:
+    """One live-sense line from her nervous system (same formatter her own
+    senses_now tool uses — so what the pilot shows her matches what she'd read
+    herself). Empty string when the feed is down; never raises."""
+    try:
+        from brain.little_brain_tools import senses_now
+        line = senses_now()
+        return line if line.startswith("[live") else ""
+    except Exception:
+        return ""
+
+
 def _situation(bat: dict, nrv: dict, pos: dict, goals: dict) -> str:
     on_chg = nrv.get("on_charger") if "on_charger" in nrv else bat.get("on_charger")
     stale = " (battery file may be stale; charger flag from live nerves)" \
         if bat.get("on_charger") != on_chg else ""
+    live = _senses_line()
     return (
+        (f"LIVE SENSES: {live}\n" if live else "") +
         f"battery: {bat.get('volts', '?')}V level {bat.get('level', '?')} "
         f"on_charger={on_chg}{stale}\n"
         f"nerves: cliff={nrv.get('cliff')} picked_up={nrv.get('picked_up')} "
@@ -189,7 +209,11 @@ def _suggest(task: str, bat: dict, nrv: dict) -> None:
         "the grades teach you. Be concrete and brief.\n" +
         (teach + "\n" if teach else "") +
         "Answer ONLY JSON: {\"suggestion\": ..., \"why\": ...}")
-    situation = (f"her task: {task}\nbattery: {bat.get('volts')}V "
+    live = _senses_line()
+    situation = (f"her task: {task}\n"
+                 + (f"LIVE SENSES (your nervous system, right now): {live}\n"
+                    if live else "")
+                 + f"battery: {bat.get('volts')}V "
                  f"on_charger={bat.get('on_charger')}\n"
                  f"nerves: cliff={nrv.get('cliff')} prox_mm={nrv.get('prox_mm')} "
                  f"charger_seen={nrv.get('charger_seen')} "
@@ -459,11 +483,36 @@ def main() -> int:
     if not _single_instance():
         print("another little_pilot is alive — exiting")
         return 0
-    print(f"little pilot up: model={MODEL} cycle={CYCLE_S}s")
+    print(f"little pilot up: model={MODEL} cycle={CYCLE_S}s "
+          f"(live pulse {SENSE_POLL_S}s)")
     prev, quiet_cycles = {}, HEARTBEAT_EVERY  # first cycle thinks (orientation)
     last_suggest = 0.0
+    last_full = 0.0     # when the full (safety+think) cycle last ran
+    live_prev: dict = {}
     while True:
         try:
+            # ── LIVE PULSE (~1s): her nervous system. A cheap snapshot read;
+            # edge events here wake the FULL cycle instantly — she now lives
+            # inside the feed instead of waking every ~150s (2026-07-23, Zeke:
+            # "all of those senses live at all times").
+            sl = _read_json(SENSES)
+            fresh = (time.time() - float(sl.get("ts") or 0.0)) < 3.0
+            live = (sl.get("latest") or {}) if fresh else {}
+            fast_events = []
+            if live:
+                for k in ("touched", "picked_up", "falling", "cliff", "button"):
+                    if live.get(k) and not live_prev.get(k):
+                        fast_events.append(f"{k} fired (live)")
+                if live.get("moving") and not live_prev.get("moving"):
+                    fast_events.append("tracks started moving (live)")
+                if live_prev.get("on_charger") and not live.get("on_charger"):
+                    fast_events.append("LEFT the charger (live)")
+                live_prev = live
+            due = (time.time() - last_full) >= CYCLE_S
+            if not (fast_events or due or _watch_state()):
+                time.sleep(SENSE_POLL_S)
+                continue
+            last_full = time.time()
             # ── SAFETY FIRST: sensors + reflexes run EVERY cycle, in EVERY mode.
             # A frozen-mid-drive must never disable the reflexes, so this sits
             # ABOVE the watch/normal split (2026-07-23 fix: watch-mode used to
@@ -499,7 +548,7 @@ def main() -> int:
             if hard:
                 _append(ALERTS, {"ts": time.time(), "kind": "HARD", "text": hard})
 
-            events = []
+            events = list(fast_events)   # live-pulse edges join the record
             for k in ("on_charger",):
                 if prev.get("bat", {}).get(k) is not None and \
                         bat.get(k) != prev["bat"].get(k):
@@ -536,7 +585,9 @@ def main() -> int:
             prev = {"bat": bat, "nrv": nrv, "goals": goals}
         except Exception as e:
             _append(LOG, {"ts": time.time(), "loop_error": repr(e)[:300]})
-        time.sleep(CYCLE_S)
+        # the live pulse at the loop top is the pacemaker now — the old
+        # time.sleep(CYCLE_S) is retired; `due` gates the full cycle instead.
+        time.sleep(SENSE_POLL_S)
 
 
 if __name__ == "__main__":

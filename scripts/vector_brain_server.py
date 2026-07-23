@@ -83,6 +83,9 @@ FACTS_PATH = REPO / "state" / "vector" / "local_brain_facts.md"
 LAST_SPOKE_PATH = REPO / "state" / "vector" / "last_spoke.json"
 MOUTH_SYNTH = "http://127.0.0.1:8769/synth"
 WIREPOD_SDK = "http://127.0.0.1:8080/api-sdk"
+# nervous-system expression channel (2026-07-23): whoever commands the face
+# self-reports here; the inhabit daemon merges it into senses_live.json.
+_EXPRESSION_JSON = REPO / "state" / "vector" / "expression.json"
 LOCAL_VOICE = os.environ.get("IRIS_LOCAL_VOICE", "1") != "0"
 
 _breaker_lock = threading.Lock()
@@ -199,6 +202,17 @@ def _perform_body_actions(reply: str, esn: str | None) -> None:
         if k == "eyes":
             hue, sat = _EYE_PRESETS.get(a, _EYE_PRESETS["iris"])
             _p("custom_eye_color", {"hue": f"{hue:.3f}", "sat": f"{sat:.3f}"})
+            # face is authored -> self-report to the nervous system's expression
+            # channel (senses_live.json merges it; she can feel her own face)
+            try:
+                tmp = _EXPRESSION_JSON.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps({"ts": time.time(), "kind": "eyes",
+                                           "value": a or "iris",
+                                           "source": "little_brain"}),
+                               encoding="utf-8")
+                tmp.replace(_EXPRESSION_JSON)
+            except Exception:
+                pass
             continue
         if not MOVE_OK:
             continue  # motion gated until Zeke enables IRIS_VECTOR_MOVE_OK
@@ -417,6 +431,18 @@ def _ask_local(messages: list[dict]) -> str | None:
         return None
     system = (wirepod_sys + "\n\n" if wirepod_sys else "") \
         + IRIS_LOCAL_SYSTEM + _load_facts()
+    # NERVOUS SYSTEM (2026-07-23): ground every conversation in her LIVE body —
+    # the current sense snapshot rides in the system layer so "how are you /
+    # what do you feel" is answered from the feed, not from imagination. Only
+    # a FRESH feed is injected; a stale/absent feed injects nothing, so her
+    # trained refuse-if-absent behavior still applies.
+    try:
+        _live = _lbt().senses_now()
+        if _live.startswith("[live"):
+            system += ("\n\nYOUR BODY RIGHT NOW (live sensor feed - use these "
+                       "real readings, never invent one): " + _live)
+    except Exception:
+        pass
     _tools_on = os.environ.get("IRIS_LB_TOOLS", "").lower() in (
         "1", "true", "yes", "on")
     if _tools_on:
