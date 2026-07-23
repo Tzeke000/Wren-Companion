@@ -234,7 +234,91 @@ def ask_big_iris(request: str = "") -> str:
         return f"couldn't file the escalation: {e!r}"
 
 
+# nervous-system snapshot (written @5Hz by the inhabit daemon's nervous loop)
+SENSES_LIVE = Path(__file__).resolve().parent.parent / \
+    "state" / "vector" / "senses_live.json"
+_SENSES_STALE_S = 2.5
+
+
+def senses_now(_: str = "") -> str:
+    """Her NERVOUS SYSTEM read: the live, continuous feed of every body sense
+    (2026-07-23, Zeke: 'she needs every single sensor in real time'). Grounding
+    contract baked in: if the feed is stale or absent she says SO — she never
+    fills a sense with a guess."""
+    import json as _json
+    import time as _time
+    try:
+        d = _json.loads(SENSES_LIVE.read_text(encoding="utf-8"))
+    except Exception:
+        return ("my live sense feed isn't available right now - I can't feel "
+                "my body, so I won't guess at it")
+    age = _time.time() - float(d.get("ts") or 0.0)
+    if age > _SENSES_STALE_S:
+        return (f"my sense feed is STALE ({age:.0f}s old) - treat nothing in it "
+                f"as current; I won't report stale readings as live")
+    s = d.get("latest") or {}
+    tr = d.get("trends") or {}
+    bat = d.get("battery") or {}
+    exp = d.get("expression") or {}
+    bits = []
+    # posture / motion
+    lw, rw = s.get("lw_mmps"), s.get("rw_mmps")
+    if lw is not None:
+        bits.append(f"tracks L{lw:+.0f}/R{rw:+.0f} mm/s"
+                    + (" (moving)" if s.get("moving") else " (still)"))
+    g = s.get("gyro")
+    if g:
+        bits.append(f"gyro z {g[2]:+.2f} rad/s")
+    if s.get("heading") is not None:
+        bits.append(f"heading {s['heading']:.0f}deg")
+    if s.get("pitch") is not None:
+        bits.append(f"pitch {s['pitch']:+.0f} roll {s.get('roll', 0):+.0f}")
+    if s.get("head_deg") is not None:
+        bits.append(f"head {s['head_deg']:+.0f}deg")
+    if s.get("lift_mm") is not None:
+        bits.append(f"lift {s['lift_mm']:.0f}mm")
+    # world
+    if s.get("prox_mm") is not None:
+        q = s.get("prox_q")
+        qual = (f" q={q:.3f}" + (" UNRELIABLE" if (q is not None and q < 0.01)
+                                 else "")) if q is not None else ""
+        bits.append(f"prox {s['prox_mm']}mm{qual}")
+    if s.get("cam_luma") is not None:
+        bits.append(f"cam luma {s['cam_luma']:.0f}"
+                    + (" (DARK)" if s["cam_luma"] < 40 else ""))
+    # body state
+    flags = [n for n, k in (("on-charger", "on_charger"), ("charging", "charging"),
+                            ("touched", "touched"), ("picked-up", "picked_up"),
+                            ("held", "held"), ("falling", "falling"),
+                            ("cliff!", "cliff"), ("button", "button"),
+                            ("animating", "animating"))
+             if s.get(k)]
+    if flags:
+        bits.append("state: " + ",".join(flags))
+    # negatives are data: an untouched sensor is a real "nothing touching me",
+    # distinct from no-data (A/B probe 2026-07-23: she refused a touch question
+    # because absence-of-flag looked like absence-of-reading)
+    if "touched" in s and not s.get("touched"):
+        bits.append("touch: none")
+    if s.get("touched") and s.get("touch_raw") is not None:
+        raw = tr.get("touch_raw") or []
+        spread = (max(raw) - min(raw)) if len(raw) > 1 else 0
+        bits.append(f"touch raw {s['touch_raw']}"
+                    + (f" varying(spread {spread}) = real petting" if spread > 30
+                       else " flat = resting contact"))
+    if bat.get("ok"):
+        bits.append(f"battery {bat.get('volts', 0):.2f}V lvl{bat.get('level')}")
+    if s.get("charger_seen"):
+        bits.append(f"home {s.get('charger_dist_mm')}mm at "
+                    f"{s.get('charger_bearing_deg')}deg")
+    if exp.get("value"):
+        bits.append(f"my face: {exp.get('kind')}={exp.get('value')}")
+    return (f"[live, {age:.1f}s ago, {d.get('hz', '?')}Hz] " + "; ".join(bits)) \
+        if bits else "feed is live but empty - say so, don't guess"
+
+
 TOOLS = {
+    "senses_now": senses_now,         # her nervous system — live body feed
     "memory_search": memory_search,   # read big-Iris's notes (RO)
     "memory_note": memory_note,       # write her own
     "memory_recall": memory_recall,   # read her own
@@ -279,6 +363,9 @@ TOOL_SPEC = (
     "TOOLS: when you don't know something, look it up before answering; if you "
     "still can't, say so and ask. Emit ONE call on its own line and stop; "
     "you'll get [[result:...]] back, then continue.\n"
+    "[[tool:senses_now]] - your LIVE body senses (tracks, gyro, head, lift, "
+    "touch, prox, battery, your own face); use it for ANY question about your "
+    "body RIGHT NOW - never answer one from memory or guess a reading\n"
     "[[tool:time_now]] - the real clock (never guess a time)\n"
     "[[tool:memory_search|<question>]] - look up a fact (big-Iris's memory)\n"
     "[[tool:memory_recall|<question>]] - your own memory\n"

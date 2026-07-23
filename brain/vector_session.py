@@ -68,6 +68,26 @@ def _log_big_action(action: str, **params) -> None:
     except Exception:
         pass
 
+
+# her FACE is authored, not sensed: the SDK exposes no currently-playing-anim
+# readout, so every layer that commands the face self-reports here and the
+# nervous system (inhabit daemon) merges it into senses_live.json — she gets
+# "what her own screen is showing" as a sense (Zeke 2026-07-23).
+_EXPRESSION = FRAME_DIR / "expression.json"
+
+
+def _log_expression(kind: str, value: str, source: str = "session") -> None:
+    """Record what the face was just told to show. Best-effort, never raises."""
+    try:
+        import json as _json
+        tmp = _EXPRESSION.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps({"ts": time.time(), "kind": kind,
+                                    "value": value, "source": source},
+                                   ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_EXPRESSION)
+    except Exception:
+        pass
+
 # hardware limits
 HEAD_MIN_DEG, HEAD_MAX_DEG = -22.0, 45.0
 LIFT_MIN, LIFT_MAX = 0.0, 1.0
@@ -834,6 +854,7 @@ class BodySession:
             with self._sdk_locked() as got:
                 if got:
                     self.robot.behavior.set_eye_color(hue=float(hue), saturation=float(sat))
+                    _log_expression("eyes", f"hue={float(hue):.2f} sat={float(sat):.2f}")
 
     def _play_trigger(self, trigger: str):
         """Play one of Vector's on-device animation triggers (eyes+sound+motion
@@ -844,6 +865,7 @@ class BodySession:
             with self._sdk_locked() as got:
                 if not got:
                     return
+                _log_expression("anim", trigger)
                 self.robot.anim.play_animation_trigger(trigger, loop_count=1)
             self._restore_head()
 
