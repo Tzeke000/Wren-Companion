@@ -94,7 +94,10 @@ furn(x0+0.02,dia[1]-0.65,0.52,0.55,"speaker\ndresser",fs=7)
 furn(cam[0]-0.6,y0+0.02,1.2,0.34,"desk + PC",fs=8)
 # PIANO (Wren's machine): on the south wall next to the desk
 furn(cam[0]+0.65,y0+0.02,0.85,0.3,"piano (Wren's PC)",fs=7)
-# (NO corner dressers by the piano — removed per Zeke)
+# TWO DRESSERS: south wall, EAST of the piano/Wren's PC, filling the SE corner
+# (Zeke correction 2026-07-23). Piano right edge ≈ -0.53; run east to the wall.
+furn(-0.50,y0+0.02,0.34,0.30,"dresser",fs=6.5)
+furn(-0.14,y0+0.02,0.34,0.30,"dresser",fs=6.5)
 # east wall features: brick + door south of dock
 ax.add_patch(Rectangle((x1-0.16,-0.72),0.16,0.34,facecolor="#5a3a2a",
              edgecolor="#7a5a44",lw=1.2,zorder=1))
@@ -158,8 +161,8 @@ ax.text((x0+x1)/2,y0-0.05,"SOUTH wall",color=DIM,fontsize=9,ha="center",va="top"
 ax.text((x0+x1)/2,y1+0.04,"NORTH / across the room",color=DIM,fontsize=9,
         ha="center",va="bottom")
 
-ax.set_title("Iris's room — v8: speaker dresser off the bed's FOOT (out of "
-             "cam view), FOV tightened to what the frame really shows\n"
+ax.set_title("Iris's room — v9: + 2 dressers filling the SE corner (east of "
+             "the piano / Wren's PC), speaker dresser off the bed's FOOT\n"
              "SOLID = anchors + furniture per Zeke + webcam — "
              "correct me if off",
              color=FG,fontsize=11,weight="bold",pad=12)
