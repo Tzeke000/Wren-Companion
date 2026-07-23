@@ -50,6 +50,23 @@ REPO = Path(__file__).resolve().parent.parent
 SERIAL = "0dd1cdaf"
 FRAME_DIR = REPO / "state" / "vector"
 NERVES = FRAME_DIR / "nerves.json"
+# big-Iris's body commands, logged so the little brain (watch-mode) sees my ACTUAL
+# moves — not just the resulting motion — for real imitation learning (2026-07-23,
+# Zeke). little_pilot._suggest reads recent lines into her watch prompt.
+_LB_ACTIONS = REPO / "state" / "little_brain" / "big_iris_actions.jsonl"
+
+
+def _log_big_action(action: str, **params) -> None:
+    """Append a big-Iris body command to the little brain's watch feed. Best-effort;
+    a logging failure must NEVER break a real body command."""
+    try:
+        import json as _json
+        _LB_ACTIONS.parent.mkdir(parents=True, exist_ok=True)
+        with _LB_ACTIONS.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps({"ts": time.time(), "action": action,
+                                 "params": params}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 # hardware limits
 HEAD_MIN_DEG, HEAD_MAX_DEG = -22.0, 45.0
@@ -1301,6 +1318,7 @@ class BodySession:
         """Gyro-exact turn (+left / -right). Restores head after."""
         self._require()
         self._touch()
+        _log_big_action("turn", angle_deg=angle_deg, speed_deg_s=speed_deg_s)
         n = _read_nerves()
         if n.get("picked_up"):
             return {"ok": False, "refused": "picked up / no surface under treads"}
@@ -1321,6 +1339,7 @@ class BodySession:
         """Encoder-exact straight (+fwd / -back). Cliff-safe behavior. Restores head."""
         self._require()
         self._touch()
+        _log_big_action("straight", dist_mm=dist_mm, speed_mm_s=speed_mm_s)
         n = _read_nerves()
         if n.get("picked_up"):
             return {"ok": False, "refused": "picked up / no surface under treads"}
@@ -1365,6 +1384,7 @@ class BodySession:
         the fast default, small values (e.g. 30) for a slow deliberate tilt."""
         self._require()
         self._touch()
+        _log_big_action("head", angle_deg=angle_deg)
         import math
         from anki_vector.util import degrees
         a = max(HEAD_MIN_DEG, min(HEAD_MAX_DEG, float(angle_deg)))

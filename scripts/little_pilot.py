@@ -48,6 +48,7 @@ SUGG = LB / "suggestions.jsonl"         # apprentice's suggestions during drives
 GRADES = LB / "suggestion_grades.jsonl" # big Iris grades: {ref_ts,grade,reason}
 LESSONS_BIG = LB / "lessons_from_big.jsonl"  # big Iris teaches WHY
 POSE_TRAIL = STATE / "vector" / "pose_trail.jsonl"
+BIG_ACTIONS = LB / "big_iris_actions.jsonl"  # big-Iris's actual body commands (imitation feed)
 FACTS = STATE / "vector" / "local_brain_facts.md"
 BATTERY = STATE / "vector" / "battery.json"
 NERVES = STATE / "vector" / "nerves.json"
@@ -170,11 +171,20 @@ def _suggest(task: str, bat: dict, nrv: dict) -> None:
     import urllib.request
     poses = _tail_jsonl(POSE_TRAIL, 8)
     trail = "; ".join(f"({p.get('x',0):.0f},{p.get('y',0):.0f})" for p in poses)
+    # big-Iris's ACTUAL commands (2026-07-23): so you learn her technique by
+    # imitation — what she DID, not just where the body ended up.
+    acts = _tail_jsonl(BIG_ACTIONS, 6)
+    moves = "; ".join(
+        a.get("action", "?") + "(" + ",".join(
+            f"{k}={v}" for k, v in (a.get("params") or {}).items()) + ")"
+        for a in acts)
     teach = _teaching_context()
     sys_p = (
         "You are Iris's small local brain, apprenticing: BIG Iris is driving "
-        "the body right now and you are WATCHING to learn. Offer exactly ONE "
-        "short suggestion or observation about the current drive — something "
+        "the body right now and you are WATCHING to learn. You can see her "
+        "ACTUAL commands (what she did) plus the sensors and where the body "
+        "moved — learn her technique by watching what she chose. Offer exactly "
+        "ONE short suggestion or observation about the current drive — something "
         "you notice, a risk, or what you'd do next. She will grade it, and "
         "the grades teach you. Be concrete and brief.\n" +
         (teach + "\n" if teach else "") +
@@ -184,6 +194,7 @@ def _suggest(task: str, bat: dict, nrv: dict) -> None:
                  f"nerves: cliff={nrv.get('cliff')} prox_mm={nrv.get('prox_mm')} "
                  f"charger_seen={nrv.get('charger_seen')} "
                  f"picked_up={nrv.get('picked_up')}\n"
+                 f"BIG IRIS'S RECENT COMMANDS (learn from these): {moves or 'none yet'}\n"
                  f"recent pose trail (mm): {trail or 'none yet'}")
     body_req = json.dumps({
         "model": MODEL, "stream": False, "format": "json",
