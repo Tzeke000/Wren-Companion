@@ -366,8 +366,31 @@ def _ensure_ollama() -> bool:
         return False
 
 
+_LBT = None
+
+
+def _lbt():
+    """Lazy import of little-Iris's OWN tool set (brain/little_brain_tools).
+    Kept lazy so the server still boots if the module is missing."""
+    global _LBT
+    if _LBT is None:
+        import importlib
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        _LBT = importlib.import_module("brain.little_brain_tools")
+    return _LBT
+
+
 def _ask_local(messages: list[dict]) -> str | None:
     """Ask the local Ollama model, in-character. None on any failure.
+
+    TOOL LOOP (2026-07-22, Zeke: give her her own tools): when IRIS_LB_TOOLS is
+    on, she can emit [[tool:...]] calls; we run them, hand back [[result:...]],
+    and re-ask, up to MAX_TOOL_HOPS. Flag OFF (default) = identical to the old
+    single-shot behavior, so this is safe to ship dark and light up after the
+    tool-trained bake.
 
     2026-07-14 rework: KEEP wire-pod's system prompt (it carries the
     animation/command palette + conversation-mode NOTE) and LAYER the Iris
@@ -394,19 +417,50 @@ def _ask_local(messages: list[dict]) -> str | None:
         return None
     system = (wirepod_sys + "\n\n" if wirepod_sys else "") \
         + IRIS_LOCAL_SYSTEM + _load_facts()
+    _tools_on = os.environ.get("IRIS_LB_TOOLS", "").lower() in (
+        "1", "true", "yes", "on")
+    if _tools_on:
+        try:
+            system += "\n\n" + _lbt().TOOL_SPEC
+        except Exception as e:
+            print(f"[vector-brain] tool set unavailable, loop off: {e!r}")
+            _tools_on = False
     convo = [{"role": "system", "content": system}] + convo
-    try:
+
+    def _one(msgs: list[dict]) -> str | None:
         r = requests.post(
             f"{OLLAMA}/v1/chat/completions",
-            json={"model": LOCAL_MODEL, "messages": convo,
+            json={"model": LOCAL_MODEL, "messages": msgs,
                   "temperature": 0.6, "max_tokens": 120},
             timeout=LOCAL_TIMEOUT_S)
         if r.status_code != 200:
             print(f"[vector-brain] local llm http {r.status_code}: "
                   f"{r.text[:120]!r}")
             return None
-        out = (r.json()["choices"][0]["message"]["content"] or "").strip()
-        return out or None
+        return (r.json()["choices"][0]["message"]["content"] or "").strip()
+
+    try:
+        if not _tools_on:
+            return _one(convo) or None
+        # tool loop: up to MAX_TOOL_HOPS, then answer with what she has (the
+        # "three tries then ask for help" rule, enforced mechanically).
+        lbt = _lbt()
+        out = ""
+        for _hop in range(lbt.MAX_TOOL_HOPS + 1):
+            out = _one(convo)
+            if out is None:
+                return None
+            calls = lbt.parse_tool_calls(out)
+            if not calls:                       # final answer, no tool wanted
+                return lbt.strip_tool_calls(out) or out or None
+            convo.append({"role": "assistant", "content": out})
+            results = " ".join(
+                f"[[result:{lbt.dispatch(n, a)}]]" for n, a in calls)
+            convo.append({"role": "user", "content": results})
+        # hit the 3-try cap — stop grinding, hand back what she has + ask
+        return (lbt.strip_tool_calls(out)
+                or "I tried a few times and couldn't find that on my own — "
+                   "I should ask for help.")
     except Exception as e:
         print(f"[vector-brain] local llm unreachable: {e!r}")
         return None
