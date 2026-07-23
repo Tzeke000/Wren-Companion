@@ -52,6 +52,17 @@ FACTS = STATE / "vector" / "local_brain_facts.md"
 BATTERY = STATE / "vector" / "battery.json"
 NERVES = STATE / "vector" / "nerves.json"
 POSSESSION = STATE / "vector" / "possession_status.json"
+# --- REFLEX LAYER (2026-07-23, Zeke: "keep working towards small brain = reflexes") ---
+REFLEX_SHADOW = LB / "reflex_shadow.jsonl"   # shadow log: what the reflex WOULD do, disarmed
+# webcam mean-brightness floor for "light enough to see the charger marker".
+# Measured 2026-07-23: lamp-on morning room ≈ 134; true dark falls far below.
+# 60 leaves huge margin yet trips if a bulb dies at night. Env-tunable.
+LIGHT_MIN = float(os.environ.get("IRIS_LIGHT_MIN", "60"))
+# grace before the reflex takes over: how long the low-off-charger emergency may
+# sit UNRESOLVED before the little brain docks it herself. Zeke 2026-07-23: frozen
+# vs just-heads-down-busy is the same shape — either way, if nobody's moved the
+# body to the dock in this window, the reflex should.
+REFLEX_GRACE_S = float(os.environ.get("IRIS_REFLEX_GRACE_S", "60"))
 
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 MODEL = os.environ.get("IRIS_LOCAL_MODEL", "iris-little-v4")
@@ -330,6 +341,109 @@ def _hard_escalations(bat: dict, nrv: dict, goals: dict) -> str | None:
     return None
 
 
+# ── REFLEX LAYER: the small brain as the body's autonomic reflexes ─────────────
+# Zeke's contract (goals.json emergency_reflex_contract): if battery is low
+# off-charger AND big-Iris has been silent 60s, the little brain takes over and
+# parks. Plus the light rule (2026-07-23): too dark to see home = don't move.
+# ALL of this runs in SHADOW until goals.emergency_reflex_contract.enabled=true —
+# it logs what it WOULD do and never touches the wheels. Arming needs a
+# supervised fake-low-battery drill (and the daemon dock-trigger wired below).
+
+def _frame_brightness() -> float | None:
+    """Mean brightness 0-255 of the current tower-webcam frame, or None if
+    unreadable. Reads the runtime's vision endpoint, which stays up even when
+    big-Iris's COGNITION is frozen (a token-freeze doesn't kill the process)."""
+    try:
+        import io
+        import urllib.request
+        import numpy as np
+        from PIL import Image
+        data = urllib.request.urlopen(
+            "http://127.0.0.1:5876/api/v1/vision/latest_frame", timeout=4).read()
+        return float(np.asarray(Image.open(io.BytesIO(data)).convert("L")).mean())
+    except Exception:
+        return None
+
+
+def _light_ok() -> bool:
+    """True ONLY when we can confirm enough light to see the charger marker.
+    Fail-SAFE: unreadable brightness -> False (treat as dark, don't move).
+    Zeke's rule: too dark = don't even come off the charger."""
+    b = _frame_brightness()
+    return b is not None and b >= LIGHT_MIN
+
+
+def _command_emergency_park() -> str:
+    """ARMED emergency dock. Docking belongs to the daemon + firmware (hard rule:
+    the pilot NEVER raw-drives), so this must trigger a re-seat and let firmware
+    return-to-charger do the last leg. That daemon dock-trigger is NOT wired yet —
+    arming the contract requires wiring it AND a supervised fake-low-battery drill.
+    Until then this files a MAX alert and returns loudly rather than pretend to dock."""
+    _append(ALERTS, {"ts": time.time(), "kind": "EMERGENCY_PARK_ATTEMPT",
+                     "text": "ARMED reflex wanted to dock, but the daemon dock-trigger "
+                             "is NOT wired — file the supervised-drill + wiring task "
+                             "before enabling the contract"})
+    return "PARK requested — daemon dock-trigger NOT wired (needs wiring + drill)"
+
+
+_emergency_since: float | None = None  # ts the low-off-charger emergency first appeared this streak
+
+
+def _emergency_reflex(bat: dict, nrv: dict, goals: dict) -> str | None:
+    """Evaluate the emergency-park contract every cycle. ACTS only when
+    goals.emergency_reflex_contract.enabled is true (default false = SHADOW:
+    decide + log, take NO body action). Returns a status string, or None when
+    there's no emergency. Charger truth = NERVES (1Hz live), not battery.json.
+
+    Trigger (Zeke reframe 2026-07-23): NOT 'is big-Iris frozen' — that's the same
+    shape as 'big-Iris is heads-down busy and hasn't moved the body.' Either way,
+    if the low-off-charger emergency sits UNRESOLVED for REFLEX_GRACE_S, nobody
+    docked it, so the reflex should. Simple, observable, no mind-reading."""
+    global _emergency_since
+    volts = float(bat.get("volts") or 0)
+    on_chg = nrv.get("on_charger") if "on_charger" in nrv else bat.get("on_charger")
+    emergency = bool(volts and not on_chg and volts < 3.7)
+    if not emergency:
+        _emergency_since = None          # resolved (docked, or a bad read cleared)
+        return None
+    now = time.time()
+    if _emergency_since is None:
+        _emergency_since = now
+    unresolved_s = now - _emergency_since
+    contract = goals.get("emergency_reflex_contract") or {}
+    enabled = bool(contract.get("enabled"))
+    lit = _light_ok()
+    if unresolved_s < REFLEX_GRACE_S:
+        decision = "WATCH"           # within grace — give big-me a moment to handle it
+    elif lit:
+        decision = "PARK"            # grace elapsed, still stranded, it's lit -> dock
+    else:
+        decision = "HOLD_DARK"       # grace elapsed but dark -> don't wander; hold + alert
+    _append(REFLEX_SHADOW, {"ts": now, "volts": volts,
+                            "unresolved_s": round(unresolved_s, 1), "lit": lit,
+                            "decision": decision, "armed": enabled})
+    _append(ALERTS, {"ts": now, "kind": "EMERGENCY_REFLEX",
+                     "text": f"low batt {volts}V off-charger {unresolved_s:.0f}s "
+                             f"unresolved; light_ok={lit}; decision={decision}; "
+                             f"armed={enabled}"})
+    if enabled and decision == "PARK":
+        return _command_emergency_park()
+    return (f"reflex shadow: would {decision} "
+            f"(unresolved {unresolved_s:.0f}s, armed={enabled})")
+
+
+def _can_leave_home(goals: dict) -> bool:
+    """Gate on UNDOCKING (Zeke 2026-07-23: darkness gates *leaving home*). Every
+    future motion/undock path must pass this: motion enabled by both flags AND
+    enough light to get back. Provided now so driving, when it turns on, inherits
+    the light-gate for free."""
+    if not goals.get("motion_enabled"):
+        return False
+    if os.environ.get("IRIS_VECTOR_MOVE_OK", "").lower() not in ("1", "true", "yes", "on"):
+        return False
+    return _light_ok()
+
+
 def main() -> int:
     if not _single_instance():
         print("another little_pilot is alive — exiting")
@@ -358,6 +472,11 @@ def main() -> int:
                 _append(ALERTS, {"ts": time.time(), "kind": "CONTACT",
                                  "text": contact})
                 hard = hard or contact
+            # REFLEX contract — evaluate every cycle (shadow unless armed). Runs
+            # before the LLM so an emergency never waits on a think cycle.
+            reflex = _emergency_reflex(bat, nrv, goals)
+            if reflex:
+                hard = hard or reflex
             if hard:
                 _append(ALERTS, {"ts": time.time(), "kind": "HARD", "text": hard})
 
