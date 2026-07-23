@@ -313,6 +313,45 @@ def senses_now(_: str = "") -> str:
                     f"{s.get('charger_bearing_deg')}deg")
     if exp.get("value"):
         bits.append(f"my face: {exp.get('kind')}={exp.get('value')}")
+    # fork cargo
+    if s.get("carrying"):
+        bits.append("carrying something on my forks")
+    # cube senses (when her cube is connected)
+    c = s.get("cube")
+    if c:
+        cb = "cube: " + ("visible" if c.get("visible") else "not in view")
+        if c.get("moving"):
+            cb += ",moving"
+        ta = c.get("tapped_ago_s")
+        if ta is not None and ta < 120:
+            cb += f",tapped {ta:.0f}s ago"
+        bits.append(cb)
+    # efference copy - her own voice as a sense
+    sp = d.get("spoke") or {}
+    sp_ts = float(sp.get("ts") or 0.0)
+    if sp_ts:
+        sp_ago = _time.time() - sp_ts
+        if sp_ago < float(sp.get("est_dur") or 0.0) + 1.0:
+            bits.append("I am SPEAKING right now"
+                        + (f": '{sp.get('text')}'" if sp.get("text") else ""))
+        elif sp_ago < 90:
+            bits.append(f"I spoke {sp_ago:.0f}s ago"
+                        + (f": '{sp.get('text')}'" if sp.get("text") else ""))
+    # hearing - what was last said to her
+    hd = d.get("heard") or {}
+    hd_ts = float(hd.get("ts") or 0.0)
+    if hd_ts and (_time.time() - hd_ts) < 300 and hd.get("text"):
+        bits.append(f"heard {(_time.time() - hd_ts):.0f}s ago: '{hd.get('text')}'")
+    # interoception - how she is inside
+    it = d.get("intero") or {}
+    if it.get("ok"):
+        t_c = it.get("temp_c")
+        if t_c is not None:
+            bits.append(f"core {t_c:.0f}C" + (" HOT" if t_c >= 80 else ""))
+        dbm = it.get("wifi_dbm")
+        if dbm is not None:
+            bits.append(f"wifi {dbm:.0f}dBm"
+                        + (" WEAK-far from home signal" if dbm <= -70 else ""))
     return (f"[live, {age:.1f}s ago, {d.get('hz', '?')}Hz] " + "; ".join(bits)) \
         if bits else "feed is live but empty - say so, don't guess"
 

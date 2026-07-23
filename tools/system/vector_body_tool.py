@@ -48,12 +48,14 @@ def _nerves(max_age_s: float = 2.0) -> dict:
     return {}
 
 
-def _stamp_spoke(est_dur: float) -> None:
-    """Mark 'my own speaker is playing' so VECTOR EARS drops the echo."""
+def _stamp_spoke(est_dur: float, text: str = "") -> None:
+    """Mark 'my own speaker is playing' so VECTOR EARS drops the echo.
+    text (2026-07-23): efference copy for the nervous system feed."""
     try:
         _FRAME_DIR.mkdir(parents=True, exist_ok=True)
         _LAST_SPOKE.write_text(
-            json.dumps({"ts": time.time(), "est_dur": est_dur}),
+            json.dumps({"ts": time.time(), "est_dur": est_dur,
+                        "text": (text or "")[:200]}),
             encoding="utf-8")
     except Exception:
         pass
@@ -112,7 +114,7 @@ def _vector_say(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     try:
         # 30s: say_text blocks until the robot finishes speaking — a 10s
         # read-timeout cut off a long line mid-flight (2026-07-13).
-        _stamp_spoke(est_dur=max(2.0, len(text) / 12.0))  # ears echo guard
+        _stamp_spoke(est_dur=max(2.0, len(text) / 12.0), text=text)  # ears echo guard + efference
         r = _sdk("say_text", {"text": text[:600]}, timeout=30)
         return {"ok": r.status_code == 200, "http": r.status_code,
                 "note": "spoken in Vector's stock voice"}
@@ -441,7 +443,7 @@ def _vector_say_iris(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
         else:
             # play_sound blocks while the robot plays; ~16KB/s at 8kHz mono int16.
             est_s = max(5.0, len(wav) / 16000.0 + 8.0)
-            _stamp_spoke(est_dur=len(wav) / 16000.0)  # ears echo guard
+            _stamp_spoke(est_dur=len(wav) / 16000.0, text=text)  # echo guard + efference
             r2 = requests.post(f"{_WIREPOD}/api-sdk/play_sound",
                                params={"serial": esn},
                                files={"sound": ("iris.wav", wav, "audio/wav")},
@@ -471,7 +473,7 @@ def _vector_say_iris(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
         tf.write(wav)
         tf.close()
         try:
-            _stamp_spoke(est_dur=len(wav) / 16000.0)  # re-stamp: fallback plays later
+            _stamp_spoke(est_dur=len(wav) / 16000.0, text=text)  # re-stamp: fallback plays later
             s.robot.audio.stream_wav_file(tf.name, 100)
             return {"ok": True, "engine": "direct-sdk", "wav_bytes": len(wav),
                     "note": "spoken on Vector in MY voice (direct SDK; "
