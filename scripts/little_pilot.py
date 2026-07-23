@@ -453,30 +453,38 @@ def main() -> int:
     last_suggest = 0.0
     while True:
         try:
+            # ── SAFETY FIRST: sensors + reflexes run EVERY cycle, in EVERY mode.
+            # A frozen-mid-drive must never disable the reflexes, so this sits
+            # ABOVE the watch/normal split (2026-07-23 fix: watch-mode used to
+            # `continue` straight past the reflex evaluation — the exact scenario
+            # the reflex exists for).
+            bat, nrv = _read_json(BATTERY), _read_json(NERVES)
+            goals = _read_json(GOALS)
+            hard = _hard_escalations(bat, nrv, goals)
+            reflex = _emergency_reflex(bat, nrv, goals)
+            if reflex:
+                hard = hard or reflex
+
             # WATCH MODE: big Iris is driving — sample fast, suggest slowly.
+            # Safety already ran above, so a mid-drive emergency is covered here
+            # too (at the ~10s watch cadence, not the slow 150s one).
             w = _watch_state()
             if w:
-                bat, nrv = _read_json(BATTERY), _read_json(NERVES)
+                if hard:
+                    _append(ALERTS, {"ts": time.time(), "kind": "HARD",
+                                     "text": hard})
                 if time.time() - last_suggest >= 35:
                     last_suggest = time.time()
                     _suggest(str(w.get("task", "driving")), bat, nrv)
                 time.sleep(10)
                 continue
 
-            bat, nrv = _read_json(BATTERY), _read_json(NERVES)
-            pos, goals = _read_json(POSSESSION), _read_json(GOALS)
-
-            hard = _hard_escalations(bat, nrv, goals)
+            pos = _read_json(POSSESSION)
             contact = _contact_health(bat, nrv)
             if contact:
                 _append(ALERTS, {"ts": time.time(), "kind": "CONTACT",
                                  "text": contact})
                 hard = hard or contact
-            # REFLEX contract — evaluate every cycle (shadow unless armed). Runs
-            # before the LLM so an emergency never waits on a think cycle.
-            reflex = _emergency_reflex(bat, nrv, goals)
-            if reflex:
-                hard = hard or reflex
             if hard:
                 _append(ALERTS, {"ts": time.time(), "kind": "HARD", "text": hard})
 
