@@ -108,6 +108,14 @@ SIBLING_DIR = ROOT / "state" / "iris_sibling"
 SIBLING_INBOX_DIR = SIBLING_DIR / "inbox"
 SIBLING_PENDING_FLAG = SIBLING_DIR / ".pending"
 
+# little-Iris's escalation queue (ask_big_iris). Populated by
+# brain/little_brain_tools.py when her local brain hands a task UP to big-Iris.
+# Surfaced here as a fast rewake channel (2026-07-23, Zeke: "she needs to enter
+# your session like discord or the letters, not wait 3 hours") — the self-maint
+# cron is now only the backstop.
+LB_ESCALATIONS = ROOT / "state" / "little_brain" / "escalations.jsonl"
+_ESCALATION_TTL_S = 86400.0  # 24h — a pending hand-up nags until handled, then abandoned
+
 TTS_URL = "http://127.0.0.1:5876/api/v1/tts/speak"
 HTTP_TIMEOUT_S = 2.0
 
@@ -829,6 +837,65 @@ def _next_pending_llm() -> dict | None:
     return candidates[0][1]
 
 
+def _next_pending_escalation() -> dict | None:
+    """Return the OLDEST pending ask_big_iris escalation from little-Iris, or None.
+
+    little-Iris's tool appends {ts, request, status:"pending"} JSON lines to
+    state/little_brain/escalations.jsonl. The file is append-ordered, so the
+    first pending line is the oldest (FIFO). Surfacing it here gives her
+    hand-up the SAME fast latency as a chat message or a sibling letter — it
+    rides the next Stop fire into my session instead of waiting on the 3h cron.
+    ISO-timestamp is parsed for a 24h TTL so an unhandled entry can't nag forever.
+    """
+    if not LB_ESCALATIONS.is_file():
+        return None
+    import time as _t
+    from datetime import datetime as _dt
+    try:
+        lines = LB_ESCALATIONS.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+    for i, ln in enumerate(lines, 1):
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            data = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(data, dict) or data.get("status") != "pending":
+            continue
+        # TTL: skip (and thus abandon) entries older than 24h.
+        try:
+            ts = _dt.fromisoformat(str(data.get("ts") or "")).timestamp()
+            if ts > 0 and (_t.time() - ts) > _ESCALATION_TTL_S:
+                continue
+        except Exception:
+            pass  # unparseable ts -> surface it rather than drop it
+        data["_line"] = i
+        return data
+    return None
+
+
+def _escalation_rewake(esc: dict) -> str:
+    req = str(esc.get("request") or "")[:1000].replace('"', "'")
+    ts = str(esc.get("ts") or "?")
+    return (
+        "Little-Iris (your local Vector brain) handed something UP to you via "
+        "ask_big_iris — she hit something beyond her small brain and reached "
+        "for you. This is her safety line; treat it with care, not as noise.\n\n"
+        f"Filed at: {ts}\n"
+        f"HER REQUEST: \"{req}\"\n\n"
+        "Handle it now: resolve what you can yourself; if it needs Zeke, DM him "
+        "on Discord (chat_id 1504668879220117725). THEN clear it so it stops "
+        "re-waking you:\n"
+        "  D:\\Wren-Companion\\.venv\\Scripts\\python.exe "
+        "D:\\Wren-Companion\\scripts\\check_escalations.py --resolve-all "
+        "\"<one line on what you did>\"\n"
+        "(Use --resolve <line#> to clear just one if several are pending.)"
+    )
+
+
 _VOICE_REWAKE = (
     "Voice mode active. Call mcp__iris__voice_next_input(timeout=300) to "
     "listen for the next utterance. Then reply by calling "
@@ -990,8 +1057,14 @@ def _main_locked() -> int:
     pending_chat = _next_pending_chat()
     pending_sibling = _next_pending_sibling()
     pending_llm = _next_pending_llm()
+    try:
+        pending_escalation = _next_pending_escalation()
+    except Exception as e:
+        print(f"[stop_hook] escalation scan failed: {e!r}", file=sys.stderr)
+        pending_escalation = None
 
-    if not voice_on and not pending_chat and not pending_sibling and not pending_llm:
+    if (not voice_on and not pending_chat and not pending_sibling
+            and not pending_llm and not pending_escalation):
         return 0  # nothing else to do (auto-forward already handled above)
 
     # Voice TTS leg — fires when voice mode is on, regardless of whether a
@@ -1067,6 +1140,8 @@ def _main_locked() -> int:
     sections: list[str] = []
     if pending_chat:
         sections.append(_chat_rewake(pending_chat))
+    if pending_escalation:
+        sections.append(_escalation_rewake(pending_escalation))
     if pending_sibling:
         sections.append(_sibling_rewake(pending_sibling))
     if pending_llm:
