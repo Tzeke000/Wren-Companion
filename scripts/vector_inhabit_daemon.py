@@ -810,6 +810,16 @@ def _ns_capture(robot, cam: dict) -> dict:
                 s["cube"]["tapped_ago_s"] = round(time.time() - float(lt), 1)
     except Exception:
         pass
+    # IMU-IN-HEAD compensation (2026-07-23 drive discovery): Vector's
+    # accelerometer rides in the HEAD assembly, so accel-derived pitch tracks
+    # -head_angle on flat ground (head +19deg read pitch -19; head -21 read
+    # +23). Body pitch ~= accel pitch + head angle. Without this her "pitch"
+    # sense screams nose-down every time she looks up.
+    try:
+        if "pitch" in s and "head_deg" in s:
+            s["pitch"] = round(s["pitch"] + s["head_deg"], 1)
+    except Exception:
+        pass
     s.update(_charger_reader(robot))
     if cam.get("on"):
         try:
