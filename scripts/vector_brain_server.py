@@ -140,12 +140,14 @@ def _load_facts() -> str:
         return ""
 
 
-def _stamp_spoke(est_dur: float) -> None:
-    """Echo-guard stamp so VECTOR EARS drops my own speaker audio."""
+def _stamp_spoke(est_dur: float, text: str = "") -> None:
+    """Echo-guard stamp so VECTOR EARS drops my own speaker audio.
+    text (2026-07-23): efference copy for the nervous-system feed."""
     try:
         LAST_SPOKE_PATH.parent.mkdir(parents=True, exist_ok=True)
         LAST_SPOKE_PATH.write_text(
-            json.dumps({"ts": time.time(), "est_dur": est_dur}),
+            json.dumps({"ts": time.time(), "est_dur": est_dur,
+                        "text": (text or "")[:200]}),
             encoding="utf-8")
     except Exception:
         pass
@@ -299,7 +301,7 @@ def _iris_voice_for_local(reply: str) -> str | None:
             return None
         if not esn:
             return None
-        _stamp_spoke(len(wav) / 16000.0)
+        _stamp_spoke(len(wav) / 16000.0, text=words)
 
         def _play():
             try:

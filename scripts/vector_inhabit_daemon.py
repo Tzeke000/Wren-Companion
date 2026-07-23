@@ -600,6 +600,17 @@ def _transcript_tap_loop() -> None:
                 seen_recent = (seen_recent + [text])[-8:]
                 stamp = time.strftime("%H:%M:%S")
                 log(f"HEARD (wake-word): {text!r} -> {intent}")
+                # nervous system: hearing as a SENSE — the feed carries what
+                # was last said to her (2026-07-23 round 2)
+                try:
+                    import json as _json
+                    tmp = LAST_HEARD_PATH.with_suffix(".json.tmp")
+                    tmp.write_text(_json.dumps(
+                        {"ts": time.time(), "text": text[:200],
+                         "intent": intent}), encoding="utf-8")
+                    tmp.replace(LAST_HEARD_PATH)
+                except Exception:
+                    pass
                 try:
                     iris_chat.submit(
                         f"[VECTOR HEARD @ {stamp} — wake-word speech "
@@ -643,8 +654,63 @@ SENSES_LIVE = REPO / "state" / "vector" / "senses_live.json"
 SENSOR_STREAM = REPO / "state" / "vector" / "sensor_stream.jsonl"
 LATEST_FRAME = REPO / "state" / "vector" / "latest_frame.jpg"
 EXPRESSION_PATH = REPO / "state" / "vector" / "expression.json"
+LAST_HEARD_PATH = REPO / "state" / "vector" / "last_heard.json"
+INTERO_PATH = REPO / "state" / "vector" / "interoception.json"
 _STREAM_MAX_BYTES = 10_000_000
 _NS_HZ = 15.0
+
+
+# ---- INTEROCEPTION (2026-07-23 round 2): how she is doing INSIDE — SoC
+# temperature ("do I have a fever") + wifi signal ("how strong is my link
+# home"), read over root SSH every ~30s. Probed live 2026-07-23: 5 thermal
+# zones (plain deg C), /proc/net/wireless wlan0 link 14 / level -42dBm.
+_SSH_KEY = REPO / "state" / "vector" / "dev" / "ssh_root_key"
+INTERO_POLL_S = float(os.environ.get("IRIS_INTERO_POLL_S", "30"))
+_INTERO_CMD = ("cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null; "
+               "echo ---; awk '/wlan0/ {print $3, $4}' /proc/net/wireless")
+
+
+def _interoception_loop() -> None:
+    import json as _json
+    import subprocess as _sp
+    ssh_bin = str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                  / "System32" / "OpenSSH" / "ssh.exe")
+    if not Path(ssh_bin).exists():
+        ssh_bin = "ssh"
+    while True:
+        out = {"ok": False, "ts": time.time()}
+        try:
+            p = _sp.run(
+                [ssh_bin, "-i", str(_SSH_KEY),
+                 "-o", "StrictHostKeyChecking=no",
+                 "-o", "UserKnownHostsFile=NUL",
+                 "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
+                 "-o", "HostKeyAlgorithms=+ssh-rsa",
+                 "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
+                 "-o", "LogLevel=ERROR",
+                 f"root@{ROBOT_IP}", _INTERO_CMD],
+                capture_output=True, text=True, timeout=20,
+                stdin=_sp.DEVNULL)
+            if p.returncode == 0 and "---" in (p.stdout or ""):
+                temps_raw, wifi_raw = p.stdout.split("---", 1)
+                temps = [float(x) for x in temps_raw.split() if x.strip()]
+                # zones report plain deg C on WireOS; guard millidegrees anyway
+                temps = [t / 1000.0 if t > 1000 else t for t in temps]
+                w = wifi_raw.split()
+                out.update(ok=True, ts=time.time(),
+                           temp_c=round(max(temps), 1) if temps else None,
+                           temps=[round(t, 1) for t in temps],
+                           wifi_link=float(w[0].rstrip(".")) if w else None,
+                           wifi_dbm=float(w[1].rstrip(".")) if len(w) > 1 else None)
+        except Exception:
+            pass
+        try:
+            tmp = INTERO_PATH.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps(out), encoding="utf-8")
+            tmp.replace(INTERO_PATH)
+        except Exception:
+            pass
+        time.sleep(INTERO_POLL_S)
 
 
 def _ns_capture(robot, cam: dict) -> dict:
@@ -721,10 +787,38 @@ def _ns_capture(robot, cam: dict) -> dict:
             s["touch_raw"] = int(getattr(t, "raw_touch_value", 0) or 0)
     except Exception:
         pass
+    # CARRYING (2026-07-23 round 2): her fork-cargo sense
+    try:
+        st = robot.status
+        s["carrying"] = bool(st.is_carrying_block)
+        if s["carrying"]:
+            oid = getattr(robot, "carrying_object_id", None)
+            if oid is not None and int(oid) >= 0:
+                s["carry_id"] = int(oid)
+    except Exception:
+        pass
+    # CUBE (best-effort; needs the cube connected — attempted at loop start)
+    try:
+        cube = robot.world.connected_light_cube
+        if cube is not None:
+            s["cube"] = {
+                "visible": bool(getattr(cube, "is_visible", False)),
+                "moving": bool(getattr(cube, "is_moving", False)),
+            }
+            lt = getattr(cube, "last_tapped_time", None)
+            if lt:
+                s["cube"]["tapped_ago_s"] = round(time.time() - float(lt), 1)
+    except Exception:
+        pass
     s.update(_charger_reader(robot))
     if cam.get("on"):
         try:
-            img = robot.camera.latest_image
+            # NON-BLOCKING read: robot.camera.latest_image is decorated
+            # block_while_none — at 15Hz it can wedge the whole nervous loop
+            # sleep-polling for a frame that never comes (2026-07-23 py-spy
+            # catch: thread parked in anki_vector/util.py wrapped). The private
+            # _latest_image is the raw slot: None until the feed produces.
+            img = getattr(robot.camera, "_latest_image", None)
             if img is not None:
                 s["cam_id"] = int(getattr(img, "image_id", -1))
                 # luma from the ~1Hz thumbnail pass (cached — cheap at 15Hz)
@@ -764,7 +858,7 @@ def _nervous_loop(robot, alive: dict) -> None:
     period = 1.0 / _NS_HZ
     ring: "deque[dict]" = deque(maxlen=int(_NS_HZ * 30))   # ~30s of body-time
     pending: list[dict] = []
-    cam = {"on": False, "luma": None, "last_jpg": 0.0}
+    cam = {"on": False, "luma": None, "last_jpg": 0.0, "born": time.time()}
     if os.environ.get("IRIS_NS_CAMERA", "1") != "0":
         try:
             robot.camera.init_camera_feed()
@@ -772,6 +866,13 @@ def _nervous_loop(robot, alive: dict) -> None:
             log("nervous system: camera tap ON (observe feed)")
         except Exception as e:
             log(f"nervous system: camera tap unavailable (non-fatal): {e!r}")
+    if os.environ.get("IRIS_NS_CUBE", "1") != "0":
+        try:
+            robot.world.connect_cube()
+            log("nervous system: cube CONNECTED — cube senses live")
+        except Exception as e:
+            log(f"nervous system: cube not connectable from observe "
+                f"(non-fatal, session-time sense): {e!r}")
     last_snap = 0.0
     last_flush = 0.0
     last_idle_rec = 0.0
@@ -799,7 +900,7 @@ def _nervous_loop(robot, alive: dict) -> None:
             if cam["on"] and (t0 - cam["last_jpg"]) >= 1.0:
                 cam["last_jpg"] = t0
                 try:
-                    img = robot.camera.latest_image
+                    img = getattr(robot.camera, "_latest_image", None)  # non-blocking
                     if img is not None and getattr(img, "raw_image", None) is not None:
                         raw = img.raw_image
                         th = raw.resize((32, 18)).convert("L")
@@ -808,6 +909,20 @@ def _nervous_loop(robot, alive: dict) -> None:
                         tmp = LATEST_FRAME.with_suffix(".jpg.tmp")
                         raw.save(tmp, "JPEG", quality=80)
                         tmp.replace(LATEST_FRAME)
+                        cam["last_frame"] = t0
+                    elif (t0 - cam.get("last_frame", cam.get("born", t0))) > 30.0 \
+                            and (t0 - cam.get("last_kick", 0.0)) > 60.0:
+                        # SELF-HEALING EYE (2026-07-23): observe-conn camera
+                        # feeds init fine but sometimes never produce a frame
+                        # (2nd+ daemon boot of the day). Re-kick the feed —
+                        # dry >30s, at most once/min, all guarded.
+                        cam["last_kick"] = t0
+                        try:
+                            robot.camera.close_camera_feed()
+                        except Exception:
+                            pass
+                        robot.camera.init_camera_feed()
+                        log("nervous system: camera feed re-kicked (dry >30s)")
                 except Exception:
                     pass
             # snapshot @5Hz: latest + 1s trends + battery + expression
@@ -826,6 +941,9 @@ def _nervous_loop(robot, alive: dict) -> None:
                         },
                         "battery": _ns_read_json(BATTERY_JSON),
                         "expression": _ns_read_json(EXPRESSION_PATH),
+                        "intero": _ns_read_json(INTERO_PATH),
+                        "heard": _ns_read_json(LAST_HEARD_PATH),
+                        "spoke": _ns_read_json(LAST_SPOKE_PATH),
                         "hz": hz_meas,
                         "active": active,
                         "ts": round(t0, 3),
@@ -1065,6 +1183,11 @@ def main() -> None:
                       name="vector-battery-watch").start()
     log("battery watch online — battery in state/vector/battery.json, "
         "low + lost-contact reflexes armed")
+    if os.environ.get("IRIS_NS_INTERO", "1") != "0":
+        _threading.Thread(target=_interoception_loop, daemon=True,
+                          name="vector-interoception").start()
+        log("interoception online — SoC temp + wifi link every "
+            f"{INTERO_POLL_S:.0f}s -> interoception.json")
     while True:
         try:
             run_once()

@@ -43,12 +43,15 @@ def serial() -> str | None:
         return None
 
 
-def stamp_spoke(est_dur: float) -> None:
-    """Same echo-guard stamp the body tools write — ears must drop this."""
+def stamp_spoke(est_dur: float, text: str = "") -> None:
+    """Same echo-guard stamp the body tools write — ears must drop this.
+    text (2026-07-23): efference copy — the nervous system feeds back WHAT
+    she just said, so her own voice is a sense, distinct from the world."""
     try:
         LAST_SPOKE.parent.mkdir(parents=True, exist_ok=True)
         LAST_SPOKE.write_text(
-            json.dumps({"ts": time.time(), "est_dur": est_dur}),
+            json.dumps({"ts": time.time(), "est_dur": est_dur,
+                        "text": (text or "")[:200]}),
             encoding="utf-8")
     except Exception:
         pass
@@ -90,7 +93,7 @@ def say_iris(text: str) -> bool:
                           timeout=45)
         if r.status_code != 200 or r.content[:4] != b"RIFF":
             return False
-        stamp_spoke(len(r.content) / 16000.0)
+        stamp_spoke(len(r.content) / 16000.0, text=text)
         r2 = requests.post(f"{WIREPOD}/api-sdk/play_sound",
                            params={"serial": esn},
                            files={"sound": ("iris.wav", _boost_wav(r.content),
@@ -106,7 +109,7 @@ def say_stock(text: str) -> None:
     if not esn:
         return
     try:
-        stamp_spoke(max(2.0, len(text) / 12.0))
+        stamp_spoke(max(2.0, len(text) / 12.0), text=text)
         requests.post(f"{WIREPOD}/api-sdk/say_text",
                       params={"serial": esn, "text": text[:400]}, timeout=30)
     except Exception:
