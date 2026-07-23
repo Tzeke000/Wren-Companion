@@ -570,7 +570,14 @@ def run_startup(g: dict[str, Any]) -> None:
     except Exception:
         g["tts_engine"] = None
         g["tts_engine_name"] = "none"
-    g["tts_enabled"] = True  # default ON now that worker is COM-safe
+    # Iris default OFF (Zeke directive 2026-07-22 night): tts_enabled gates the
+    # Ava-era AUTO-speak paths (question_engine, proactive_triggers, scheduler,
+    # wake_learner, heartbeat curiosity questions) through the internal worker —
+    # an unfamiliar piper voice wondering about Steam at 23:00. Iris's deliberate
+    # mouth is the StyleTTS daemon via voice_speak; it does not read this flag.
+    # Touch state/internal_tts_on.flag to re-enable the old auto-speak behavior.
+    from pathlib import Path as _P
+    g["tts_enabled"] = (_P(__file__).resolve().parent.parent / "state" / "internal_tts_on.flag").exists()
 
     print("[startup] step: STT engine (Whisper)")
     try:
