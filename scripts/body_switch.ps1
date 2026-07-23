@@ -35,6 +35,32 @@ if ($Mode -eq "off") {
     exit 0
 }
 
+# VOICE = mouth (:8769 StyleTTS) + ears/daemon (:8770) + voice_watchdog (reviver).
+# Durable flag state\voice_deliberately_off.json is what the watchdog honors (efecbb7)
+# - so voice stays off/on across reboots without a human re-killing it every wake.
+if ($Mode -eq "voice_off") {
+    Set-Content -Path "$ROOT\state\voice_deliberately_off.json" -Value '{"off": true}' -Encoding ascii
+    Log "voice off-flag SET (durable - survives reboots)"
+    # Watchdog first (scar: it revives what you kill), then the mouth + daemon.
+    ProcUp 'python.exe' 'voice_watchdog\.py'      | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    ProcUp 'python.exe' 'wren_styletts_server\.py' | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    ProcUp 'python.exe' 'wren_voice_daemon\.py'    | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Log "voice OFF: watchdog + styletts (:8769) + daemon (:8770) stopped"
+    exit 0
+}
+if ($Mode -eq "voice_on") {
+    Set-Content -Path "$ROOT\state\voice_deliberately_off.json" -Value '{"off": false}' -Encoding ascii
+    Log "voice off-flag CLEARED (durable)"
+    $vwd = ProcUp 'python.exe' 'voice_watchdog\.py'
+    if ($vwd.Count -eq 0) {
+        Start-Process -FilePath "$ROOT\.venv\Scripts\python.exe" -ArgumentList "$ROOT\scripts\voice_watchdog.py" -WorkingDirectory $ROOT -WindowStyle Hidden
+        Log "voice_watchdog launched - it revives the mouth (:8769) + daemon (:8770) itself (~30s)"
+    } else {
+        Log "voice_watchdog already running - it will revive the mouth now the flag is clear"
+    }
+    exit 0
+}
+
 $report = @()
 
 # 1) RUNTIME + ORB BACKEND :5876 (zombie-aware)

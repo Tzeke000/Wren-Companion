@@ -767,7 +767,12 @@ def vision_latest_frame() -> Response:
 # Tier 4 — control buttons. Most delegate to the live engines.
 @app.post("/api/v1/tts/toggle")
 async def tts_toggle() -> dict:
-    enabled = not bool(_g.get("_tts_enabled", True))
+    # 2026-07-22 fix: this used to flip only "_tts_enabled" (underscore) while
+    # every auto-speak consumer (question_engine, proactive, scheduler, heartbeat)
+    # reads "tts_enabled" — the orb button never actually silenced anything.
+    # Flip BOTH so the button is truthful.
+    enabled = not bool(_g.get("tts_enabled", False))
+    _g["tts_enabled"] = enabled
     _g["_tts_enabled"] = enabled
     return {"ok": True, "enabled": enabled, "engine": getattr(_tts_ref, "_engine_type", None)}
 
