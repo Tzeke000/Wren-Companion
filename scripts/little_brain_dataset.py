@@ -519,6 +519,15 @@ def tool_dialogue_samples() -> list[dict]:
     return list(tool_dialogues())
 
 
+def v13_dialogue_samples() -> list[dict]:
+    """v13 act-not-narrate round: multi-turn dialogues where the FIRST assistant
+    turn IS the [[tool:...]] call (no 'I'll do it now' prose), plus senses-gating,
+    memory-home fluency, deployment-confab fix, escalate-for-real, journal-
+    experiences, and embodied-ownership. Already full {messages} lists."""
+    from little_brain_corpus_v13 import v13_dialogues
+    return list(v13_dialogues())
+
+
 def main() -> int:
     tr = harvest_transcript()
     les = lesson_pairs()
@@ -549,9 +558,14 @@ def main() -> int:
     # 14 distinct scenarios so it learns the FORMAT, not the specific answers).
     toolrules = toolrules_rule_samples() * 3
     tool_dlg = tool_dialogue_samples() * 10
+    # v13 act-not-narrate: x12 — v12's tool_dlg x10 taught the FORMAT but she
+    # still narrated instead of emitting, so the corrective reflex needs at least
+    # as much weight to overwrite the habit (act first, senses-gate, escalate,
+    # journal-experiences, embodied-ownership).
+    v13_dlg = v13_dialogue_samples() * 12
     stock = v6_stock_samples()
     data = (tr + ident + know + ground + lessons + reasons + dontknow +
-            self_banks + toolrules + tool_dlg + stock + les)
+            self_banks + toolrules + tool_dlg + v13_dlg + stock + les)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
