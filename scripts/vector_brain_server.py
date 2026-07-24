@@ -74,6 +74,11 @@ LOCAL_MODEL = os.environ.get("IRIS_LOCAL_MODEL", "llama3.2:3b")
 # active use never re-pays the load.
 LOCAL_TIMEOUT_S = 90.0
 LOCAL_KEEP_ALIVE = os.environ.get("IRIS_LB_KEEP_ALIVE", "30m")
+# 2026-07-24 (Zeke): 120 was cutting her off mid-sentence AND leaving no room to
+# emit a tool call after any preamble. 256 is a ceiling — short replies still
+# EOS early (no latency cost), it just lets a full answer + a tool line finish.
+# Env-overridable so it's tunable without a rebake.
+LOCAL_MAX_TOKENS = int(os.environ.get("IRIS_LB_MAX_TOKENS", "256"))
 LOCAL_TRIP = 1           # 2->1 (2026-07-20): ONE hung question is enough
                          # evidence — the second should never hang too
 LOCAL_WINDOW_S = 600.0   # 300->600: stay local-first longer between re-probes
@@ -466,7 +471,7 @@ def _ask_local(messages: list[dict]) -> str | None:
         r = requests.post(
             f"{OLLAMA}/v1/chat/completions",
             json={"model": LOCAL_MODEL, "messages": msgs,
-                  "temperature": 0.6, "max_tokens": 120,
+                  "temperature": 0.6, "max_tokens": LOCAL_MAX_TOKENS,
                   "keep_alive": LOCAL_KEEP_ALIVE},
             timeout=LOCAL_TIMEOUT_S)
         if r.status_code != 200:
