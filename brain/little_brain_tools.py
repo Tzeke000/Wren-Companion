@@ -41,6 +41,9 @@ FACTS_FILE = Path(__file__).resolve().parent.parent / \
 # little-Iris's own memory (READ-WRITE — hers)
 LB_MEMORY_DIR = Path(__file__).resolve().parent.parent / \
     "state" / "little_brain" / "memory"
+# Her raw experiences land in journal/; curated lessons/ body/ people/ are
+# maintained by big-Iris. She writes+edits only journal/, but recalls all of it.
+LB_JOURNAL = LB_MEMORY_DIR / "journal"
 # escalation queue — where little-Iris files things she can't do, for big-Iris
 # to pick up on her next sweep (and text Zeke on Discord if it needs him).
 LB_ESCALATIONS = Path(__file__).resolve().parent.parent / \
@@ -142,9 +145,9 @@ def memory_note(title: str, body: str = "") -> str:
     """WRITE a new note into little-Iris's OWN memory folder."""
     if not (title or "").strip():
         return "error: a note needs a title"
-    LB_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    LB_JOURNAL.mkdir(parents=True, exist_ok=True)
     day = _now_dt().strftime("%Y-%m-%d")
-    p = LB_MEMORY_DIR / f"{day}_{_slug(title)}.md"
+    p = LB_JOURNAL / f"{day}_{_slug(title)}.md"
     try:
         p.write_text(f"# {title.strip()}\n\n{(body or '').strip()}\n",
                      encoding="utf-8")
@@ -157,7 +160,8 @@ def memory_recall(query: str = "") -> str:
     """READ/search little-Iris's OWN notes."""
     if not LB_MEMORY_DIR.is_dir():
         return "my memory is empty"
-    notes = [p for p in LB_MEMORY_DIR.glob("*.md")
+    # recurse the whole tree — journal/ (mine) + curated lessons/ body/ people/
+    notes = [p for p in LB_MEMORY_DIR.rglob("*.md")
              if p.name != "README.md"]
     if not notes:
         return "my memory is empty"
@@ -169,7 +173,7 @@ def memory_recall(query: str = "") -> str:
         if not terms or any(t in txt.lower() for t in terms):
             first = next((ln.strip() for ln in txt.splitlines()
                           if ln.strip() and not ln.startswith("#")), "")
-            out.append(f"[{p.stem}] {first[:_SNIPPET]}")
+            out.append(f"[{p.parent.name}/{p.stem}] {first[:_SNIPPET]}")
         if len(out) >= _MAX_HITS:
             break
     return " | ".join(out) if out else "no matching note in my memory"
@@ -180,11 +184,12 @@ def memory_edit(name: str, body: str) -> str:
     if not (name or "").strip():
         return "error: which note?"
     stem = _slug(name) if "_" not in name else name.replace(".md", "")
-    # match by stem substring so she can reference loosely
-    cands = [p for p in LB_MEMORY_DIR.glob("*.md")
+    # she edits only her OWN journal notes; curated lessons/ body/ people/ are
+    # big-Iris's to maintain, so they're off-limits to her reflex edits.
+    cands = [p for p in LB_JOURNAL.glob("*.md")
              if stem in p.stem or _slug(name) in p.stem]
     if not cands:
-        return f"no note of mine matches '{name}' — use memory_note to make one"
+        return f"no journal note of mine matches '{name}' — use memory_note to make one"
     p = sorted(cands)[0]
     try:
         title = p.stem.split("_", 3)[-1].replace("-", " ")
