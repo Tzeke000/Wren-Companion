@@ -45,7 +45,13 @@ OUT = REPO / "state" / "little_brain" / "adapter"
 # ceiling (v6/v6b failures: added numeric content scrambles other numbers).
 # Set IRIS_LB_BASE=unsloth/Qwen2.5-7B-Instruct for the 7B bake.
 BASE = os.environ.get("IRIS_LB_BASE", "unsloth/Llama-3.2-3B-Instruct")
-VRAM_FLOOR_GIB = 8.0 if "7B" in BASE else 4.5
+# Env-overridable (2026-07-24, Iris): the perception floor grew ~4.7GB with the
+# nervous-system/senses code, leaving ~7.3GB free — below the 8.0 default guard.
+# At low seq (256) the 7B QLoRA attn-only peaks ~6.5GB and stays resident in that
+# free window, so allow a lower floor deliberately (IRIS_LB_VRAM_FLOOR). Default
+# unchanged so other bakes keep the original guard.
+VRAM_FLOOR_GIB = float(os.environ.get(
+    "IRIS_LB_VRAM_FLOOR", "8.0" if "7B" in BASE else "4.5"))
 
 MAX_SEQ = int(os.environ.get("IRIS_LB_SEQ", "512"))
                 # 1024->512 (2026-07-20 launch): samples are speech-sized —
