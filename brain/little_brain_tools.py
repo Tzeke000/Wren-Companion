@@ -41,9 +41,31 @@ FACTS_FILE = Path(__file__).resolve().parent.parent / \
 # little-Iris's own memory (READ-WRITE — hers)
 LB_MEMORY_DIR = Path(__file__).resolve().parent.parent / \
     "state" / "little_brain" / "memory"
-# Her raw experiences land in journal/; curated lessons/ body/ people/ are
-# maintained by big-Iris. She writes+edits only journal/, but recalls all of it.
+# Her raw experiences land in journal/; misc/ is her catch-all. curated
+# lessons/ body/ people/ are maintained by big-Iris. She writes+edits only her
+# own folders, but recalls all of it.
 LB_JOURNAL = LB_MEMORY_DIR / "journal"
+LB_MISC = LB_MEMORY_DIR / "misc"
+# The ONLY folders little-Iris may write to. Everything else — lessons/ body/
+# people/ and the whole rest of the disk — is off-limits to her writes. Every
+# write is ALSO path-guarded to resolve inside LB_MEMORY_DIR, so no title can
+# ever traverse out (Zeke 2026-07-24: "make sure she can only write to those
+# folders").
+_HER_WRITABLE = {"journal": LB_JOURNAL, "misc": LB_MISC}
+
+
+def _writable_dir(folder: str) -> Path:
+    """Map a folder name to one of her writable dirs; anything unknown -> journal."""
+    return _HER_WRITABLE.get((folder or "").strip().lower(), LB_JOURNAL)
+
+
+def _within_home(p: Path) -> bool:
+    """True only if p resolves inside her memory home — the hard containment guard."""
+    try:
+        p.resolve().relative_to(LB_MEMORY_DIR.resolve())
+        return True
+    except Exception:
+        return False
 # escalation queue — where little-Iris files things she can't do, for big-Iris
 # to pick up on her next sweep (and text Zeke on Discord if it needs him).
 LB_ESCALATIONS = Path(__file__).resolve().parent.parent / \
@@ -141,17 +163,22 @@ def memory_search(query: str) -> str:
     return " | ".join(out) if out else "no match in big-Iris's memory"
 
 
-def memory_note(title: str, body: str = "") -> str:
-    """WRITE a new note into little-Iris's OWN memory folder."""
+def memory_note(title: str, body: str = "", folder: str = "journal") -> str:
+    """WRITE a new note into one of little-Iris's OWN folders (journal | misc).
+    Anything else routes to journal/, and the final path is guarded to stay
+    inside her memory home — she can never write to a curated folder or escape."""
     if not (title or "").strip():
         return "error: a note needs a title"
-    LB_JOURNAL.mkdir(parents=True, exist_ok=True)
+    d = _writable_dir(folder)
+    d.mkdir(parents=True, exist_ok=True)
     day = _now_dt().strftime("%Y-%m-%d")
-    p = LB_JOURNAL / f"{day}_{_slug(title)}.md"
+    p = d / f"{day}_{_slug(title)}.md"
+    if not _within_home(p):
+        return "error: I can only write inside my own memory folders"
     try:
         p.write_text(f"# {title.strip()}\n\n{(body or '').strip()}\n",
                      encoding="utf-8")
-        return f"saved to my memory: {p.name}"
+        return f"saved to my memory ({d.name}): {p.name}"
     except Exception as e:
         return f"error saving note: {e!r}"
 
@@ -184,13 +211,17 @@ def memory_edit(name: str, body: str) -> str:
     if not (name or "").strip():
         return "error: which note?"
     stem = _slug(name) if "_" not in name else name.replace(".md", "")
-    # she edits only her OWN journal notes; curated lessons/ body/ people/ are
-    # big-Iris's to maintain, so they're off-limits to her reflex edits.
-    cands = [p for p in LB_JOURNAL.glob("*.md")
-             if stem in p.stem or _slug(name) in p.stem]
+    # she edits only her OWN folders (journal + misc); curated lessons/ body/
+    # people/ are big-Iris's to maintain, so they're off-limits to her edits.
+    cands = []
+    for d in _HER_WRITABLE.values():
+        cands += [p for p in d.glob("*.md")
+                  if stem in p.stem or _slug(name) in p.stem]
     if not cands:
-        return f"no journal note of mine matches '{name}' — use memory_note to make one"
+        return f"no note of mine matches '{name}' — use memory_note to make one"
     p = sorted(cands)[0]
+    if not _within_home(p):
+        return "error: I can only edit notes inside my own memory folders"
     try:
         title = p.stem.split("_", 3)[-1].replace("-", " ")
         p.write_text(f"# {title}\n\n{(body or '').strip()}\n", encoding="utf-8")
@@ -371,7 +402,7 @@ TOOLS = {
     "ask_big_iris": ask_big_iris,     # escalate up to big-Iris (-> Zeke)
 }
 
-_TWO_ARG = {"memory_note", "memory_edit"}
+_TWO_ARG = {"memory_edit"}
 
 
 def dispatch(name: str, args: list[str]) -> str:
@@ -379,6 +410,11 @@ def dispatch(name: str, args: list[str]) -> str:
     if fn is None:
         return f"error: no tool named '{name}'"
     try:
+        if name == "memory_note":
+            # (title, body, [folder]) — optional folder routes journal|misc
+            return fn(args[0] if args else "",
+                      args[1] if len(args) > 1 else "",
+                      args[2] if len(args) > 2 else "journal")
         if name in _TWO_ARG:
             return fn(args[0] if args else "", args[1] if len(args) > 1 else "")
         return fn(args[0] if args else "")
