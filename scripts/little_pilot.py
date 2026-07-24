@@ -331,8 +331,38 @@ def _act(d: dict, goals: dict) -> str:
     if a in ("alert", "reseat_request"):
         _append(ALERTS, {"ts": time.time(), "kind": a, "text": arg,
                          "why": d.get("why", "")})
+        # LIFELINE FIX (2026-07-23 night, Zeke): during the token-freeze gap she
+        # filed ~24 reseat_requests into a zombified daemon and a frozen big-Iris
+        # — she did everything right and nobody upstairs could hear. Now every
+        # alert/reseat ALSO lands in her ask_big_iris escalation queue: that
+        # file rewakes big-Iris in seconds via the Stop hook when she's alive,
+        # and the self-cron DMs Zeke when she's not. Cooldown 30min so a stuck
+        # condition is one escalation, not a flood.
+        _escalate_to_big(f"[pilot {a}] {arg or ''} — {d.get('why', '')}"[:500])
         return f"alert filed: {a}"
     return "noop"
+
+
+_ESC_COOLDOWN_S = 1800.0
+_esc_last = {"t": 0.0}
+
+
+def _escalate_to_big(request: str) -> None:
+    """File a pending escalation to big-Iris's queue (same format as her
+    ask_big_iris tool). Best-effort, cooldown-gated, never raises."""
+    now = time.time()
+    if now - _esc_last["t"] < _ESC_COOLDOWN_S:
+        return
+    _esc_last["t"] = now
+    try:
+        esc = LB / "escalations.jsonl"
+        esc.parent.mkdir(parents=True, exist_ok=True)
+        with esc.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                "request": request, "status": "pending"},
+                               ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 _hist: list[dict] = []   # last cycles for contact-health rules (v0.3)
@@ -533,6 +563,7 @@ def main() -> int:
                 if hard:
                     _append(ALERTS, {"ts": time.time(), "kind": "HARD",
                                      "text": hard})
+                    _escalate_to_big(f"[pilot HARD] {hard}"[:500])
                 if time.time() - last_suggest >= 35:
                     last_suggest = time.time()
                     _suggest(str(w.get("task", "driving")), bat, nrv)
@@ -547,6 +578,7 @@ def main() -> int:
                 hard = hard or contact
             if hard:
                 _append(ALERTS, {"ts": time.time(), "kind": "HARD", "text": hard})
+                _escalate_to_big(f"[pilot HARD] {hard}"[:500])
 
             events = list(fast_events)   # live-pulse edges join the record
             for k in ("on_charger",):
