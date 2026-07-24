@@ -66,7 +66,14 @@ import threading
 
 OLLAMA = os.environ.get("IRIS_OLLAMA_URL", "http://127.0.0.1:11434")
 LOCAL_MODEL = os.environ.get("IRIS_LOCAL_MODEL", "llama3.2:3b")
-LOCAL_TIMEOUT_S = 30.0
+# 2026-07-23: the 8.1GB v12 q8 model gets EVICTED from VRAM after ~5min idle
+# (ollama keep_alive default). Zeke texts the Little-Iris tab occasionally, so
+# every message paid a COLD 8GB reload that blew past the old 30s ceiling ->
+# ReadTimeout -> None -> "big brain busy" FALLBACK on every turn. Fix: give the
+# cold reload room (90s), and hold the model resident 30min between turns so
+# active use never re-pays the load.
+LOCAL_TIMEOUT_S = 90.0
+LOCAL_KEEP_ALIVE = os.environ.get("IRIS_LB_KEEP_ALIVE", "30m")
 LOCAL_TRIP = 1           # 2->1 (2026-07-20): ONE hung question is enough
                          # evidence — the second should never hang too
 LOCAL_WINDOW_S = 600.0   # 300->600: stay local-first longer between re-probes
@@ -459,7 +466,8 @@ def _ask_local(messages: list[dict]) -> str | None:
         r = requests.post(
             f"{OLLAMA}/v1/chat/completions",
             json={"model": LOCAL_MODEL, "messages": msgs,
-                  "temperature": 0.6, "max_tokens": 120},
+                  "temperature": 0.6, "max_tokens": 120,
+                  "keep_alive": LOCAL_KEEP_ALIVE},
             timeout=LOCAL_TIMEOUT_S)
         if r.status_code != 200:
             print(f"[vector-brain] local llm http {r.status_code}: "
