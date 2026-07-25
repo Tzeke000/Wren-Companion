@@ -59,7 +59,10 @@ BAT = _pick_bat()
 LOG = REPO / "state" / "tower_boot.log"
 OPERATOR_PORT = 5876
 NETWORK_WAIT_S = 300
-BODY_WAIT_S = 360
+# 2026-07-25: was 360s — the PROVEN unattended boot (07-24) took ~5.5 min to
+# identity-check, so a 6-min window false-alarmed "NOT answering" on a healthy
+# boot. 600s = ~2x observed; Zeke greenlit the widen 2026-07-25.
+BODY_WAIT_S = 600
 
 
 def log(msg: str) -> None:
