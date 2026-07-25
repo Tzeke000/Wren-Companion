@@ -207,7 +207,15 @@ def verify(expect_pin: str, timeout_s: int = 300) -> tuple[bool, str]:
                  "ForEach-Object { if ($_.CommandLine -match '--model\\s+(\\S+)') "
                  "{ Write-Output ($_.ProcessId.ToString() + '=' + $Matches[1]) } }")
         hosts = [h.strip() for h in out.splitlines() if "=" in h]
-        port = "5876" in ps("(netstat -ano | Select-String ':5876\\s').Count")
+        # Count LISTENING sockets on 5876. (Earlier version tested `"5876" in
+        # <count>`, which is false for every possible count -- verification
+        # could never have passed.)
+        raw = ps("(netstat -ano | Select-String 'LISTENING' | "
+                 "Select-String ':5876\\s').Count").strip()
+        try:
+            port = int(re.search(r"\d+", raw).group()) > 0
+        except Exception:
+            port = False
         hb = "stale"
         try:
             age = time.time() - HEARTBEAT.stat().st_mtime
