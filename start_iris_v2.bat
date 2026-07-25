@@ -32,11 +32,14 @@ if %errorLevel% neq 0 (
 )
 echo [start_iris_v2.bat] running elevated.
 
-REM --- Pin the model EXPLICITLY (2026-07-06). iris_body_host.py passes IRIS_MODEL to the
+REM --- Pin the model EXPLICITLY. iris_body_host.py passes IRIS_MODEL to the
 REM --- Agent SDK; unset it would inherit the CLI's *saved default*, which /model can
-REM --- silently change (it's Fable 5 now). This launcher means OPUS - so say so.
+REM --- silently change. This launcher means the newest Opus - so say so.
 REM --- Fable 5 lives in start_iris_v2_fable.bat.
-set "IRIS_MODEL=claude-opus-4-8[1m]"
+REM --- 2026-07-25: flipped 4.8 -> Opus 5 (`claude-opus-5`, Claude Code >=2.1.219,
+REM --- npm CLI updated to 2.1.220). BARE string: Opus 5 is 1M-context native, so it
+REM --- does NOT need the `[1m]` suffix 4.8 required. REVERT = `claude-opus-4-8[1m]`.
+set "IRIS_MODEL=claude-opus-5"
 
 if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
     echo [start_iris_v2.bat] ERROR: venv missing at D:\Wren-Companion\.venv\Scripts\python.exe 1>&2
