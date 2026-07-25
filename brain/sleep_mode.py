@@ -433,11 +433,37 @@ def _run_phase1_awake_handoff(g: dict[str, Any]) -> dict[str, Any]:
         "exchange — just what mattered, like remembering you ate three meals but not "
         "every detail.\n\nRecent chat:\n" + "\n".join(chat_lines)
     )
-    summary = _llm_summarize(g, prompt_user, max_seconds=120.0)
-    out_path.write_text(
-        f"# Awake-session handoff\n\nWritten at {datetime.now().isoformat(timespec='seconds')}\n\n{summary}\n",
-        encoding="utf-8",
-    )
+    # 2026-07-25 FIX (Zeke greenlit): do NOT block on ask_iris here.
+    #
+    # The old code called _llm_summarize(max_seconds=120) inline. But the Stop hook
+    # can only rewake Iris BETWEEN turns -- if she's mid-turn when the request lands,
+    # the 120s deadline burns down while she's busy and her answer arrives after the
+    # stub is already on disk. Measured 2026-07-25: 29 of 34 awake handoffs were the
+    # 150-byte "Iris unavailable" stub. It never errored, so nobody noticed.
+    #
+    # New shape: write the stub NOW (so the sleep cycle is never blocked), then wait
+    # for the real summary on a background thread and OVERWRITE the file when it
+    # lands. Handoffs aren't urgent, so a late real summary beats an on-time stub.
+    _write_handoff(out_path, _STUB_TEXT, provisional=True)
+
+    def _upgrade_when_ready() -> None:
+        try:
+            summary = _llm_summarize(g, prompt_user, max_seconds=900.0)
+            if summary and summary != _STUB_TEXT:
+                _write_handoff(out_path, summary, provisional=False)
+                _bump_handoff_stat(base_dir, "upgraded")
+                print(f"[sleep_mode] awake handoff upgraded: {out_path.name}")
+            else:
+                _bump_handoff_stat(base_dir, "stub_kept")
+                print(f"[sleep_mode] awake handoff STAYED a stub: {out_path.name}")
+        except Exception as e:  # noqa: BLE001 - never take the sleep cycle down
+            _bump_handoff_stat(base_dir, "error")
+            print(f"[sleep_mode] handoff upgrade failed: {e!r}")
+
+    threading.Thread(
+        target=_upgrade_when_ready, name="sleep-handoff-upgrade", daemon=True
+    ).start()
+    summary = _STUB_TEXT
 
     # Consolidate the threshold-handoff log (per Zeke 2026-05-08).
     # Promotes anchor-worthy summaries to anchor_moments, archives the rest.
@@ -533,6 +559,39 @@ def _run_phase3_sleep_handoff(g: dict[str, Any]) -> dict[str, Any]:
 # ── LLM call helper ────────────────────────────────────────────────────
 
 
+_STUB_TEXT = "(Iris unavailable; sleep handoff stub. Awake session ended; sleep cycle will continue.)"
+
+
+def _write_handoff(out_path: Path, body: str, *, provisional: bool) -> None:
+    """Write a handoff note. Provisional notes are stubs awaiting an upgrade."""
+    mark = "  _(provisional — awaiting Iris's summary)_\n" if provisional else ""
+    out_path.write_text(
+        f"# Awake-session handoff\n\n"
+        f"Written at {datetime.now().isoformat(timespec='seconds')}\n{mark}\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+def _bump_handoff_stat(base_dir: Path, key: str) -> None:
+    """Count stub-vs-real outcomes so this failure can never hide again.
+
+    The 2026-07-25 lesson: a fallback with no counter is a silent failure with
+    good manners. 29 of 34 handoffs were stubs for months and nothing said so.
+    """
+    p = Path(base_dir) / "state" / "sleep_handoff_stats.json"
+    try:
+        stats = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+    except Exception:  # noqa: BLE001 - a corrupt counter must not break sleep
+        stats = {}
+    stats[key] = int(stats.get(key, 0)) + 1
+    stats["last_" + key] = datetime.now().isoformat(timespec="seconds")
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        print(f"[sleep_mode] stat write failed: {e!r}")
+
+
 def _llm_summarize(g: dict[str, Any], prompt: str, max_seconds: float = 120.0) -> str:
     """Phase 22: route through iris_llm. Falls back to deterministic stub
     on timeout — sleep summaries aren't urgent and the cycle continues."""
@@ -551,8 +610,18 @@ def _llm_summarize(g: dict[str, Any], prompt: str, max_seconds: float = 120.0) -
 
 
 def _recent_chat_lines(g: dict[str, Any], limit: int = 200) -> list[str]:
-    p = Path(g.get("BASE_DIR") or ".") / "state" / "chat_history.jsonl"
-    if not p.is_file():
+    # 2026-07-25 FIX: this read state/chat_history.jsonl, which DOES NOT EXIST on
+    # this machine -- so it silently returned [] and every sleep-handoff prompt was
+    # built with an empty "Recent chat:" block. The real shared voice+chat log is
+    # state/transcript.jsonl (brain/iris_transcript.py). Try that first; keep the
+    # old path as a fallback so this is no-worse-than-before if a fork uses it.
+    base = Path(g.get("BASE_DIR") or ".") / "state"
+    p = next(
+        (c for c in (base / "transcript.jsonl", base / "chat_history.jsonl") if c.is_file()),
+        None,
+    )
+    if p is None:
+        print("[sleep_mode] no transcript found - handoff prompt will have no chat context")
         return []
     lines: list[str] = []
     try:
