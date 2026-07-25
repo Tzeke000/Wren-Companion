@@ -433,14 +433,17 @@ def snapshot() -> dict:
             "inner_thought_ts": float(_g.get("_inner_thought_ts") or 0.0),
         },
         "models": {
-            # Iris's cognition is Claude (cross-process via Stop hook).
-            # No local model selection — these fields exist for the
-            # orb's reads, populated honestly.
-            "selected_model": "claude (cross-process)",
+            # Iris's cognition is Claude (Anthropic, cross-process via the
+            # Stop-hook bridge). IRIS_MODEL is the exact pin set in
+            # start_iris_v2.bat and passed down to the SDK host — surface it
+            # so the orb shows the REAL brain (e.g. "claude-opus-5"), not a
+            # generic "claude". Read per-request so a model flip shows up
+            # after the next stack restart without another code change.
+            "selected_model": (os.environ.get("IRIS_MODEL") or "claude").strip() or "claude",
             "fallback_model": "none",
-            "routing_reason": "Iris-as-LLM via brain.iris_llm bridge",
+            "routing_reason": "Iris-as-LLM via brain.iris_llm bridge (Anthropic, cross-process)",
             "cognitive_mode": "iris_llm_bridge",
-            "available_models": ["claude"],
+            "available_models": [(os.environ.get("IRIS_MODEL") or "claude").strip() or "claude"],
         },
         "ribbon": {
             "vision_status": (
@@ -1305,11 +1308,24 @@ async def emil_send(payload: dict = Body(default={})) -> dict:
 def ui_tab() -> dict:
     """Optionally let the backend suggest which tab the orb should open.
     State at state/orb_active_tab.txt — Iris can write to it via the
-    orb_focus_tab MCP tool when she wants to direct attention."""
+    orb_focus_tab MCP tool when she wants to direct attention.
+
+    ONE-SHOT (2026-07-25): the client polls this every 1s, so a persistent
+    value here re-asserts the tab every second and locks the user out of
+    manual navigation (that's exactly what happened with a stale
+    'little_iris' directive). A focus directive is a momentary nudge, not a
+    lock — so we clear the file after serving it once. The client applies it
+    on the next poll, then this returns null and manual clicks stick."""
     p = _root / "state" / "orb_active_tab.txt"
     if p.is_file():
         try:
             tab = p.read_text(encoding="utf-8").strip() or None
+            if tab:
+                # Read-once: consume the directive so it can't re-fire.
+                try:
+                    p.write_text("", encoding="utf-8")
+                except Exception:
+                    pass
             return {"tab": tab}
         except Exception:
             pass
