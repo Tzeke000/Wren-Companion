@@ -263,12 +263,38 @@ def run_startup(g: dict[str, Any]) -> None:
     except Exception as e:
         print(f"[self_model] weekly update skipped: {e}")
 
-    print("[startup] step: inner monologue")
-    try:
-        from brain.inner_monologue import start_inner_monologue
-        start_inner_monologue(g)
-    except Exception as e:
-        print(f"[inner_monologue] startup skipped: {e}")
+    # Inner monologue — the AVA-ERA thread is RETIRED here (2026-07-25, second half
+    # of the fix Zeke greenlit at 04:42).
+    #
+    # f429b37 retired heartbeat's dual_brain submit("inner_monologue") believing that
+    # was the duplicate producer. It was A duplicate, not THE one: brain/inner_monologue
+    # .start_inner_monologue() spawns its OWN daemon thread ("ava-inner-monologue")
+    # that loops every 8-12 min and calls _generate_thought(trigger="idle") directly —
+    # never touching heartbeat or dual_brain. That thread SURVIVED f429b37 and fired at
+    # 05:30 on the restart meant to prove the fix, carrying the tell-tale legacy prompt
+    # ("- Ava current mood: ..."). Caught it live on the request itself.
+    #
+    # The discriminator, for whoever debugs this next — reflect requests are tagged by
+    # trigger:
+    #   trigger=idle               -> THIS legacy thread (retired below)
+    #   trigger=background_stream_b -> dual_brain._task_inner_monologue (dead: nothing
+    #                                  submits "inner_monologue" since f429b37)
+    #   trigger=quiet_too_long     -> brain/iris_inner_monologue.py (KEEP — the real one)
+    #
+    # Blast radius, checked: brain/inner_monologue.py is NOT deleted and _append_thought
+    # still works, so face_tracking/dual_brain logging and restart_handoff's note are
+    # untouched. What thins out is state/inner_monologue.json (the LEGACY store, separate
+    # from the Iris store state/iris_inner_monologue.jsonl): concept_graph, operator
+    # _server's inner_life count, and reply_engine's conversation starter read it and
+    # will see fewer new rows. All three degrade gracefully (starter returns None and the
+    # caller falls back) — no exceptions, no dangling refs.
+    #
+    # Also a token fix during an unattended month: every duplicate reflect lands
+    # permanently in the cached prefix and session cost is quadratic in length.
+    print("[startup] step: inner monologue (legacy Ava thread retired — Iris-native "
+          "iris_inner_monologue owns reflections; see memory "
+          "reflection_double_producer_2026-07-25)")
+    _LEGACY_MONOLOGUE_THREAD_RETIRED = True
 
     print("[startup] step: history manager")
     try:
