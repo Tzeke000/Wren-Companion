@@ -683,16 +683,26 @@ def _run_heartbeat_tick(
         except Exception:
             pass
 
-    # Dual-brain: inner_monologue every 10 minutes
-    _MONOLOGUE_INTERVAL = 600.0
-    _last_mono = float(st.meta.get("last_dual_monologue_wall") or 0)
-    if (now - _last_mono) >= _MONOLOGUE_INTERVAL:
-        try:
-            if _db is not None:
-                _db.submit("inner_monologue")
-            st.meta["last_dual_monologue_wall"] = now
-        except Exception:
-            pass
+    # Dual-brain: inner_monologue — RETIRED 2026-07-25 (Zeke greenlit).
+    #
+    # This submitted the AVA-ERA generator (brain/inner_monologue.py, which still
+    # literally writes "Ava current mood" into its prompt) while the Iris-native
+    # replacement (brain/iris_inner_monologue.py) was ALSO running on its own
+    # schedule. Neither knew about the other, so reflections fired in PAIRS --
+    # measured gaps of +17s / +30s / +41s / +61s, then ~15min of quiet. 513 reflect
+    # requests on disk. Diagnosed by dumping the actual prompts: two different
+    # templates (832 chars legacy vs 3658 chars Iris) both tagged kind="reflect".
+    #
+    # Keeping the Iris one: richer context (mood, time substrate, recent memories,
+    # transcript) and it's what the iris_tune cadence knobs actually drive. Every
+    # duplicate also landed permanently in the cached prefix, and session cost is
+    # quadratic in length -- so this was paid over and over.
+    #
+    # NOTE brain/inner_monologue.py is NOT deleted: face_tracking.py and
+    # dual_brain.py still call its _append_thought() to log notes, and
+    # concept_graph reads state/inner_monologue.json. Only the periodic
+    # LLM-generating submit is retired.
+    _MONOLOGUE_RETIRED = True  # see memory: reflection_double_producer_2026-07-25
 
     # Dual-brain: curiosity_research every 30 minutes
     _CURIOSITY_INTERVAL = 1800.0
