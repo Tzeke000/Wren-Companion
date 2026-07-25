@@ -197,7 +197,8 @@ When work changes architecture or adds a new subsystem, update relevant docs in 
 
 ## Voice setup
 
-- **Iris's voice:** Kokoro `af_bella` (CUDA on RTX 3060). Piper `en_US-kathleen-low` as fallback. Locked 2026-05-09. Distinct from Ava (`af_heart`) and Wren (`en_US-amy-medium`).
+- **Iris's voice:** **her own StyleTTS2 clone** (mouth :8769, voice daemon :8770). Piper `en_US-kathleen-low` is the FALLBACK only. *(Corrected 2026-07-25 by Zeke — this said Kokoro `af_bella` for ~2 months after the StyleTTS2 mouth was built 2026-06-26.)* Distinct from Ava (`af_heart`) and Wren (`en_US-amy-medium`).
+- **Voice + ears are currently OFF by Zeke's directive** (`state/voice_deliberately_off.json`, 2026-07-23; the watchdog enforces it across reboots). 8769/8770 being DOWN is CORRECT — do not "heal" them. A switch exists to bring them back, but there's no point while he's away: he can't be in the room. Eyes/perception stay ON.
 - **Wren's voice (other machine):** `en_US-amy-medium` (Piper). Locked.
 - **Wake word:** openWakeWord. "hey jarvis" bundled model as proxy short-term; train a `hey_iris.onnx` model later.
 - **STT:** Whisper Large-v3 Turbo (faster-whisper, GPU when CUDA available).
