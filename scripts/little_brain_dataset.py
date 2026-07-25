@@ -528,6 +528,16 @@ def v13_dialogue_samples() -> list[dict]:
     return list(v13_dialogues())
 
 
+def v14_dialogue_samples() -> list[dict]:
+    """v14 live-sensor-routing round: live-body questions (voltage/volts/level/
+    charging-now/moving/lift/held) reach for senses_now and answer with the REAL
+    number; FACTS/RULES/PAST route to memory_recall (the contrast v13 never saw);
+    reach->fail->honest-refuse; use-the-result / anti-loop. Fixes v13's tool-loop
+    regression (looped on memory_search for live reads). Already full {messages}."""
+    from little_brain_corpus_v14 import v14_dialogues
+    return list(v14_dialogues())
+
+
 def main() -> int:
     tr = harvest_transcript()
     les = lesson_pairs()
@@ -563,9 +573,16 @@ def main() -> int:
     # as much weight to overwrite the habit (act first, senses-gate, escalate,
     # journal-experiences, embodied-ownership).
     v13_dlg = v13_dialogue_samples() * 12
+    # v14 live-sensor-routing: x16 — HEAVY, because it must overwrite a strong
+    # wrong habit v13 baked in (live "what's my voltage" -> memory_search loop,
+    # never senses_now). Corrective signal needs more weight than the habit it
+    # replaces; the contrast (facts->memory, live->senses) + reach-fail-refuse
+    # + anti-loop are all here. Warmstart is FROM v12 (stable), so v14 relearns
+    # v13's gains (still in v13_dlg) plus these fixes without v13's loop instability.
+    v14_dlg = v14_dialogue_samples() * 16
     stock = v6_stock_samples()
     data = (tr + ident + know + ground + lessons + reasons + dontknow +
-            self_banks + toolrules + tool_dlg + v13_dlg + stock + les)
+            self_banks + toolrules + tool_dlg + v13_dlg + v14_dlg + stock + les)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
@@ -581,6 +598,8 @@ def main() -> int:
     print(f"self samples:     {len(self_banks)} (v10 lane + small-brain humility + relationship)")
     print(f"toolrules samples:{len(toolrules)} (v10 rules: 3-tries/wall-clock/ladder/write-limits)")
     print(f"tool-dialogues:   {len(tool_dlg)} (v10 multi-turn tool-use demos)")
+    print(f"v13 dialogues:    {len(v13_dlg)} (act-not-narrate, x12)")
+    print(f"v14 dialogues:    {len(v14_dlg)} (live-sensor routing -> senses_now, x16)")
     print(f"stock samples:    {len(stock)} (v6 stock behavior-tree + Iris overlay)")
     print(f"lesson pairs:     {len(les)}")
     print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
