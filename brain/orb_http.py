@@ -206,6 +206,50 @@ def _onboarding_snapshot_block() -> dict:
         return {"active": False, "step": None}
 
 
+_live_model_cache: dict = {"ts": 0.0, "value": ""}
+
+
+def _live_claude_model() -> str:
+    """The REAL cognition model name for the orb (bug fix 2026-07-27: the orb
+    showed literal "claude" forever because IRIS_MODEL is set in the
+    start_iris_v2*.bat -> iris_body_host.py process tree, and avaagent.py —
+    which serves this API — never inherits it).
+
+    Lookup chain: IRIS_MODEL env (exact, free) -> live claude.exe `--model`
+    flag via psutil process scan (truth regardless of which launcher/env
+    started what) -> generic "claude" as last resort. The scan is cached 60s:
+    the orb polls at ~1Hz and the pin can only change across a stack restart.
+    """
+    env = (os.environ.get("IRIS_MODEL") or "").strip()
+    if env:
+        return env
+    now = time.time()
+    if _live_model_cache["value"] and now - _live_model_cache["ts"] < 60.0:
+        return _live_model_cache["value"]
+    value = ""
+    try:
+        import psutil
+        for proc in psutil.process_iter(["name", "cmdline"]):
+            try:
+                if (proc.info.get("name") or "").lower() != "claude.exe":
+                    continue
+                cmd = proc.info.get("cmdline") or []
+                if "--model" in cmd:
+                    i = cmd.index("--model")
+                    if i + 1 < len(cmd):
+                        value = str(cmd[i + 1]).strip()
+                        break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if value:
+        _live_model_cache["ts"] = now
+        _live_model_cache["value"] = value
+        return value
+    return "claude"
+
+
 def _time_block_inline() -> dict:
     """Time substrate state for snapshot. Defined at module level so the
     main snapshot can include it without forward-reference."""
@@ -434,16 +478,14 @@ def snapshot() -> dict:
         },
         "models": {
             # Iris's cognition is Claude (Anthropic, cross-process via the
-            # Stop-hook bridge). IRIS_MODEL is the exact pin set in
-            # start_iris_v2.bat and passed down to the SDK host — surface it
-            # so the orb shows the REAL brain (e.g. "claude-opus-5"), not a
-            # generic "claude". Read per-request so a model flip shows up
-            # after the next stack restart without another code change.
-            "selected_model": (os.environ.get("IRIS_MODEL") or "claude").strip() or "claude",
+            # Stop-hook bridge). Surface the REAL model pin (e.g.
+            # "claude-opus-5"), not a generic "claude" — see
+            # _live_claude_model() for the lookup chain.
+            "selected_model": _live_claude_model(),
             "fallback_model": "none",
             "routing_reason": "Iris-as-LLM via brain.iris_llm bridge (Anthropic, cross-process)",
             "cognitive_mode": "iris_llm_bridge",
-            "available_models": [(os.environ.get("IRIS_MODEL") or "claude").strip() or "claude"],
+            "available_models": [_live_claude_model()],
         },
         "ribbon": {
             "vision_status": (
