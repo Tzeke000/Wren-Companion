@@ -1,6 +1,12 @@
-# Little-brain grading loop — capture record schema v0 (DRAFT for Zeke's markup)
+# Little-brain grading loop — capture record schema v0.1 (APPROVED + SHIPPED 2026-07-27)
 
-**Status: DRAFT 2026-07-27 — nothing wired yet.** Per the rulings (2026-07-27): schema settles first, because every decision here is baked into every record ever written. Spec sources: `memory/little_brain_grading_loop_spec_2026-07-25.md` + `memory/little_brain_grading_rulings_2026-07-27.md`.
+**Status: APPROVED by Zeke 2026-07-27 (~17:5x, "Ship it") with four amendments, all encoded below and in the implementation: `brain/lb_turn_capture.py`, wired into `scripts/vector_brain_server.py` (chat route + tool loop).** Cerebellum only — bridge-answered (big-Iris) turns are not recorded. Spec sources: `memory/little_brain_grading_loop_spec_2026-07-25.md` + `memory/little_brain_grading_rulings_2026-07-27.md`.
+
+## Zeke's four amendments (v0 → v0.1)
+1. **Excerpts:** ~500-char cap but **head+tail** truncation (malformed output breaks at the END — the v13 failure shape), with `orig_len` + `truncated` flag; **grounding tools (`senses_now`) stored whole**, never clipped.
+2. **Latency: three numbers** — total, TTFT, **time-to-first-tool-call** (the real reflex number for body actions). *Implementation honesty: the local Ollama call is non-streaming, so true TTFT is unobservable; `first_llm_hop` (hop-0 completion ms) is the recorded proxy until the call streams. `bridge_wait` also recorded: clock starts at stimulus receipt, and the grader must distinguish "she was slow" from "she waited out the bridge probe."*
+3. **Daily rotation** (`turn_log/YYYY-MM-DD.jsonl`); watermark becomes **`(date, turn_id)`**; graders work yesterday's closed file.
+4. **Blind sample = `max(5%, 20/day)` with an absolute daily ceiling** (grading-time selection, still deterministic by turn-id hash so it's recomputable).
 
 ## 1. Turn record — one JSON line per little-brain turn
 

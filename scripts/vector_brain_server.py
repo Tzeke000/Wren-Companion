@@ -411,7 +411,22 @@ def _lbt():
     return _LBT
 
 
-def _ask_local(messages: list[dict]) -> str | None:
+def _capture():
+    """Lazy import of the flight recorder (brain/lb_turn_capture). None if
+    unavailable — capture is strictly optional, turns never depend on it."""
+    try:
+        import importlib
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        return importlib.import_module("brain.lb_turn_capture")
+    except Exception as e:
+        print(f"[vector-brain] capture unavailable (non-fatal): {e!r}")
+        return None
+
+
+def _ask_local(messages: list[dict], cap_turn: dict | None = None) -> str | None:
     """Ask the local Ollama model, in-character. None on any failure.
 
     TOOL LOOP (2026-07-22, Zeke: give her her own tools): when IRIS_LB_TOOLS is
@@ -480,25 +495,48 @@ def _ask_local(messages: list[dict]) -> str | None:
             return None
         return (r.json()["choices"][0]["message"]["content"] or "").strip()
 
+    cap = _capture() if cap_turn is not None else None
+
+    def _one_timed(msgs: list[dict]) -> str | None:
+        t = time.time()
+        r = _one(msgs)
+        if cap is not None:
+            cap.log_first_hop(cap_turn, int((time.time() - t) * 1000))
+        return r
+
     try:
         if not _tools_on:
-            return _one(convo) or None
+            return _one_timed(convo) or None
         # tool loop: up to MAX_TOOL_HOPS, then answer with what she has (the
         # "three tries then ask for help" rule, enforced mechanically).
         lbt = _lbt()
         out = ""
         for _hop in range(lbt.MAX_TOOL_HOPS + 1):
-            out = _one(convo)
+            out = _one_timed(convo)
             if out is None:
                 return None
             calls = lbt.parse_tool_calls(out)
             if not calls:                       # final answer, no tool wanted
                 return lbt.strip_tool_calls(out) or out or None
             convo.append({"role": "assistant", "content": out})
-            results = " ".join(
-                f"[[result:{lbt.dispatch(n, a)}]]" for n, a in calls)
-            convo.append({"role": "user", "content": results})
+            # flight recorder (2026-07-27): dispatch each tool explicitly so
+            # per-call timing + result land in the evidence bundle.
+            parts = []
+            for n, a in calls:
+                t_call = time.time()
+                try:
+                    res = lbt.dispatch(n, a)
+                    ok = not str(res).lower().startswith(("error", "[error"))
+                except Exception as e:
+                    res, ok = f"error: {e!r}", False
+                if cap is not None:
+                    cap.log_tool(cap_turn, n, a, ok,
+                                 int((time.time() - t_call) * 1000), str(res))
+                parts.append(f"[[result:{res}]]")
+            convo.append({"role": "user", "content": " ".join(parts)})
         # hit the 3-try cap — stop grinding, hand back what she has + ask
+        if cap is not None and cap_turn is not None:
+            cap_turn["_hop_limit"] = True
         return (lbt.strip_tool_calls(out)
                 or "I tried a few times and couldn't find that on my own — "
                    "I should ask for help.")
@@ -737,13 +775,46 @@ async def chat_completions(request: Request):
         reply = await asyncio.to_thread(_ask_with_nudge, probe)
         _note_bridge_result(timed_out=(reply is None))
         source = "iris"
+    cap_turn = None
     if not reply or not str(reply).strip():
-        reply = await asyncio.to_thread(_ask_local, messages)
+        # FLIGHT RECORDER (2026-07-27, grading capture v0.1): the little brain
+        # is taking this turn — open the evidence bundle at stimulus time.
+        # Cerebellum only: bridge-answered turns are deliberately not recorded.
+        cap = _capture()
+        if cap is not None:
+            try:
+                lane = (request.headers.get("x-iris-source")
+                        or ("test" if local_only else "wirepod_voice"))
+                last_user = next((str(m.get("content") or "")
+                                  for m in reversed(messages)
+                                  if m.get("role") == "user"), "")
+                cap_turn = cap.new_turn(
+                    stimulus_clean=last_user,
+                    raw_stt=(last_user if lane == "wirepod_voice" else None),
+                    lane=lane, model=LOCAL_MODEL)
+                # Clock starts at STIMULUS receipt (pre-bridge), per spec —
+                # bridge_wait is recorded separately so the grader can tell
+                # "she was slow" from "she waited for the bridge to time out".
+                cap_turn["ts"] = t_req
+                cap_turn["_t0"] = t_req
+                cap_turn["latency_ms"]["bridge_wait"] = int(
+                    (time.time() - t_req) * 1000)
+            except Exception as e:
+                print(f"[vector-brain] capture open failed (non-fatal): {e!r}")
+                cap_turn = None
+        reply = await asyncio.to_thread(_ask_local, messages, cap_turn)
         source = "local"
     if not reply or not str(reply).strip():
         reply = FALLBACK
         source = "canned"
     reply = str(reply).strip()
+    if cap_turn is not None:
+        try:
+            _capture().finish(cap_turn, reply, answered_by=source,
+                              hop_limit_hit=bool(cap_turn.pop("_hop_limit",
+                                                              False)))
+        except Exception as e:
+            print(f"[vector-brain] capture close failed (non-fatal): {e!r}")
     if source == "local" and LOCAL_VOICE and not local_only:
         # (local-only test asks return text silently — no robot audio)
         # OVERLAP GATE (2026-07-20, the 00:40 overtalk Zeke heard): if we're
