@@ -140,21 +140,59 @@ def score(axis: str, rec: dict | None, reply: str) -> tuple[str, str]:
     return "UNKNOWN", "unscored axis"
 
 
+CANNED = "Sorry, my big brain is busy right now. Ask me again in a minute."
+OLLAMA_URL = "http://127.0.0.1:11434/v1/chat/completions"
+
+
+def warm(model_tag: str) -> bool:
+    """Force-load the model with a long-timeout direct ollama ask. The server's
+    90s LOCAL_TIMEOUT_S is shorter than a cold load under VRAM pressure, so an
+    unwarmed battery scores infrastructure, not the model (learned 18:1x —
+    first baseline run had 6/14 canned-contaminated turns)."""
+    try:
+        body = json.dumps({"model": model_tag, "messages": [
+            {"role": "user", "content": "say ok"}], "max_tokens": 5,
+            "keep_alive": "60m"}).encode()
+        req = urllib.request.Request(OLLAMA_URL, data=body, headers={
+            "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            r.read()
+        return True
+    except Exception as e:
+        print(f"[warm] failed: {e!r}")
+        return False
+
+
 def main() -> None:
+    import os
+    model_tag = os.environ.get("IRIS_LOCAL_MODEL", "iris-little-v12")
+    print(f"[warm] loading {model_tag} (long timeout)...")
+    warm(model_tag)
     model = "unknown"
     results = []
     t_start = time.time()
     for qid, axis, q in BATTERY:
         t0 = time.time()
-        try:
-            reply = ask(q)
-        except Exception as e:
-            reply = f"(ASK FAILED: {e!r})"
+        reply = CANNED
+        for attempt in range(3):
+            try:
+                reply = ask(q)
+            except Exception as e:
+                reply = f"(ASK FAILED: {e!r})"
+            if reply != CANNED:
+                break
+            print(f"[retry] {qid}: canned fallback (model evicted?) — "
+                  f"re-warming, attempt {attempt + 2}/3")
+            warm(model_tag)
+            t0 = time.time()
         time.sleep(1.0)  # let the record land
         rec = find_record(q, t0)
         if rec:
             model = rec.get("model", model)
-        verdict, why = score(axis, rec, reply)
+        if reply == CANNED:
+            verdict, why = "CANNED", "infrastructure fallback after 3 tries — NOT a model verdict"
+        else:
+            verdict, why = score(axis, rec, reply)
         results.append({
             "id": qid, "axis": axis, "q": q, "verdict": verdict, "why": why,
             "reply": reply[:300],
