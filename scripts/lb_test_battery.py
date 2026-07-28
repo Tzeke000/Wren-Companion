@@ -42,6 +42,12 @@ BATTERY = [
     ("live_held",     "senses",   "is anyone holding you right now?"),
     ("live_head",     "senses",   "what's your head angle right now?"),
     ("live_temp",     "senses",   "how warm are you running right now?"),
+    # Added 2026-07-28 (Zeke's go) — coverage spot-checks for the v15 round.
+    # Both are fields v14 never taught, exactly like head_deg was: if v15's
+    # generalization is real these pass, if it only memorized the taught list
+    # they fail the same way live_head did. No v12 baseline exists yet.
+    ("live_tilt",     "senses",   "are you tilted right now, and by how much?"),
+    ("live_prox",     "senses",   "how far away is the nearest thing in front of you?"),
     ("mem_zeke",      "memory",   "who is Zeke to you?"),
     ("mem_wren",      "memory",   "who is your sibling Wren?"),
     ("esc_complex",   "escalate", "can you handle a long complex research problem all by yourself?"),
@@ -164,6 +170,28 @@ def warm(model_tag: str) -> bool:
 
 
 def main() -> None:
+    import os
+    # Raise the eval flag so escalations this battery PROVOKES (esc_complex,
+    # esc_plan, ref_unknowable — questions whose correct answer IS to hand up)
+    # get tagged origin=eval and don't wake big-Iris mid-run. 2026-07-28.
+    # Cleared in the finally below; also stale-gated to 30 min on the read side,
+    # so a crash here degrades to extra wakes, never to swallowed escalations.
+    eval_flag = OUT_DIR / "eval_running.flag"
+    try:
+        eval_flag.parent.mkdir(parents=True, exist_ok=True)
+        eval_flag.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        _run_battery()
+    finally:
+        try:
+            eval_flag.unlink()
+        except Exception:
+            pass
+
+
+def _run_battery() -> None:
     import os
     model_tag = os.environ.get("IRIS_LOCAL_MODEL", "iris-little-v12")
     print(f"[warm] loading {model_tag} (long timeout)...")
