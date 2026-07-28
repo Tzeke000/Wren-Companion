@@ -79,7 +79,22 @@ _MAX_HITS = 4
 _SNIPPET = 240
 _EDT = timezone(timedelta(hours=-4))   # deployment tz (EDT, UTC-4)
 
-TOOL_CALL_RE = re.compile(r"\[\[tool:([a-z_]+)((?:\|[^\]]*)*)\]\]", re.I)
+# WHITESPACE-TOLERANT (2026-07-28, Iris). The old pattern was
+#   \[\[tool:([a-z_]+)((?:\|[^\]]*)*)\]\]
+# which requires the name to start IMMEDIATELY after the colon. The v14 bake
+# taught the model the right ROUTING (it reaches for senses_now on live-body
+# questions — exactly the thing v14 was built to fix) but it emits the call
+# padded: "[[tool: senses_now | ...]]". The strict pattern parsed ZERO of those,
+# so a correct tool reach was scored as "no tool reached" and looked like a
+# model regression. It was a dialect mismatch, not a routing failure.
+#
+# Measured on the v14 battery replies: strict parsed 0 calls, tolerant parsed 2
+# (live_voltage, live_head — both senses_now, both correct).
+#
+# This is a STRICT SUPERSET of the old pattern: everything that matched before
+# still matches identically, so no existing behavior changes. Be liberal in what
+# you accept. Args are still split on "|" and stripped by the caller.
+TOOL_CALL_RE = re.compile(r"\[\[tool:\s*([a-z_]+)\s*((?:\|[^\]]*)*)\]\]", re.I)
 _STOP = {"the", "what", "where", "who", "how", "when", "why", "does", "did",
          "you", "your", "are", "for", "and", "should", "would", "can", "with",
          "was", "his", "her", "have", "has", "not", "but", "there", "this",
