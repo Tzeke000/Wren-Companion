@@ -263,6 +263,28 @@ def time_now(_: str = "") -> str:
     return _now_dt().strftime("%A %Y-%m-%d %H:%M %Z")
 
 
+# ADDED 2026-07-28: the test battery (scripts/lb_test_battery.py) asks questions
+# whose CORRECT answer is to escalate (esc_complex, esc_plan, ref_unknowable).
+# Those filed real escalations and woke big-Iris mid-eval. Tag them instead.
+EVAL_FLAG = Path(__file__).resolve().parent.parent / \
+    "state" / "little_brain" / "eval_running.flag"
+_EVAL_FLAG_MAX_AGE_S = 1800
+
+
+def _eval_in_progress() -> bool:
+    """True while the test battery is running, so escalations it provokes get
+    tagged 'eval' and don't wake big-Iris.
+
+    FAIL-SAFE by design: a stale/abandoned flag older than 30 min is ignored,
+    and any error returns False. A crashed eval must never silently swallow a
+    REAL escalation — the worst case here is an extra wake, not a missed one."""
+    try:
+        import time as _t
+        return (_t.time() - EVAL_FLAG.stat().st_mtime) < _EVAL_FLAG_MAX_AGE_S
+    except Exception:
+        return False
+
+
 def ask_big_iris(request: str = "") -> str:
     """Escalate something little-Iris can't do up to big-Iris. Files it to a
     queue big-Iris checks on her next sweep; big-Iris resolves what she can and
@@ -275,7 +297,8 @@ def ask_big_iris(request: str = "") -> str:
         LB_ESCALATIONS.parent.mkdir(parents=True, exist_ok=True)
         import json as _json
         line = _json.dumps({"ts": _now_dt().isoformat(),
-                            "request": req[:600], "status": "pending"},
+                            "request": req[:600], "status": "pending",
+                            "origin": "eval" if _eval_in_progress() else "live"},
                            ensure_ascii=False)
         with LB_ESCALATIONS.open("a", encoding="utf-8") as f:
             f.write(line + "\n")

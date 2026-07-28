@@ -368,6 +368,20 @@ def _escalate_to_big(request: str) -> None:
 _hist: list[dict] = []   # last cycles for contact-health rules (v0.3)
 
 
+def _stock_brain_owns_body() -> bool:
+    """True when possession is RELEASED — the stock brain has the wheel and will
+    re-dock on its own, so roaming is expected rather than a fault.
+
+    Fails LOUD on purpose: if the possession file is unreadable we return False,
+    which keeps the off-charger alarm armed. Never silently suppress an alarm
+    because a file was missing."""
+    try:
+        p = json.loads(POSSESSION.read_text(encoding="utf-8"))
+        return not bool(p.get("held")) and not bool(p.get("want"))
+    except Exception:
+        return False
+
+
 def _contact_health(bat: dict, nrv: dict) -> str | None:
     """CHARGE-CONTACT TRACKER (v0.3, 2026-07-20 incident): catches
     seated-but-not-charging, fossil feeds, and charging-lies — the three
@@ -377,9 +391,19 @@ def _contact_health(bat: dict, nrv: dict) -> str | None:
     del _hist[:-6]
     if len(_hist) < 3:
         return None
-    # A: off-charger sustained 2+ cycles (~5 min) — earlier than the volt rule
+    # A: off-charger sustained 2+ cycles (~5 min) — earlier than the volt rule.
+    # 2026-07-28: SUPPRESSED while possession is deliberately released. With
+    # drive_on_charger broken (4x 150s timeouts, even with charger_known=true),
+    # the stock brain is the ONLY thing that can re-seat him, so it owns the
+    # wheel and roaming is EXPECTED — not "seated-but-loose". Firing here every
+    # 5 min would drown rules B and C, which both caught real faults on 07-28.
+    # Still escalates if the battery is actually getting low: that's the case
+    # that genuinely needs a human. See memory f6453dc1cd1f.
     if all(h["on_chg"] is False for h in _hist[-2:]):
-        return "OFF CHARGER sustained 5+ min — seated-but-loose or wandered; needs re-seat"
+        volts = bat.get("volts")
+        low = isinstance(volts, (int, float)) and volts < 3.7
+        if low or not _stock_brain_owns_body():
+            return "OFF CHARGER sustained 5+ min — seated-but-loose or wandered; needs re-seat"
     # B: accel identical 3 cycles = sensor feed FOSSIL (fresh ts, dead values)
     if len({h["accel"] for h in _hist[-3:]}) == 1 and _hist[-1]["accel"]:
         return "SENSOR FEED FOSSIL — accel frozen 3 cycles; daemon needs a bounce; distrust all files"

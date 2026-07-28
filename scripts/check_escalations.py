@@ -79,7 +79,12 @@ def _resolve(rows, note: str, which: int | None) -> int:
 def main() -> int:
     args = sys.argv[1:]
     rows = _load()
-    pending = [(ln, e) for ln, e in rows if e.get("status") == "pending"]
+    # origin=="eval" entries were provoked by the test battery, whose esc_*/ref_*
+    # questions are SUPPOSED to make her hand up (2026-07-28). They're not real
+    # asks, so they don't belong in the pending list. Only the explicit tag is
+    # filtered — untagged entries still count as live.
+    pending = [(ln, e) for ln, e in rows
+               if e.get("status") == "pending" and e.get("origin") != "eval"]
 
     if args and args[0] == "--resolve-all":
         note = args[1] if len(args) > 1 else ""

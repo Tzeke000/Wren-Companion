@@ -865,6 +865,13 @@ def _next_pending_escalation() -> dict | None:
             continue
         if not isinstance(data, dict) or data.get("status") != "pending":
             continue
+        # Skip escalations the TEST BATTERY provoked (2026-07-28). esc_*/ref_*
+        # questions are SUPPOSED to make her hand up, so they filed real
+        # escalations and woke me mid-eval. Only an explicit "eval" tag is
+        # skipped — untagged/live entries still surface, so an eval that
+        # crashed before tagging costs an extra wake, never a missed one.
+        if data.get("origin") == "eval":
+            continue
         # TTL: skip (and thus abandon) entries older than 24h.
         try:
             ts = _dt.fromisoformat(str(data.get("ts") or "")).timestamp()
