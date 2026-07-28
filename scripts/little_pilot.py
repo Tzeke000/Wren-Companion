@@ -404,9 +404,19 @@ def _contact_health(bat: dict, nrv: dict) -> str | None:
         low = isinstance(volts, (int, float)) and volts < 3.7
         if low or not _stock_brain_owns_body():
             return "OFF CHARGER sustained 5+ min — seated-but-loose or wandered; needs re-seat"
-    # B: accel identical 3 cycles = sensor feed FOSSIL (fresh ts, dead values)
+    # B: accel identical 3 cycles = sensor feed FOSSIL (fresh ts, dead values).
+    # 2026-07-28: only escalate when the robot is actually REACHABLE. A fossil
+    # while he's unreachable is EXPECTED and un-actionable — the daemon is
+    # already retrying every 15s and a bounce cannot conjure a dead robot back.
+    # Vector stranded flat at 15:24 and this fired every cycle afterwards; left
+    # alone it would nag for the ~month until Zeke is home and bury real signals.
+    # `bat["ok"]` is False exactly when the daemon can't read him at all.
+    # FAIL LOUD: only an explicit False suppresses; missing/None still escalates,
+    # because "I can't tell" must never silence a fossil on a LIVE robot (that
+    # case IS actionable — daemon holding a dead stream, the 15h outage of 07-27).
     if len({h["accel"] for h in _hist[-3:]}) == 1 and _hist[-1]["accel"]:
-        return "SENSOR FEED FOSSIL — accel frozen 3 cycles; daemon needs a bounce; distrust all files"
+        if bat.get("ok") is not False:
+            return "SENSOR FEED FOSSIL — accel frozen 3 cycles; daemon needs a bounce; distrust all files"
     # C: 'charging' but volts strictly falling 4 cycles = contact lie
     v = [h["volts"] for h in _hist[-4:] if h["volts"]]
     if (len(v) == 4 and all(a > b for a, b in zip(v, v[1:]))
