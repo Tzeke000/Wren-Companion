@@ -353,11 +353,69 @@ def _body_dock(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     return s.dock()
 
 
+def _redock_gate(s) -> dict[str, Any]:
+    """CAN I GET BACK ON? Proves the two preconditions `drive_on_charger` needs.
+
+    Built 2026-07-28 after I undocked a robot whose camera I already knew was
+    dead, in a room where docking is vision-gated, and stranded him for the
+    month Zeke is away. Both facts were in my hands; I never combined them.
+    The knowledge even existed in _body_charger's docstring ("NEVER body_park"
+    with an unseen charger) — and a docstring gates nothing. This does.
+
+    NOTE `feed_ok` is deliberately NOT trusted: on 07-28 body_open reported
+    feed_ok=True while body_look raised VectorPropertyValueNotReadyException
+    and zero frames ever arrived. The only honest camera check is fetching a
+    frame. Flags lie; pictures don't.
+    """
+    out: dict[str, Any] = {"can_redock": False, "camera": None, "charger": None}
+    try:
+        look = s.look(name="redock_gate")
+        fresh = bool(look.get("ok")) and not look.get("stale", True)
+        out["camera"] = {"ok": bool(look.get("ok")), "stale": look.get("stale"),
+                         "image_id": look.get("image_id"), "age_s": look.get("age_s")}
+    except Exception as e:
+        fresh = False
+        out["camera"] = {"ok": False, "error": repr(e)[:160]}
+    try:
+        ch = s.robot.world.charger
+        known = ch is not None and getattr(ch, "pose", None) is not None
+        out["charger"] = {"charger_known": known,
+                          "last_seen_s_ago": (round(float(getattr(ch, "time_since_last_seen", -1)), 1)
+                                              if ch is not None else None)}
+    except Exception as e:
+        known = False
+        out["charger"] = {"charger_known": False, "error": repr(e)[:160]}
+    out["can_redock"] = bool(fresh and known)
+    return out
+
+
 def _body_undock(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
-    """Drive off the charger."""
+    """Drive off the charger — GATED on being able to get back on.
+
+    Refuses unless the camera is delivering fresh frames AND the engine has
+    localized the charger, because `drive_on_charger` is vision-gated: a blind
+    robot cannot dock. Pass force=true to override deliberately (Zeke asking,
+    or an emergency) — the gate exists to stop me doing it ACCIDENTALLY, which
+    is what happened on 2026-07-28.
+    """
     s = _sess().get_session(create=False)
     if s is None or not s.connected:
         return {"ok": False, "error": "body session not open"}
+    if not params.get("force"):
+        gate = _redock_gate(s)
+        if not gate["can_redock"]:
+            return {
+                "ok": False,
+                "refused": "UNDOCK BLOCKED — I cannot prove I can re-dock",
+                "gate": gate,
+                "why": "drive_on_charger docks by SEEING the charger marker. "
+                       "Undocking without fresh frames + a localized charger is "
+                       "a ONE-WAY action; it stranded the body on 2026-07-28.",
+                "fix": "body_marker_vision, point the head/body at the dock, "
+                       "re-check body_charger until charger_known=true, and "
+                       "confirm body_look returns stale=false. Then retry.",
+                "override": "body_undock {\"force\": true} if this is deliberate",
+            }
     return s.undock()
 
 
