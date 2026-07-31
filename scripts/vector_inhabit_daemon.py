@@ -1137,9 +1137,21 @@ def _battery_watch_loop() -> None:
         except Exception:
             ok = False
         try:
-            BATTERY_JSON.write_text(_json.dumps(
+            # ATOMIC write (2026-07-31). This was a bare write_text, which
+            # truncates-then-fills and leaves a window where a concurrent
+            # reader sees an empty/partial file and gets {} back. Every other
+            # writer in this daemon already used tmp+replace; this one didn't.
+            # Cost of the gap: the pilot's fossil rule gates on
+            # `bat["ok"] is not False` (fail-loud by design), and a raced read
+            # yields {} -> .get("ok") is None -> "not False" -> ESCALATE. That
+            # fired 5 phantom "daemon needs a bounce" escalations at 15s writes
+            # over 2.5 days while Vector was flat and unreachable. Root cause is
+            # here, not in the rule — fix the write, not the reader.
+            tmp = BATTERY_JSON.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps(
                 {"ok": ok, "level": level, "volts": volts,
                  "on_charger": on_charger, "ts": time.time()}), encoding="utf-8")
+            tmp.replace(BATTERY_JSON)
         except Exception:
             pass
         vstr = f"{volts:.2f}V" if isinstance(volts, (int, float)) else "?V"
