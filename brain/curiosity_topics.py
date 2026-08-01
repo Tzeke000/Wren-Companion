@@ -66,6 +66,15 @@ def add_topic(topic: str, sparked_by: str, g: dict[str, Any]) -> None:
     for row in rows:
         prev = str(row.get("topic") or "")
         if _topic_similarity(t, prev) >= 0.7:
+            if "discovered installed" in str(sparked_by or "") and row.get("resolution_note"):
+                # A settled app topic being re-added by the discovery sweep
+                # (which re-runs after every restart) must NOT be resurrected.
+                # Before this guard, `resolved` was reset to False here on every
+                # sweep, silently undoing hand-resolutions — Steam got answered
+                # 141x (2026-08-01). Genuine renewed interest (conversation,
+                # manual add) still un-resolves below.
+                g["_current_curiosity_topic"] = prev
+                return
             row["times_thought_about"] = int(row.get("times_thought_about", 1) or 1) + 1
             row["priority"] = min(1.0, float(row.get("priority", 0.4) or 0.4) + 0.08)
             row["resolved"] = False
