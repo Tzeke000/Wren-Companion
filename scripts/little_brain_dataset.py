@@ -538,6 +538,18 @@ def v14_dialogue_samples() -> list[dict]:
     return list(v14_dialogues())
 
 
+def v15_dialogue_samples() -> list[dict]:
+    """v15 anti-invention round (2026-08-01): full senses_now field coverage in
+    the REAL formatter dialect (v14 trained on an invented result dialect);
+    anti-invention pairs (tempting dedicated-tool questions -> senses_now, zero
+    fake tool names anywhere in the corpus); refusal gated on the FEED never the
+    FIELD, capped at "I couldn't read it just now"; escalation re-separated into
+    its own no-"can't" voice (repairs the v14 esc_complex bleed). Already full
+    {messages} lists."""
+    from little_brain_corpus_v15 import v15_dialogues
+    return list(v15_dialogues())
+
+
 def main() -> int:
     tr = harvest_transcript()
     les = lesson_pairs()
@@ -580,9 +592,17 @@ def main() -> int:
     # + anti-loop are all here. Warmstart is FROM v12 (stable), so v14 relearns
     # v13's gains (still in v13_dlg) plus these fixes without v13's loop instability.
     v14_dlg = v14_dialogue_samples() * 16
+    # v15 anti-invention: x12 — 39 dialogues (468 samples), the corrective
+    # round for tool-name invention. Real-formatter result dialect; field
+    # coverage; feed-gated refusal; escalation voice. Its 4 refusal examples
+    # at x12 deliberately outweigh v14's 2 older-worded ones at x16, so the
+    # capped wording ("I couldn't read it just now") wins without dropping
+    # v14's live-routing gains from the dataset.
+    v15_dlg = v15_dialogue_samples() * 12
     stock = v6_stock_samples()
     data = (tr + ident + know + ground + lessons + reasons + dontknow +
-            self_banks + toolrules + tool_dlg + v13_dlg + v14_dlg + stock + les)
+            self_banks + toolrules + tool_dlg + v13_dlg + v14_dlg + v15_dlg +
+            stock + les)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
@@ -600,6 +620,7 @@ def main() -> int:
     print(f"tool-dialogues:   {len(tool_dlg)} (v10 multi-turn tool-use demos)")
     print(f"v13 dialogues:    {len(v13_dlg)} (act-not-narrate, x12)")
     print(f"v14 dialogues:    {len(v14_dlg)} (live-sensor routing -> senses_now, x16)")
+    print(f"v15 dialogues:    {len(v15_dlg)} (anti-invention + real dialect + feed-gated refusal, x12)")
     print(f"stock samples:    {len(stock)} (v6 stock behavior-tree + Iris overlay)")
     print(f"lesson pairs:     {len(les)}")
     print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
