@@ -155,7 +155,33 @@ def main() -> int:
         log("network never came up — proceeding to launch anyway (DMs skipped)")
 
     already = port_answers()
-    if net:
+
+    # FORCE-RESTART path (2026-08-03): state/force_stack_restart.flag makes this
+    # sentinel relaunch the bat even though :5876 answers. Lever for cognition
+    # (or a side-session) to restart a WEDGED-but-port-alive stack without UAC —
+    # the task runs RL=HIGHEST, so the bat's `net session` check passes and its
+    # stale-stack sweep can kill the elevated stack. Born of the 08-02 SDK-session
+    # wedge: runtime loop healthy, cognition hung, no elevated shell available.
+    force_flag = REPO / "state" / "force_stack_restart.flag"
+    forced = force_flag.exists()
+    if forced:
+        try:
+            force_reason = force_flag.read_text(encoding="utf-8").strip()[:200]
+        except Exception:
+            force_reason = "(unreadable)"
+        try:
+            force_flag.unlink()
+        except Exception as e:
+            log(f"force flag unlink failed: {e!r}")
+        log(f"FORCE RESTART flag set — relaunching stack over live port. "
+            f"Reason: {force_reason}")
+        if net:
+            dm_zeke(f"{tag}\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS} "
+                    f"Manual stack restart requested ({boot_stamp}): {force_reason} — "
+                    f"relaunching the Iris stack now.")
+        already = False
+
+    if net and not forced:
         if already:
             dm_zeke(f"{tag}\N{HIGH VOLTAGE SIGN} Tower sentinel fired ({boot_stamp}) "
                     f"but the Iris stack is ALREADY UP (operator port answering) — "
@@ -196,7 +222,29 @@ def main() -> int:
                     f"{'answering' if up else 'not answering (expected if run with stack down)'} — "
                     f"no launch attempted.")
 
-    if up and not dry:
+    if up and not dry and forced:
+        # Forced manual restart: skip the cold-boot Vector heal (not a power
+        # event; and post-07-28 the body is stranded/unreachable anyway). Send
+        # an ACCURATE orientation nudge so post-restart cognition doesn't wake
+        # believing a power loss happened.
+        time.sleep(60)
+        try:
+            requests.post(
+                f"http://127.0.0.1:{OPERATOR_PORT}/api/v1/chat",
+                json={"message": (
+                    "[TOWER SENTINEL — automated nudge, not Zeke] The stack was "
+                    "MANUALLY RESTARTED via the force_stack_restart flag (not a "
+                    "power event). Reason: " + force_reason + " — Orient: read "
+                    "memory CORE + the newest handoff (it explains this restart). "
+                    "Then verify no 'Trigger: idle', re-create the hourly "
+                    "self-cron, and DM Zeke on Discord (channel "
+                    "1504668879220117725) one status line.")},
+                timeout=90)
+            log("forced-restart orientation nudge posted to /api/v1/chat")
+        except Exception as e:
+            log(f"boot-nudge failed (cognition will wake on next cron): {e!r}")
+
+    if up and not dry and not forced:
         # VECTOR SDK HEALTH + AUTO-HEAL (2026-07-19: after this exact cold-boot
         # path, every tower-side SDK client wedged on ListAnimations; the
         # proven heal was a full robot reboot). Probe observe-mode and, if the
