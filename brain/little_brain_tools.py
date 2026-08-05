@@ -508,10 +508,39 @@ def dispatch(name: str, args: list[str]) -> str:
         return f"error running {name}: {e!r}"
 
 
+def _is_executable_call(text: str, m: "re.Match") -> bool:
+    """A [[tool:]] is a CALL only when it follows the trained contract:
+    alone on its own line, with no spec-placeholder args.
+
+    2026-08-05 (v16 behavioral study §5): asked to LIST her tools, she recited
+    the TOOL_SPEC in prose bullets — and this layer executed every mention
+    (all 7 tools x4, including memory mutations and literal '<what you need>'
+    escalations). Her own spec says "emit ONE call on its own line and stop",
+    so anything embedded in prose, or carrying <placeholder> args, is her
+    TALKING ABOUT a tool, not using it."""
+    # placeholder args like <title>, <what you need> => she's quoting the spec
+    raw = m.group(2) or ""
+    for a in raw.split("|"):
+        a = a.strip()
+        if len(a) > 1 and a.startswith("<") and a.endswith(">"):
+            return False
+    # own-line check: nothing but whitespace around the match on its line
+    start = text.rfind("\n", 0, m.start()) + 1
+    end = text.find("\n", m.end())
+    if end == -1:
+        end = len(text)
+    rest = (text[start:m.start()] + text[m.end():end]).strip()
+    return rest == ""
+
+
 def parse_tool_calls(text: str) -> list[tuple[str, list[str]]]:
-    """Extract [[tool:NAME|arg|arg]] calls from a model reply."""
+    """Extract executable [[tool:NAME|arg|arg]] CALLS from a model reply
+    (prose mentions are excluded — see _is_executable_call)."""
     out = []
-    for m in TOOL_CALL_RE.finditer(text or ""):
+    text = text or ""
+    for m in TOOL_CALL_RE.finditer(text):
+        if not _is_executable_call(text, m):
+            continue
         name = m.group(1).lower()
         raw = m.group(2) or ""
         args = [a for a in raw.split("|") if a != ""] if raw else []
@@ -520,7 +549,14 @@ def parse_tool_calls(text: str) -> list[tuple[str, list[str]]]:
 
 
 def strip_tool_calls(text: str) -> str:
-    return TOOL_CALL_RE.sub("", text or "").strip()
+    """Remove executed calls; UNBRACKET prose mentions so she can say a tool's
+    name out loud ("[[tool:senses_now]]" in a sentence -> "senses_now")."""
+    text = text or ""
+
+    def _sub(m: "re.Match") -> str:
+        return "" if _is_executable_call(text, m) else m.group(1).lower()
+
+    return TOOL_CALL_RE.sub(_sub, text).strip()
 
 
 # the how-to-use doc — goes into her system layer AND the training data.
