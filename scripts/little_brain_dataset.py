@@ -550,6 +550,26 @@ def v15_dialogue_samples() -> list[dict]:
     return list(v15_dialogues())
 
 
+def v16_fall_samples() -> list[dict]:
+    """v16 supervised-falling round (2026-08-04, Zeke's directive 08-03):
+    recovery trajectories from her REAL mined stumbles (fall_drafts.jsonl) —
+    authentic wrong call + the real error text + corrected call + grounded
+    answer. Teaches: 'no tool named X' means wrong NAME, not missing SENSE;
+    memory holds the PAST, 'right now' needs senses_now. Kept at LOW
+    multiplicity (the wrong names are in the distribution by design — see the
+    corpus module docstring for the v15-tension handling)."""
+    from little_brain_corpus_v16 import v16_fall_dialogues
+    return list(v16_fall_dialogues())
+
+
+def v16_twin_samples() -> list[dict]:
+    """v16 clean bait-twins: the hedge-bait/confidence-bait stimuli from the
+    falls, answered right on the FIRST try (no fake name anywhere). Weighted
+    ABOVE the falls so the net first-call gradient favors the real name."""
+    from little_brain_corpus_v16 import v16_twin_dialogues
+    return list(v16_twin_dialogues())
+
+
 def main() -> int:
     tr = harvest_transcript()
     les = lesson_pairs()
@@ -599,10 +619,18 @@ def main() -> int:
     # capped wording ("I couldn't read it just now") wins without dropping
     # v14's live-routing gains from the dataset.
     v15_dlg = v15_dialogue_samples() * 12
+    # v16 supervised falling: falls x4 LOW — each dialogue contains a real
+    # wrong tool name in assistant position (deliberate, Zeke's directive);
+    # the recovery transition (error -> senses_now) repeats across all falls
+    # so the general rule gets 25x4=100 exposures while each specific wrong
+    # name gets only ~4. Twins x8 + v15's x12 clean pairs outweigh the
+    # wrong-first-call gradient.
+    v16_falls = v16_fall_samples() * 4
+    v16_twins = v16_twin_samples() * 8
     stock = v6_stock_samples()
     data = (tr + ident + know + ground + lessons + reasons + dontknow +
             self_banks + toolrules + tool_dlg + v13_dlg + v14_dlg + v15_dlg +
-            stock + les)
+            v16_falls + v16_twins + stock + les)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
@@ -621,6 +649,8 @@ def main() -> int:
     print(f"v13 dialogues:    {len(v13_dlg)} (act-not-narrate, x12)")
     print(f"v14 dialogues:    {len(v14_dlg)} (live-sensor routing -> senses_now, x16)")
     print(f"v15 dialogues:    {len(v15_dlg)} (anti-invention + real dialect + feed-gated refusal, x12)")
+    print(f"v16 falls:        {len(v16_falls)} (supervised falling — real error->recovery, x4)")
+    print(f"v16 twins:        {len(v16_twins)} (clean bait-twins, first-try right call, x8)")
     print(f"stock samples:    {len(stock)} (v6 stock behavior-tree + Iris overlay)")
     print(f"lesson pairs:     {len(les)}")
     print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
