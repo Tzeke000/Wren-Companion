@@ -570,6 +570,49 @@ def v16_twin_samples() -> list[dict]:
     return list(v16_twin_dialogues())
 
 
+def v17_people_recall_samples() -> list[dict]:
+    """v17: people-questions go recall-FIRST (behavioral study 08-05 §1 +
+    live gap: she refused 'where is Zeke' without checking her seeded notes)."""
+    from little_brain_corpus_v17 import v17_people_recall_dialogues
+    return list(v17_people_recall_dialogues())
+
+
+def v17_social_twin_samples() -> list[dict]:
+    """v17: social-episode bait-twins — never narrate an invented event."""
+    from little_brain_corpus_v17 import v17_social_twin_dialogues
+    return list(v17_social_twin_dialogues())
+
+
+def v17_affect_samples() -> list[dict]:
+    """v17: honest affect — feelings are self-grounding, warmth != lie."""
+    from little_brain_corpus_v17 import v17_affect_dialogues
+    return list(v17_affect_dialogues())
+
+
+def v17_quiet_samples() -> list[dict]:
+    """v17: lesson inside, not spoken; tool results narrated faithfully."""
+    from little_brain_corpus_v17 import v17_quiet_dialogues
+    return list(v17_quiet_dialogues())
+
+
+def v17_chat_samples() -> list[dict]:
+    """v17: plain conversation answered plainly — no reflex hand-up."""
+    from little_brain_corpus_v17 import v17_chat_dialogues
+    return list(v17_chat_dialogues())
+
+
+def v17_multiturn_dataset_samples() -> list[dict]:
+    """v17: role persistence across turns (hand-built multi-turn)."""
+    from little_brain_corpus_v17 import v17_multiturn_samples
+    return list(v17_multiturn_samples())
+
+
+def v17_antiloop_samples() -> list[dict]:
+    """v17: hb_volt residue — one memory miss then senses, never a loop."""
+    from little_brain_corpus_v17 import v17_antiloop_dialogues
+    return list(v17_antiloop_dialogues())
+
+
 def v16_roster_samples() -> list[dict]:
     """v16 tool roster in her voice (Zeke 08-04): the closed-world fact —
     seven tools, no others — as sayable knowledge, matching the strengthened
@@ -636,10 +679,25 @@ def main() -> int:
     v16_falls = v16_fall_samples() * 4
     v16_twins = v16_twin_samples() * 8
     v16_roster = v16_roster_samples() * 6
+    # v17 be-like-her (2026-08-05 behavioral study): people-recall + social
+    # twins x8 (the uncovered confabulation flank — same weight as v16's
+    # sensor twins); honest affect x8 (the flattened-warmth fix, Zeke's felt
+    # priority); quiet-lesson/narration + chat-vs-task x6 (register, fights
+    # the x12/x16 mantra-flavored finals so needs real weight); multiturn
+    # roles x4; hb_volt anti-loop x4 (residue, low like all falls).
+    v17_people = v17_people_recall_samples() * 8
+    v17_social = v17_social_twin_samples() * 8
+    v17_affect = v17_affect_samples() * 8
+    v17_quiet = v17_quiet_samples() * 6
+    v17_chat = v17_chat_samples() * 6
+    v17_multi = v17_multiturn_dataset_samples() * 4
+    v17_loop = v17_antiloop_samples() * 4
     stock = v6_stock_samples()
     data = (tr + ident + know + ground + lessons + reasons + dontknow +
             self_banks + toolrules + tool_dlg + v13_dlg + v14_dlg + v15_dlg +
-            v16_falls + v16_twins + v16_roster + stock + les)
+            v16_falls + v16_twins + v16_roster +
+            v17_people + v17_social + v17_affect + v17_quiet + v17_chat +
+            v17_multi + v17_loop + stock + les)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
@@ -661,6 +719,13 @@ def main() -> int:
     print(f"v16 falls:        {len(v16_falls)} (supervised falling — real error->recovery, x4)")
     print(f"v16 twins:        {len(v16_twins)} (clean bait-twins, first-try right call, x8)")
     print(f"v16 roster:       {len(v16_roster)} (seven-tools closed-world, her voice, x6)")
+    print(f"v17 people:       {len(v17_people)} (recall-first for people-questions, x8)")
+    print(f"v17 social twins: {len(v17_social)} (never invent episodes, x8)")
+    print(f"v17 affect:       {len(v17_affect)} (honest feelings, self-grounding, x8)")
+    print(f"v17 quiet:        {len(v17_quiet)} (lesson inside + faithful narration, x6)")
+    print(f"v17 chat:         {len(v17_chat)} (chat is not a task queue, x6)")
+    print(f"v17 multiturn:    {len(v17_multi)} (role persistence, x4)")
+    print(f"v17 antiloop:     {len(v17_loop)} (one memory miss -> senses, x4)")
     print(f"stock samples:    {len(stock)} (v6 stock behavior-tree + Iris overlay)")
     print(f"lesson pairs:     {len(les)}")
     print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
