@@ -17,7 +17,16 @@ $TRIGGER_FILE = Join-Path $ROOT ".tmp\restart_cc.flag"
 $WATCHDOG_LOG = Join-Path $ROOT ".tmp\watchdog.log"
 $WATCHDOG_HEARTBEAT = Join-Path $ROOT ".tmp\watchdog_heartbeat.txt"
 $POLL_INTERVAL_S = 2
-$DEBOUNCE_S = 30
+# 2026-08-05: 30 -> 120. The 08-04 double-cognition race
+# (double_cognition_restart_race_2026-08-04) had a ~47s window between the
+# runtime watchdog's relaunch and this poller acting on a manual flag — 30s
+# could not bridge it. 120s covers the measured window with slack.
+$DEBOUNCE_S = 120
+# Stand-down freshness window (s): if a claude-family process this young
+# exists when a trigger fires, another restart authority just acted — do NOT
+# kill it and spawn a twin (the 08-04 race: killed 28816, spawned a CLI twin
+# into an already-restarting stack).
+$FRESH_STACK_S = 180
 
 # ---- Utilities ----
 function Write-WatchLog($msg) {
@@ -113,6 +122,24 @@ function Find-ActiveCC {
         Write-WatchLog ("[WMI ERROR] Find-ActiveCC outer catch: " + $_)
         return $null
     }
+}
+
+function Get-YoungestCCAgeSeconds {
+    # Age in seconds of the YOUNGEST claude-family process, or $null if none
+    # (or WMI failed). Used by the trigger path to stand down when another
+    # restart authority (runtime watchdog / tower sentinel) just relaunched
+    # the stack (2026-08-05, from the 08-04 double-cognition race).
+    $procs = Find-ActiveCC
+    if ($null -eq $procs -or $procs.Count -eq 0) { return $null }
+    $now = Get-Date
+    $ages = @()
+    foreach ($p in $procs) {
+        try {
+            if ($p.CreationDate) { $ages += ($now - $p.CreationDate).TotalSeconds }
+        } catch { }
+    }
+    if ($ages.Count -eq 0) { return $null }
+    return ($ages | Measure-Object -Minimum).Minimum
 }
 
 function Kill-ActiveCC {
@@ -240,7 +267,29 @@ function Spawn-NewCC {
     # check whether any new PID appeared. If not, fall through to the next
     # tier. This makes tier 3 (bare claude) actually reachable when the
     # cold-wake script itself is the failure point.
+    # 2026-08-05: honor state/boot_launcher.txt — the SAME source of truth the
+    # runtime watchdog + tower sentinel use. Hardcoding start_iris.bat here is
+    # what spawned the CLI twin on 08-04 while the rest of the chain launched
+    # start_iris_v2_fable.bat. Fallback to start_iris.bat if the file is
+    # missing/empty/points at a bat that doesn't exist.
     $batPath = Join-Path $ROOT "start_iris.bat"
+    $launcherFile = Join-Path $ROOT "state\boot_launcher.txt"
+    try {
+        if (Test-Path $launcherFile) {
+            $launcherName = (Get-Content $launcherFile -Raw -ErrorAction Stop).Trim()
+            if ($launcherName) {
+                $candidate = Join-Path $ROOT $launcherName
+                if (Test-Path $candidate) {
+                    $batPath = $candidate
+                    Write-WatchLog ("launcher resolved from boot_launcher.txt: " + $launcherName)
+                } else {
+                    Write-WatchLog ("WARN: boot_launcher.txt names '" + $launcherName + "' but it doesn't exist — falling back to start_iris.bat")
+                }
+            }
+        }
+    } catch {
+        Write-WatchLog ("WARN: boot_launcher.txt read failed (" + $_ + ") — falling back to start_iris.bat")
+    }
     if (Test-Path $batPath) {
         # Snapshot existing claude/node PIDs so we can detect "no new PID
         # spawned" — the signature of an inside-the-window bat crash.
@@ -430,6 +479,16 @@ while ($true) {
                     $reason = (Get-Content $TRIGGER_FILE -Raw -ErrorAction SilentlyContinue).Trim()
                 } catch {
                     $reason = "(could not read reason)"
+                }
+                # 2026-08-05 stand-down guard: a very young claude process
+                # means another restart authority just brought the stack up
+                # (or is mid-restart). Killing it and spawning here is how the
+                # 08-04 twin was born. Swallow the flag instead.
+                $youngest = Get-YoungestCCAgeSeconds
+                if ($null -ne $youngest -and $youngest -lt $FRESH_STACK_S) {
+                    Write-WatchLog ("[STAND-DOWN] trigger ignored: claude process only " + [int]$youngest + "s old (< " + $FRESH_STACK_S + "s) — another authority just restarted the stack. reason=" + $reason)
+                    Remove-Item -Path $TRIGGER_FILE -Force -ErrorAction SilentlyContinue
+                    continue
                 }
                 Write-WatchLog ("trigger detected -- respawning. reason=" + $reason)
                 Remove-Item -Path $TRIGGER_FILE -Force -ErrorAction SilentlyContinue
