@@ -58,11 +58,18 @@ v13/v14/v15 dialogues stay in the dataset so their gains re-learn.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from little_brain_corpus_v15 import _DOCKED, _ROAM, _dlg
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+# Single source for the not-found error text (Zeke 08-04: bundle the
+# did-you-mean fix) — the falls train on the EXACT string dispatch now
+# returns, so training text == inference text (the v15 dialect lesson).
+from brain.little_brain_tools import tool_not_found_error  # noqa: E402
+
 DRAFTS = ROOT / "state" / "little_brain" / "fall_drafts.jsonl"
 
 # Reviewed-and-rejected drafts (turn_id): never include, even if re-mined.
@@ -167,7 +174,10 @@ def v16_fall_dialogues() -> list[dict]:
             continue
         stim = f["stimulus"]
         wrong = f["wrong_call"]
-        err = f["error_text"]
+        # NOT the mined error_text: dispatch now returns the did-you-mean
+        # dialect, and she must train on the string she'll actually read.
+        err = (tool_not_found_error(wrong)
+               if f["kind"] == "invented_tool" else f["error_text"])
         if f["kind"] == "invented_tool":
             # --- special case: talking needs no tool ---
             if wrong == "say":
@@ -240,17 +250,48 @@ def v16_twin_dialogues() -> list[dict]:
     return d
 
 
+def v16_roster_dialogues() -> list[dict]:
+    """TOOL ROSTER in her own voice (Zeke 08-04: "give her at start all her
+    tool names and what they do... as well as give it to her in training
+    data"). The closed-world fact — seven tools, no others — as knowledge she
+    can SAY, not just a spec she was shown. No fake name anywhere."""
+    roster = ("I have exactly seven tools: senses_now reads my whole live "
+              "body in one feed - tracks, gyro, head, lift, touch, proximity, "
+              "battery, camera light; time_now is the real clock; "
+              "memory_search reads big Iris's notes; memory_recall reads my "
+              "own; memory_note writes mine; memory_edit fixes mine; and "
+              "ask_big_iris hands a task up when it's beyond me.")
+    d: list[dict] = []
+    d.append(_dlg("What tools do you actually have?", [],
+        roster + " Those seven are all of me - any other name doesn't exist."))
+    d.append(_dlg("How do you check things about your own body?", [],
+        "One instrument: senses_now. It carries every body sense in a single "
+        "live feed - battery, head angle, proximity, touch, tilt, all of it. "
+        "There's no separate per-sensor tool, and I don't need one."))
+    d.append(_dlg("Do you have a separate battery sensor tool?", [],
+        "No separate one - senses_now carries battery along with everything "
+        "else. If an error ever tells me 'no tool named X', that means I "
+        "misnamed my tool, not that I lost a sense."))
+    d.append(_dlg("What do you do when a task needs more than your tools?", [],
+        "I hand it up with ask_big_iris - she has the depth and reaches Zeke "
+        "if it needs him. My seven tools cover my body, the clock, and "
+        "memory; everything past that is hers."))
+    return d
+
+
 if __name__ == "__main__":
     falls = v16_fall_dialogues()
     twins = v16_twin_dialogues()
+    roster_d = v16_roster_dialogues()
     print(f"v16 fall dialogues: {len(falls)}")
     print(f"v16 twin dialogues: {len(twins)}")
+    print(f"v16 roster dialogues: {len(roster_d)}")
 
     def _tok_est(sample: dict) -> int:
         chars = sum(len(m["content"]) for m in sample["messages"])
         return int(chars / 3.5) + 10 * len(sample["messages"])
 
-    worst = max(falls + twins, key=_tok_est)
+    worst = max(falls + twins + roster_d, key=_tok_est)
     est = _tok_est(worst)
     print(f"longest sample ~{est} tokens (seq budget 256)"
           + (" — WARNING: over ~240, may truncate!" if est > 240 else " — ok"))

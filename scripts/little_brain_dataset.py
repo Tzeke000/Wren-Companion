@@ -570,6 +570,14 @@ def v16_twin_samples() -> list[dict]:
     return list(v16_twin_dialogues())
 
 
+def v16_roster_samples() -> list[dict]:
+    """v16 tool roster in her voice (Zeke 08-04): the closed-world fact —
+    seven tools, no others — as sayable knowledge, matching the strengthened
+    TOOL_SPEC she now gets at inference."""
+    from little_brain_corpus_v16 import v16_roster_dialogues
+    return list(v16_roster_dialogues())
+
+
 def main() -> int:
     tr = harvest_transcript()
     les = lesson_pairs()
@@ -627,10 +635,11 @@ def main() -> int:
     # wrong-first-call gradient.
     v16_falls = v16_fall_samples() * 4
     v16_twins = v16_twin_samples() * 8
+    v16_roster = v16_roster_samples() * 6
     stock = v6_stock_samples()
     data = (tr + ident + know + ground + lessons + reasons + dontknow +
             self_banks + toolrules + tool_dlg + v13_dlg + v14_dlg + v15_dlg +
-            v16_falls + v16_twins + stock + les)
+            v16_falls + v16_twins + v16_roster + stock + les)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
@@ -651,6 +660,7 @@ def main() -> int:
     print(f"v15 dialogues:    {len(v15_dlg)} (anti-invention + real dialect + feed-gated refusal, x12)")
     print(f"v16 falls:        {len(v16_falls)} (supervised falling — real error->recovery, x4)")
     print(f"v16 twins:        {len(v16_twins)} (clean bait-twins, first-try right call, x8)")
+    print(f"v16 roster:       {len(v16_roster)} (seven-tools closed-world, her voice, x6)")
     print(f"stock samples:    {len(stock)} (v6 stock behavior-tree + Iris overlay)")
     print(f"lesson pairs:     {len(les)}")
     print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
