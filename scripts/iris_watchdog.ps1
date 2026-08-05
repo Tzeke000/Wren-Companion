@@ -199,12 +199,16 @@ function Get-ClaudeProcessSet {
 
 # Wait up to $TimeoutS seconds for a new claude/node PID (not in $Baseline)
 # to appear. Returns $true on success, $false on timeout. Polls every 2s so
-# we don't bail too early on a slow cold start (CC + iris_runtime can take
-# 15-30s on the first launch after reboot before any node child spawns).
+# we don't bail too early on a slow cold start.
+# 2026-08-05: 30 -> 120. Live fire 00:18 spawned start_iris_v2_fable.bat via
+# tier 2; the SDK stack took ~65s (spawn 00:18:50 -> claude PID 00:19:55) but
+# the 30s wait gave up at 00:19:22 and fired tier 3, creating a bare-claude
+# TWIN alongside the healthy bat stack. 30s was tuned for the CLI path; the
+# SDK host (bat -> cold_wake -> python -> bundled claude) needs the slack.
 function Wait-ForNewClaudeProcess {
     param(
         [hashtable]$Baseline,
-        [int]$TimeoutS = 30
+        [int]$TimeoutS = 120
     )
     $deadline = (Get-Date).AddSeconds($TimeoutS)
     while ((Get-Date) -lt $deadline) {
@@ -314,12 +318,12 @@ function Spawn-NewCC {
                 Start-Process -FilePath "wt.exe" -ArgumentList $wtArgs
                 Start-Sleep -Milliseconds 500
                 $wtAfter = @(Get-Process WindowsTerminal -ErrorAction SilentlyContinue).Count
-                Write-WatchLog ("tier 1 spawned: wt.exe + start_iris.bat (WindowsTerminal procs " + $wtBefore + "->" + $wtAfter + ") — waiting up to 30s for claude PID")
-                if (Wait-ForNewClaudeProcess -Baseline $baseline -TimeoutS 30) {
+                Write-WatchLog ("tier 1 spawned: wt.exe + start_iris.bat (WindowsTerminal procs " + $wtBefore + "->" + $wtAfter + ") — waiting up to 120s for claude PID")
+                if (Wait-ForNewClaudeProcess -Baseline $baseline -TimeoutS 120) {
                     Write-WatchLog ("tier 1 confirmed: new claude/node PID detected")
                     return $true
                 }
-                Write-WatchLog ("tier 1 spawn returned but no claude PID appeared within 30s — bat likely crashed or wt args malformed; trying tier 2")
+                Write-WatchLog ("tier 1 spawn returned but no claude PID appeared within 120s — bat likely crashed or wt args malformed; trying tier 2")
             } catch {
                 Write-WatchLog ("tier 1 spawn threw: " + $_)
             }
@@ -334,12 +338,12 @@ function Spawn-NewCC {
         $baseline = Get-ClaudeProcessSet
         try {
             Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"$batPath`"" -WindowStyle Normal
-            Write-WatchLog ("tier 2 spawned: cmd /c + start_iris.bat — waiting up to 30s for claude PID")
-            if (Wait-ForNewClaudeProcess -Baseline $baseline -TimeoutS 30) {
+            Write-WatchLog ("tier 2 spawned: cmd /c + start_iris.bat — waiting up to 120s for claude PID")
+            if (Wait-ForNewClaudeProcess -Baseline $baseline -TimeoutS 120) {
                 Write-WatchLog ("tier 2 confirmed: new claude/node PID detected")
                 return $true
             }
-            Write-WatchLog ("tier 2 spawn returned but no claude PID appeared within 30s — bat likely crashed; falling to tier 3 (bare claude)")
+            Write-WatchLog ("tier 2 spawn returned but no claude PID appeared within 120s — bat likely crashed; falling to tier 3 (bare claude)")
         } catch {
             Write-WatchLog ("tier 2 spawn threw: " + $_)
         }
