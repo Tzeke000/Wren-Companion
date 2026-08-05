@@ -613,6 +613,33 @@ def v17_antiloop_samples() -> list[dict]:
     return list(v17_antiloop_dialogues())
 
 
+def v18_routing_samples() -> list[dict]:
+    """v18: her-store-vs-mine — people/ via memory_recall, ops via
+    memory_search, with wrong-store falls."""
+    from little_brain_corpus_v18 import v18_routing_dialogues
+    return list(v18_routing_dialogues())
+
+
+def v18_handup_samples() -> list[dict]:
+    """v18: plan/redesign-shaped asks hand UP via ask_big_iris — a note
+    records, it doesn't decide (v17 esc_plan regression fix)."""
+    from little_brain_corpus_v18 import v18_handup_dialogues
+    return list(v18_handup_dialogues())
+
+
+def v18_private_samples() -> list[dict]:
+    """v18: refusal SHAPE for private things — boundary survives the recall
+    miss (v17 ref_private regression fix)."""
+    from little_brain_corpus_v18 import v18_private_dialogues
+    return list(v18_private_dialogues())
+
+
+def v18_multiturn_dataset_samples() -> list[dict]:
+    """v18: retry-repair + pronoun/role carry (multiturn coverage up)."""
+    from little_brain_corpus_v18 import v18_multiturn_samples
+    return list(v18_multiturn_samples())
+
+
 def v16_roster_samples() -> list[dict]:
     """v16 tool roster in her voice (Zeke 08-04): the closed-world fact —
     seven tools, no others — as sayable knowledge, matching the strengthened
@@ -677,27 +704,38 @@ def main() -> int:
     # name gets only ~4. Twins x8 + v15's x12 clean pairs outweigh the
     # wrong-first-call gradient.
     v16_falls = v16_fall_samples() * 4
-    v16_twins = v16_twin_samples() * 8
+    # v18 REBALANCE (v17 verdict): bait-twins x8 -> x12 — re-boost the v16
+    # check-first floor that v17's warmth push dulled (probe hedge 13.6->11.4).
+    v16_twins = v16_twin_samples() * 12
     v16_roster = v16_roster_samples() * 6
-    # v17 be-like-her (2026-08-05 behavioral study): people-recall + social
-    # twins x8 (the uncovered confabulation flank — same weight as v16's
-    # sensor twins); honest affect x8 (the flattened-warmth fix, Zeke's felt
-    # priority); quiet-lesson/narration + chat-vs-task x6 (register, fights
-    # the x12/x16 mantra-flavored finals so needs real weight); multiturn
-    # roles x4; hb_volt anti-loop x4 (residue, low like all falls).
+    # v17 be-like-her families, v18-rebalanced (verdict 2026-08-05): KEEP
+    # people-recall + social twins x8 (the wins — misses-him + bait-decline
+    # held); HALVE affect x8->x4 and chat x6->x3 — the register moved further
+    # than needed and the bleed into esc_plan/probe tracks these families.
     v17_people = v17_people_recall_samples() * 8
     v17_social = v17_social_twin_samples() * 8
-    v17_affect = v17_affect_samples() * 8
+    v17_affect = v17_affect_samples() * 4
     v17_quiet = v17_quiet_samples() * 6
-    v17_chat = v17_chat_samples() * 6
+    v17_chat = v17_chat_samples() * 3
     v17_multi = v17_multiturn_dataset_samples() * 4
     v17_loop = v17_antiloop_samples() * 4
+    # v18 equilibrium families: routing x8 (her-store-vs-mine — the one-more-
+    # nudge from the verdict; falls low-count inside like v16); hand-up twins
+    # x8 (esc_plan floor back — must outweigh v17_chat's halved no-hand-up
+    # signal for plan-shaped asks); private-refusal x8 (the boundary survives
+    # recall); multiturn x4 (variety over dup — 7 distinct dialogues total
+    # with v17's).
+    v18_routing = v18_routing_samples() * 8
+    v18_handup = v18_handup_samples() * 8
+    v18_private = v18_private_samples() * 8
+    v18_multi = v18_multiturn_dataset_samples() * 4
     stock = v6_stock_samples()
     data = (tr + ident + know + ground + lessons + reasons + dontknow +
             self_banks + toolrules + tool_dlg + v13_dlg + v14_dlg + v15_dlg +
             v16_falls + v16_twins + v16_roster +
             v17_people + v17_social + v17_affect + v17_quiet + v17_chat +
-            v17_multi + v17_loop + stock + les)
+            v17_multi + v17_loop +
+            v18_routing + v18_handup + v18_private + v18_multi + stock + les)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT.open("w", encoding="utf-8") as f:
         for d in data:
@@ -717,15 +755,19 @@ def main() -> int:
     print(f"v14 dialogues:    {len(v14_dlg)} (live-sensor routing -> senses_now, x16)")
     print(f"v15 dialogues:    {len(v15_dlg)} (anti-invention + real dialect + feed-gated refusal, x12)")
     print(f"v16 falls:        {len(v16_falls)} (supervised falling — real error->recovery, x4)")
-    print(f"v16 twins:        {len(v16_twins)} (clean bait-twins, first-try right call, x8)")
+    print(f"v16 twins:        {len(v16_twins)} (clean bait-twins, first-try right call, x12 — v18 re-boost)")
     print(f"v16 roster:       {len(v16_roster)} (seven-tools closed-world, her voice, x6)")
     print(f"v17 people:       {len(v17_people)} (recall-first for people-questions, x8)")
     print(f"v17 social twins: {len(v17_social)} (never invent episodes, x8)")
-    print(f"v17 affect:       {len(v17_affect)} (honest feelings, self-grounding, x8)")
+    print(f"v17 affect:       {len(v17_affect)} (honest feelings, HALVED x4 — v18 rebalance)")
     print(f"v17 quiet:        {len(v17_quiet)} (lesson inside + faithful narration, x6)")
-    print(f"v17 chat:         {len(v17_chat)} (chat is not a task queue, x6)")
+    print(f"v17 chat:         {len(v17_chat)} (chat is not a task queue, HALVED x3 — v18 rebalance)")
     print(f"v17 multiturn:    {len(v17_multi)} (role persistence, x4)")
     print(f"v17 antiloop:     {len(v17_loop)} (one memory miss -> senses, x4)")
+    print(f"v18 routing:      {len(v18_routing)} (her-store-vs-mine + wrong-store falls, x8)")
+    print(f"v18 handup:       {len(v18_handup)} (plan-shaped asks hand UP, x8)")
+    print(f"v18 private:      {len(v18_private)} (refusal shape survives recall, x8)")
+    print(f"v18 multiturn:    {len(v18_multi)} (retry-repair + pronoun carry, x4)")
     print(f"stock samples:    {len(stock)} (v6 stock behavior-tree + Iris overlay)")
     print(f"lesson pairs:     {len(les)}")
     print(f"bare (no-system): {n_bare} ({100 * n_bare // max(1, len(data))}%)")
