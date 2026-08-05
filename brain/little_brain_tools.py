@@ -442,11 +442,59 @@ TOOLS = {
 
 _TWO_ARG = {"memory_edit"}
 
+# ---- did-you-mean (2026-08-04, Zeke: "bundle it") ------------------------
+# The grounding probe showed the failure shape: she reaches with the right
+# KIND of act but a wrong NAME ('sensors_now', 'dock_status'), gets a bare
+# not-found error, and concludes she LACKS the sense. She reads errors
+# honestly — so put the correct name IN the error. Mirrors lb_fall_miner's
+# semantic map; kept here as the single runtime source (the v16 corpus
+# imports tool_not_found_error() so training text == inference text).
+
+_NAME_ALIASES = {
+    "sensors": "senses_now", "sensors_now": "senses_now",
+    "sense_now": "senses_now", "dock_status": "senses_now",
+    "battery_status": "senses_now", "battery": "senses_now",
+    "charger_status": "senses_now",
+    "clock": "time_now", "get_time": "time_now",
+    "memory_lookup": "memory_recall", "recall": "memory_recall",
+    "escalate": "ask_big_iris", "ask_iris": "ask_big_iris",
+}
+_BODY_WORDS = ("sens", "body", "battery", "volt", "charg", "dock", "temp",
+               "prox", "head", "gyro", "touch", "motor", "wheel", "lift",
+               "cliff", "cube", "tilt", "pitch", "roll")
+
+
+def nearest_tool(bad: str) -> str | None:
+    """Best real-tool guess for an invented name, or None if no confident map."""
+    low = (bad or "").lower()
+    if low in _NAME_ALIASES:
+        return _NAME_ALIASES[low]
+    if any(w in low for w in _BODY_WORDS):
+        return "senses_now"
+    if "time" in low or "clock" in low:
+        return "time_now"
+    if "memor" in low or "recall" in low or "note" in low:
+        return "memory_recall"
+    import difflib
+    close = difflib.get_close_matches(low, list(TOOLS), n=1, cutoff=0.6)
+    return close[0] if close else None
+
+
+def tool_not_found_error(name: str) -> str:
+    """The not-found error WITH guidance — a wrong name must never read like a
+    missing sense. Single source for dispatch AND the v16 training corpus."""
+    sugg = nearest_tool(name)
+    if sugg:
+        return (f"error: no tool named '{name}' - did you mean '{sugg}'? "
+                f"(a wrong name, not a missing sense)")
+    return (f"error: no tool named '{name}' - your only tools: "
+            + ", ".join(TOOLS) + "; if the task needs more, ask_big_iris")
+
 
 def dispatch(name: str, args: list[str]) -> str:
     fn = TOOLS.get(name)
     if fn is None:
-        return f"error: no tool named '{name}'"
+        return tool_not_found_error(name)
     try:
         if name == "memory_note":
             # (title, body, [folder]) — optional folder routes journal|misc
@@ -493,6 +541,9 @@ TOOL_SPEC = (
     "beyond you (hard reasoning, something risky, anything you can't verify); she "
     "picks it up and reaches Zeke if needed. Use this instead of guessing or "
     "declining flat.\n"
+    "These SEVEN are your ONLY tools - no other tool exists. If an error says "
+    "\"no tool named X\", you used a wrong NAME, not a missing sense: retry "
+    "with the right one.\n"
     "Truth over everything; never state what you don't know as if you do.")
 
 
