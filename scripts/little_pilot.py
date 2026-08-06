@@ -391,6 +391,29 @@ def _contact_health(bat: dict, nrv: dict) -> str | None:
     del _hist[:-6]
     if len(_hist) < 3:
         return None
+    # D FIRST, deliberately (2026-08-06). The INVERSE of C: volts strictly
+    # RISING while the feed insists he is off the charger. Physically
+    # impossible — you cannot gain charge off the dock — so it is a stale
+    # feed, not a stranded robot.
+    # This is the 2026-07-23 dock saga: the dock SUCCEEDED, the fossilized
+    # feed reported off-charger for ~20 min, and the win was invisible. Rule
+    # B cannot catch it (accel-derived fields kept updating, so the feed never
+    # looked frozen), and rule A ACTIVELY MISREPORTS it — a low, climbing
+    # battery trips A's `low` branch and yields "needs re-seat" for a robot
+    # that is already seated and charging. Verified by test: with D placed
+    # after A, the 07-23 sequence returned A's re-seat text and D never ran.
+    # Ordering is the fix; D is the strictly more specific claim and it
+    # explains why A's premise is false.
+    # Cheap here because scar #4 (volts LATCH at undock) works FOR us: a
+    # genuinely roaming robot reports a frozen latch value, never a rising
+    # one, so a rising series while off-charger can only mean re-seated.
+    # Motion + timestamp fossil rules live in scripts/fossil_check.py.
+    vr = [h["volts"] for h in _hist[-3:] if h["volts"]]
+    if (len(vr) == 3 and all(a < b for a, b in zip(vr, vr[1:]))
+            and all(h["on_chg"] is False for h in _hist[-3:])):
+        return (f"FEED FOSSIL (charge contradiction) — volts RISING "
+                f"{vr[0]}->{vr[-1]} while feed says off-charger; he is docked "
+                f"and the feed is stale. Bounce the daemon; distrust all files")
     # A: off-charger sustained 2+ cycles (~5 min) — earlier than the volt rule.
     # 2026-07-28: SUPPRESSED while possession is deliberately released. With
     # drive_on_charger broken (4x 150s timeouts, even with charger_known=true),
