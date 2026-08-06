@@ -1,0 +1,546 @@
+PAGES 11
+
+
+===== PAGE 1 =====
+Data Sheet
+PowerEdge Server GPU Matrix Data Sheet
+PowerEdge Server GPU Matrix
+Brand Model GPU
+Memory
+Memory 
+ECC
+Memory  
+Bandwidth
+Max Power
+Consumption
+Host Interface 
+(BW)
+GPU-to-GPU 
+Peer 
+Interconnect 
+(BW)
+Slot 
+Width
+GPU
+Height/
+Length5
+Auxiliary 
+Cable Workload1
+AMD MI350P 144 GB 
+HBM3e Y 4 TB/sec 600W PCIe Gen5x16 
+(128 GB/sec) N/A DW FHFL N/A AI / HPC
+AMD MI300X OAM 192 GB HBM3 Y 5.3 TB/sec 750W PCIe Gen5x16 
+(128 GB/sec)
+Infinity Fabric 
+Link (4th Gen- 
+896 GB/sec)
+N/A N/A N/A AI / HPC
+AMD MI355X DLC 
+(X8) 288 GB HBM3 Y 8 TB/sec 1400W PCIe Gen5x16 
+(128 GB/sec)
+ Infinity Fabric 
+Link (4th Gen- 
+896 GB/sec)
+N/A N/A N/A AI / HPC
+AMD MI355X AC 288 GB HBM3 Y 8 TB/sec 1400W PCIe Gen5x16 
+(128 GB/sec)
+ Infinity Fabric 
+Link (4th Gen- 
+896 GB/sec)
+N/A N/A N/A AI / HPC
+AMD MI210 64 GB HBM2e Y 1638 GB/sec 300W PCIe Gen4x16 
+(64 GB/sec)
+Infinity Fabric 
+Link bridge8 DW FHFL CPU 8 pin
+HPC/Machine 
+learning 
+training
+Intel Gaudi 3 PCIe 128 GB HBM3 Y 3.7 TB/s  600W PCIe Gen5x16 
+(128 GB/sec)
+RoCE 
+(900GB/s) DW FHFL AI / HPC
+Intel Gaudi 3 OAM 128 GB HBM3 Y  3.6TB/s 850W PCIe Gen5x16 
+(128 GB/sec)
+RoCE 
+(1,200GB/s) N/A N/A N/A AI / HPC
+Intel Flex 140 12 GB GDDR6 Y 336 GB/Sec 75W PCIe Gen4 x8 
+(32 GB/sec)
+XeLink bridge8 
+(336 GB/sec) SW HHHL/
+FHHL N/A Inferencing/
+Edge
+NVIDIA H200 NVL 141 GB 
+HBM3e Y 4.8 TB/sec 600W PCIe Gen 5x16 
+(128 GB/sec)
+NVLink (4th 
+Gen - 900 GB/s) DW FHFL PCIe 16 
+pin AI/HPC
+NVIDIA H100 NVL 94 GB HBM3 Y 3.9 TB/sec 350W- 400W PCIe Gen 5x16 
+(128 GB/sec)
+NVLink (4th 
+Gen - 900 GB/s) DW FHFL PCIe 16 
+pin AI / HPC
+NVIDIA RTX Pro 6000 
+BSE 96 GB GDDR7 Y 1.8 TB/sec 600W PCIe Gen 5x16 
+(128 GB/sec)
+PCIe Gen 5x16 
+(128 GB/sec) DW FHFL PCIe 16 
+pin AI / HPC
+NVIDIA RTX Pro 4500 
+BSE
+ 32 GB 
+GDDR7 800 GB/sec 165W PCIe Gen 5x16 
+(128 GB/sec) N/A SW FHFL AI / HPC
+NVIDIA B300 SXM(x8) 
+AC
+2.1 TB 
+HBM3e Y 14.4 TB/sec 1000W N/A N/A N/A AI / HPC
+NVIDIA B200 SXM 
+(x8) AC
+141 GB 
+HBM3e Y 7.7 TB/sec 1000W PCIe Gen 5x16 
+(128 GB/sec)
+NVLink (5th 
+Gen - 1.8 TB/s) N/A N/A N/A AI / HPC
+NVIDIA B200 SXM(x8) 
+DLC
+180 GB 
+HBM3e Y 7.7 TB/sec 1000W PCIe Gen 5x16 
+(128 GB/sec)
+NVLink (5th 
+Gen - 1.8 TB/s) N/A N/A N/A AI / HPC
+NVIDIA B300 SXM(x8) 
+DLC
+180 GB 
+HBM3e Y 7.7 TB/sec 1000W PCIe Gen 5x16 
+(128 GB/sec)
+NVLink (5th 
+Gen - 1.8 TB/s) N/A N/A N/A AI / HPC
+NVIDIA H200 SXM5 
+(x8) DLC
+ 141 GB 
+HBM3e Y 4.8 TB/s 700W PCIe Gen 5x16 
+(128 GB/sec)
+NVLink (4th 
+Gen - 900 GB/s) DW AI / HPC
+NVIDIA H200 SXM5 
+(x8)
+ 141 GB 
+HBM3e Y 4.8 TB/s 700W PCIe Gen 5x16 
+(128 GB/sec)
+NVLink (4th 
+Gen - 900 GB/s) N/A N/A N/A AI / HPC
+NVIDIA H100 SXM5 
+(x8) 80 GB HBM3 Y 3 TB/sec 1200W PCIe Gen 5 (128 
+GB/sec)
+NVLink (4th 
+Gen - 900 GB/s) N/A N/A N/A AI / HPC
+NVIDIA H100 SXM5 
+(x4) 80 GB HBM3 Y 8 TB/sec 1400W PCIe Gen 5 (256 
+GB/sec)
+NVLink (4th 
+Gen - 900 GB/s) N/A N/A N/A AI / HPC
+NVIDIA GB200 NVL4 186 GB HBM3 Y 8 TB/sec 700W PCIe Gen 5x16 
+(128 GB/sec)
+NVLink (5th 
+Gen - 1.8 TB/s) N/A N/A N/A
+NVIDIA GB300 NVL72 279 GB HBM3 Y 3 TB/sec 700W PCIe Gen 5x16 
+(128 GB/sec)
+NVLink (5th 
+Gen - 1.8 TB/s) N/A N/A N/A
+
+
+===== PAGE 2 =====
+|  PowerEdge Server GPU Matrix Data Sheet
+2
+Brand Model GPU
+Memory
+Memory 
+ECC
+Memory  
+Bandwidth
+Max Power
+Consumption
+Host Interface 
+(BW)
+GPU-to-GPU 
+Peer 
+Interconnect 
+(BW)
+Slot 
+Width
+GPU
+Height/
+Length5
+Auxiliary 
+Cable Workload1
+NVIDIA L40S 48 GB GDDR6 Y 864 GB/sec 350W PCIe Gen4 x16 
+(64 GB/sec) N/A DW FHFL PCIe 16 
+pin
+AI/
+Performance 
+graphics/VDI
+NVIDIA L40 48 GB GDDR6 Y 864 GB/sec 300W PCIe Gen4 x16 
+(64 GB/sec) N/A DW FHFL PCIe 16 
+pin
+Performance 
+graphics/VDI
+NVIDIA A16 64 GB GDDR6 Y 800 GB/sec 250W PCIe Gen4 x16 
+(64GB/sec) N/A DW FHFL CPU 8 pin VDI
+NVIDIA L4 24 GB GDDR6 Y 300 GB/s  72W PCIe Gen4 x16 
+(64GB/sec) N/A SW HHHL N/A Inferencing/
+Edge/VDI 
+NVIDIA L4 24 GB GDDR6 Y 300 GB/s  72W PCIe Gen4 x16 
+(64GB/sec) N/A SW FHHL N/A Inferencing/
+Edge/VDI 
+NVIDIA A2 (v2) 16 GB GDDR6 Y 200 GB/sec 60W PCIe Gen4 x8 (32 
+GB/sec) N/A SW HHHL N/A Inferencing/
+Edge/VDI 
+NVIDIA A2 (v2) 16 GB GDDR6 Y 200 GB/sec 60W PCIe Gen4 x8 (32 
+GB/sec) N/A SW FHHL N/A Inferencing/
+Edge/VDI 
+NVIDIA A10 24 GB GDDR6 Y 600 GB/sec 150W PCIe Gen4 x16 
+(64GB/sec) N/A SW FHFL PCIe 8 pin mainstream 
+graphics/VDI
+
+
+===== PAGE 3 =====
+|  PowerEdge Server GPU Matrix Data Sheet
+3
+Brand Model Tied SKU2 Customer Kit SKU2
+AMD MI350P
+AMD MI300X OAM 490-BJZD
+AMD MI355X DLC (X8) 490-BKXW
+AMD MI355X AC 490-BLFX
+AMD MI210 490-BHUU 490-BJYD 490-BHUT 490-BJYF
+Intel Gaudi 3 PCIe 490-BLCC
+Intel Gaudi 3 OAM 489-BBGR
+Intel Flex 140 490-BIIQ 490-BIIM 490-BIIK 490-BIIO
+NVIDIA H200 NVL 490-BKRM 
+NVIDIA H100 NVL 330-BCFX
+NVIDIA H200 NVL
+NVIDIA B200 NVL
+NVIDIA RTX Pro 6000 BSE
+NVIDIA RTX Pro 4500 BSE 490-BLRT
+NVIDIA B200 SXM (x8) AC
+NVIDIA B200 SXM (x8) DLC
+NVIDIA B300 SXM (x8) DLC
+NVIDIA H200 SXM5 (x8) 
+DLC
+NVIDIA H200 SXM5 (x8) 490-BHHF
+NVIDIA H100 SXM5 (x8) 489-BBGD
+NVIDIA H100 SXM5 (x4) 489-BBGJ
+NVIDIA GB200 NVL4
+NVIDIA GB300 NVL72
+NVIDIA L40S 490-BJVT 490-BJVV
+NVIDIA L40 490-BJHP 490-BJHQ 490-BJHN
+NVIDIA A16 490-BHER 490-BHET 490-BHES
+NVIDIA L4 (HHHL) 490-BJRN 490-BJRR
+NVIDIA L4 (FHHL) 490-BJRP 490-BJRQ
+NVIDIA A2 (v2) (HHHL) 490-BHVO 490-BHVQ
+NVIDIA A2 (v2) (FHHL) 490-BHVR 490-BHVP
+NVIDIA A10 490-BGKF 490-BGLB 490-BGYD 490-BGKH
+
+
+===== PAGE 4 =====
+|  PowerEdge Server GPU Matrix Data Sheet
+4
+PowerEdge 17th Generation servers
+Brand Model XE9780 XE9785 XE9785L XE7740 XE7745 XE8712 R6715 R6725 R7715 R7725 R570 R470 R670 R770
+AMD MI300X OAM
+AMD MI355X DLC (X8)  ✓
+AMD MI355X AC  ✓
+AMD MI210
+Intel Gaudi 3 PCIe  ✓
+Intel Gaudi 3 OAM
+Intel Flex 140
+NVIDIA H200 NVL  ✓ ✓ ✓ ✓ ✓
+NVIDIA H100 NVL ✓ ✓ ✓ ✓ ✓ ✓
+NVIDIA B200 DLC
+NVIDIA RTX Pro 6000 BSE ✓ ✓ ✓ ✓
+NVIDIA RTX Pro 4500 BSE ✓ ✓ ✓ ✓ ✓ ✓
+NVIDIA B200 SXM (x8) AC
+NVIDIA B200 SXM (x8) DLC
+NVIDIA B300 SXM5 (x8) DLC
+NVIDIA H200 SXM5 (x8) DLC
+NVIDIA H200 SXM5 (x8)
+NVIDIA H100 SXM5 (x8)
+NVIDIA H100 SXM5 (x4)
+NVIDIA GB200 NVL4
+NVIDIA L40S  ✓  ✓ ✓ ✓
+NVIDIA L40
+NVIDIA A16 ✓  ✓ ✓ ✓
+NVIDIA L4 (HHHL) ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓ ✓
+NVIDIA L4 (FHHL)
+NVIDIA A2 (v2) (HHHL)
+NVIDIA A2 (v2) (FHHL)
+NVIDIA A10
+Server Compability Legend:  ✓ = Supported
+
+
+===== PAGE 5 =====
+|  PowerEdge Server GPU Matrix Data Sheet
+5
+16th Generation servers
+Brand Model XE9685L XE9680L XE9680 XE9640 XE8640 R760xa R760 R760xs R760xd2 R660
+AMD MI300X OAM ✓
+AMD MI210  ✓
+Intel Gaudi 3 PCIe
+Intel Gaudi 3 OAM ✓
+Intel Flex 140  ✓ ✓ ✓
+NVIDIA H200 NVL
+NVIDIA H100 NVL  ✓
+NVIDIA B200 SXM (x8) DLC ✓ ✓
+NVIDIA H200 SXM5 (x8) DLC ✓
+NVIDIA H200 SXM5 (x8) AC ✓
+NVIDIA H100 SXM5 (x8) ✓
+NVIDIA H100 SXM5 (x4)   ✓ ✓
+NVIDIA L40S ✓ ✓
+NVIDIA L40 ✓ ✓
+NVIDIA A16 ✓ ✓
+NVIDIA L4 (HHHL) ✓
+NVIDIA L4 (FHHL) ✓ ✓  ✓ ✓
+NVIDIA A2 (v2) (HHHL) ✓ ✓
+NVIDIA A2 (v2) (FHHL)
+NVIDIA A10
+Server Compability Legend:  ✓ = Supported
+
+
+===== PAGE 6 =====
+|  PowerEdge Server GPU Matrix Data Sheet
+6
+16th Generation servers
+Brand Model R7625 R7615 R6625 R6615 R960 T360 T560 C6620 XR8620t XR7620 XR5610 HS5620
+AMD MI300X OAM
+AMD MI210  ✓ ✓
+Intel Gaudi 3 PCIe
+Intel Gaudi 3 OAM
+Intel Flex 140  
+NVIDIA H200 NVL
+NVIDIA H100 NVL  ✓ ✓
+NVIDIA B200 SXM (x8) DLC
+NVIDIA H200 SXM5 (x8) DLC
+NVIDIA H200 SXM5 (x8) AC
+NVIDIA H100 SXM5 (x8)
+NVIDIA H100 SXM5 (x4)
+NVIDIA L40S ✓ ✓ ✓ ✓
+NVIDIA L40 ✓ ✓  ✓
+NVIDIA A16 ✓ ✓ ✓
+NVIDIA L4 (HHHL)  ✓
+NVIDIA L4 (FHHL) ✓ ✓ ✓ ✓ ✓  ✓ ✓ ✓  
+NVIDIA A2 (v2) (HHHL) ✓ ✓ ✓
+NVIDIA A2 (v2) (FHHL) ✓ ✓ ✓ ✓  ✓ ✓ ✓ ✓
+NVIDIA A10
+Server Compability Legend:  ✓ = Supported
+
+
+===== PAGE 7 =====
+|  PowerEdge Server GPU Matrix Data Sheet
+7
+15th Generation servers
+Brand Model R750 R650 R6525 R7525 XR4520C XR12 XR11
+AMD MI300X OAM
+AMD MI210  ✓
+Intel Gaudi 3 PCIe
+Intel Gaudi 3 OAM
+Intel Flex 140  ✓ ✓ ✓ ✓
+NVIDIA H200 NVL
+NVIDIA H100 NVL 
+NVIDIA B200 SXM (x8) DLC
+NVIDIA H200 SXM5 (x8) DLC
+NVIDIA H200 SXM5 (x8) AC
+NVIDIA H100 SXM5 (x8)
+NVIDIA H100 SXM5 (x4)
+NVIDIA L40S
+NVIDIA L40  ✓ ✓
+NVIDIA A16 ✓ ✓
+NVIDIA L4 (HHHL) ✓ ✓ ✓ ✓ ✓
+NVIDIA L4 (FHHL) ✓ ✓ ✓ ✓ ✓ ✓
+NVIDIA A2 (v2) (HHHL) ✓ ✓ ✓ ✓ ✓
+NVIDIA A2 (v2) (FHHL) ✓ ✓ ✓ ✓ ✓ ✓ ✓
+NVIDIA A10 ✓ ✓
+Server Compability Legend:  ✓ = Supported
+
+
+===== PAGE 8 =====
+|  PowerEdge Server GPU Matrix Data Sheet
+8
+PLATFORM
+NVIDIA GPUs
+GB200 
+NVL4
+GB300 
+NVL72
+B200 AC 
+(X8)
+B200 
+DLC (X8)
+B300 AC 
+(X8)
+B300 DLC 
+(X8)
+RTX Pro 6000 
+BSE RTX Pro 4500 BSE H200 NVL
+XE8712 Shipping
+XE9712 Shipping (4)
+XE9785 Shipping
+XE9780 Shipping Shipping
+XE9785L Shipping
+XE9780L Shipping Shipping Shipping
+XE7745 Shipping 
+Min (1) Max (8) Shipping Shipping (8)
+XE7740 Shipping 
+Min (1) Max (8) Shipping Shipping (8)
+R770 Shipping (2) Shipping (2) Shipping (2)
+R670
+R570 Shipping (3)
+R470
+R7725 Shipping (2) Shipping (2) Shipping (2)
+R7715 Shipping (2) Shipping (3)
+R6725
+R6715
+XE9685L
+XE9680L
+XE9680
+XE9640
+XE8640
+R760xa
+R760
+R760xs
+R760xd2
+R660
+R7625
+R7615
+(qty) - max number of GPUs allowed, maximum number of GPUs allowed might differ in different configurations on the same platform
+
+
+===== PAGE 9 =====
+|  PowerEdge Server GPU Matrix Data Sheet
+9
+PLATFORM
+NVIDIA GPUs
+H200 SXM5 
+(x8) DLC
+H200 SXM5 
+(x8) AC L40S L4 A16
+XE8712
+XE9712 
+XE9785
+XE9780
+XE9785L
+XE9780L
+XE7745 Shipping (8)
+XE7740
+R770 Shipping (2) Shipping (6) Shipping (2)
+R670 Shipping (3)
+R570 Shipping (4)
+R470 Shipping (4)
+R7725 Shipping (2) Shipping (6) Shipping (2)
+R7715 Shipping (3) Shipping (6) Shipping (3)
+R6725 Shipping (3)
+R6715 Shipping (3)
+XE9685L
+XE9680L Shipping
+XE9680 Shipping
+XE9640
+XE8640
+R760xa Shipping (43) Shipping (83) Shipping (43)
+R760 Shipping (2) Shipping (4) Shipping (2)
+R760xs
+R760xd2 Shipping (2)
+R660 Shipping (3)
+R7625 Shipping (2) Shipping (4) Shipping (2)
+R7615 Shipping (3) Shipping (4) Shipping (3)
+(qty) - max number of GPUs allowed, maximum number of GPUs allowed might differ in different configurations on the same platform
+
+
+===== PAGE 10 =====
+|  PowerEdge Server GPU Matrix Data Sheet
+10
+PLATFORM
+NVIDIA GPUs
+L40S L4 A16
+R6625 Shipping (3)
+R6615 Shipping (2)
+R960 Shipping (4) Shipping (4)
+T560 Shipping (5)
+R360
+T360
+C6620
+XR7620 Shipping (2) Shipping (5)
+XR5610 Shipping (2)
+XR8620t Shipping (3)
+HS5620
+R750 Shipping (6) Shipping (2)
+R650 Shipping (3)
+R7525 Shipping (6) Shipping (3)
+R6525
+XR4520c Shipping (2)
+XR12 Shipping (3)
+XR11 Shipping (3)
+(qty) - max number of GPUs allowed, maximum number of GPUs allowed might differ in different configurations on the same platform
+
+
+===== PAGE 11 =====
+PLATFORM
+AMD GPUs Intel GPUs
+MI210 MI350P MI355X DLC (x8) MI355X AC (x8) Gaudi 3 PCIe (x8) Gaudi 3 OAM (x8)
+XE9785 Shipping
+XE9785L Shipping
+XE7745
+XE7740 Shipping
+R770
+R660
+R570
+R470
+R7725
+R7715
+R6725
+R6715
+XE9685L
+XE9680L
+XE9680 Shipping Shipping
+XE9640
+XE8640
+R760xa Shipping (43)
+R760
+R760xs
+R760xd2
+R660
+R7625 Shipping (2)
+R7615 Shipping (3)
+R6625
+R6615
+R960
+T560
+C6620
+XR7620
+XR5610
+XR8620t
+R750
+R650
+R7525 Shipping (3)
+R6525
+XR4520c
+XR12
+XR11
+(qty) - max number of GPUs allowed, maximum number of GPUs allowed might differ in different configurations on the same platform
+Suggested ideal workloads, but can be used for other workloads
+Different SKUs are mentioned because different platforms might support different SKUs. This sheet doesn’t  specifically call out platform-SKU associations
+up to 600GB/sec for H100 when NVLink bridge is used, up to 200GB/sec when NVLink bridge is used, up to 112.5GB/sec when NVLink bridge is used, up to 300GB/sec 
+for MI210 when Infinity Fabric Link bridge is used
+w/NVLink bridge is supported on R760xa, w/NVLink bridge is supported on R760xa, MI210 w/Infinity Fabric Link bridge is supported on R760xa
+DW - Double Wide, SW - Single Wide, FH- Full Height, FL - Full Length, HH - Half Height, HL - Half Length
+* Currently available as Customer Install only
+Copyright © 2026 Dell Inc. or its subsidiaries. All Rights Reserved. Dell and other trademarks are trademarks of Dell Inc. or its subsidiaries. Other trademarks may be 
+trademarks of their respective owners.
+June  2026
+Contact a Dell  
+Technologies Expert
+View more resourcesLearn more about 
+Dell solutions
+Follow on X
+Follow on Linkedin
+Follow on Dell.com
+Join the conversation 
+with #DellTechnologies

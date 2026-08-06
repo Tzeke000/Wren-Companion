@@ -1,0 +1,209 @@
+PAGES 8
+
+===== PAGE 1 =====
+ 
+ 
+A Dell White Paper  
+ 
+Disabling a Third-Party PCIe Card Cooling 
+Response with Dell PowerEdge Servers 
+Reducing fan speeds when additional card cooling is unnecessary 
+Dell Product Group | Server Engineering 
+May 2015 
+ 
+ 
+ 
+
+===== PAGE 2 =====
+ 
+ 
+2 Disabling a Third-Party PCIe Card Cooling Response with Dell PowerEdge Servers  
+Table of contents 
+Revisions ............................................................................................................................................................................................. 2 
+Acknowledgements .......................................................................................................................................................................... 2 
+Background ........................................................................................................................................................................................ 4 
+LC Log message and fan response expectations ........................................................................................................................ 4 
+Command details .............................................................................................................................................................................. 6 
+IPMI based: ................................................................................................................................................................................. 6 
+IPMITOOL (remote/IPMI over LAN) ........................................................................................................................................ 6 
+IPMITOOL (local): (if Windows) ............................................................................................................................................... 6 
+IPMITOOL (local): (if Linux) ...................................................................................................................................................... 7 
+IPMIUTIL (local) .......................................................................................................................................................................... 7 
+Using RACADM Commands: ................................................................................................................................................... 7 
+Using WSMAN Commands: .................................................................................................................................................... 8 
+ 
+Revisions 
+Date Description 
+April 2015 Initial release 
+Nov 2015 Updates with racadm and wsman command support 
+ 
+ 
+Acknowledgements  
+ 
+This paper was produced by the Server Engineering Team.  
+Authors: Dominick Lovicott, Hasnain Shabbir, and Dinesh K. R.  
+ 
+ 
+ 
+This document is for informational purposes only and may contain typographical errors and technical inaccuracies. 
+The content is provided as is, without express or implied warranties of any kind.  
+ 
+
+===== PAGE 3 =====
+ 
+ 
+3 Disabling a Third-Party PCIe Card Cooling Response with Dell PowerEdge Servers  
+© 2015 Dell Inc. All rights reserved. Reproduction of this material in any manner whatsoever without the express 
+written permission of Dell Inc. is strictly forbidden. For more information, contact Dell. Dell, the DELL logo, and the 
+DELL badge are trademarks of Dell Inc. Other trademarks and trade names may be used in this document to refer to 
+either the entities claiming the marks and names or their products. Dell disclaims any proprietary interest in the marks 
+and names of others. 
+ 
+
+===== PAGE 4 =====
+ 
+ 
+4 Disabling a Third-Party PCIe Card Cooling Response with Dell PowerEdge Servers  
+Background  
+Dell PowerEdge servers are designed to use third-party PCIe cards. When a PowerEdge server detects a 
+third-party card, the server automatically provisions additional cooling for the card. For more information 
+on managing PowerEdge server cooling for PCIe cards, see the PCIe Card Cooling with Dell PowerEdge 
+Servers white paper on Dell Tech Center. 
+In some cases the automatic fan response for third-party cards may provide more cooling than the card 
+requires. For example, a card that has its own cooling fan may not need additional cooling or may require 
+less than the automatic response. If this is the case, you can disable the automatic response to reduce fan 
+power consumption and noise levels in the server.   
+This white paper describes how to configure a PowerEdge server to disable a third-party card fan response 
+through Intelligent Platform Management Interface (IPMI) commands using ipmitool or ipmiutil, and 
+explains what to expect when the response is disabled. To manually reconfigure the cooling settings for a 
+third-party card in a PowerEdge server, see the following guides for instructions. 
+• User Cooling Options for Dell PowerEdge Server Fan Control Best Practices Guide  on Dell 
+Tech Center 
+• iDRAC8 User Guide 
+NOTE: The feature described in this whitepaper is available not just in certain PowerEdge servers but 
+also  other systems offering iDRAC systems management 
+LC Log message and fan response expectations 
+Before disabling a third-party PCIe card fan response, check the iDRAC LC Log to see if the server detects 
+the card. Figure 1 is a sample of the message to look for in the LC Log. The message provides information 
+for adjusting the default fan response. 
+ 
+Figure 1 LC Log message as seen in iDRAC WebGUI interface 
+
+
+===== PAGE 5 =====
+ 
+ 
+5 Disabling a Third-Party PCIe Card Cooling Response with Dell PowerEdge Servers  
+If fan speeds change and the LC message is displayed, then use the commands described in this white 
+paper to disable the change in baseline fan speed. By disabling the third-party PCIe card response, the 
+PowerEdge thermal control system returns the fan speed to the baseline fan speed as shown in Figure 2. 
+In some cases, disabling the fan response may not change the fan speed. This can occur when one or 
+more of the following occurs: 
+• The baseline cooling already accommodates the cooling needs of the third-party card. 
+• Another device or devices require cooling at or above the third-party card response. 
+• A manual fan speed setting is set at or above the response level. 
+ 
+Figure 2 Fan speed response illustration 
+If the LC Log doesn’t show a message like the one in Figure 1, then the server isn’t treating the card as a 
+third-party card and applying these commands will have no effect on fan speeds.  
+Fan speeds should be expected to exceed the baseline even when the message isn’t present. This occurs 
+normally based on the thermal needs of other components as determined by the server thermal control 
+algorithm. Such fan speeds are not manually adjustable or disabled since the thermal algorithm has 
+deemed the cooling necessary to maintain safe and reliable operation. 
+  
+
+
+===== PAGE 6 =====
+ 
+ 
+6 Disabling a Third-Party PCIe Card Cooling Response with Dell PowerEdge Servers  
+Command details  
+IPMI based: 
+Use IPMI set commands to enable or disable a third-party PCIe card response. You can execute these 
+commands either locally from the server that is being configured or remotely (IPMI over LAN) from the 
+server that is being configured. The following sections provide the “get” and “set” IPMI commands for 
+ipmitool and ipmiutil. For more information on how to use impitool, see Using IPMITOOL Raw Commands 
+for Remote Management of Dell PowerEdge Servers. 
+To enable IPMI over LAN, enable it using an iDRAC interface such as iDRAC GUI, RACADM or WSMAN. For 
+example, use the following command in RACADM to configure IPMI: 
+/admin1-> racadm set iDRAC.ipmilan.enable 1 
+[Key=iDRAC.Embedded.1#IPMILan.1] 
+Object value modified successfully 
+To learn more iDRAC8 user interface options, see the iDRAC8 User Guide.  
+IPMITOOL (remote/IPMI over LAN)  
+Get Cmd: Third Party PCI Card Response Status 
+ipmitool -H <ipaddress> -U <username> -P <password> -I lanplus raw 0x30 0xce 1 0x16 
+5 0 0 0 
+Set Cmd: Disable Third Party PCI Card Response 
+ipmitool -H <ipaddress> -U <username> -P <password> -I lanplus raw 0x30 0xce 0 0x16 
+5 0 0 0 5 0 1 0 0 
+Set Cmd: Enable Third Party PCI Card Response 
+ipmitool -H <ipaddress> -U <username> -P <password> -I lanplus raw 0x30 0xce 0 0x16 
+5 0 0 0 5 0 0 0 0 
+IPMITOOL (local): (if Windows) 
+Get Cmd: Third Party PCI Card Response Status 
+ipmitool –I wmi raw 0x30 0xce 1 0x16 5 0 0 0 
+Set Cmd: Disable Third Party PCI Card Response 
+ipmitool –I wmi raw 0x30 0xce 0 0x16 5 0 0 0 5 0 1 0 0 
+Set Cmd: Enable Third Party PCI Card Response 
+
+===== PAGE 7 =====
+ 
+ 
+7 Disabling a Third-Party PCIe Card Cooling Response with Dell PowerEdge Servers  
+ipmitool –I wmi raw 0x30 0xce 0 0x16 5 0 0 0 5 0 0 0 0 
+IPMITOOL (local): (if Linux) 
+Get Cmd: Third Party PCI Card Response Status 
+ipmitool –I open raw 0x30 0xce 1 0x16 5 0 0 0 
+Set Cmd: Disable Third Party PCI Card Response 
+ipmitool –I open raw 0x30 0xce 0 0x16 5 0 0 0 5 0 1 0 0 
+Set Cmd: Enable Third Party PCI Card Response 
+ipmitool –I open raw 0x30 0xce 0 0x16 5 0 0 0 5 0 0 0 0 
+IPMIUTIL (local) 
+Get Cmd: Third Party PCI Card Response Status 
+ipmiutil cmd 0 20 c0 ce 1 16 5 0 0 0  
+Set Cmd: Disable Third Party PCI Card Response 
+ipmiutil cmd 0 20 c0 ce 0 16 5 0 0 0 5 0 1 0 0 
+Set Cmd: Enable Third Party PCI Card Response 
+ipmiutil cmd 0 20 c0 ce 0 16 5 0 0 0 5 0 0 0 0 
+ 
+Using RACADM Commands: 
+Use the following racadm command to check current status of third party PCI fan response:  
+racadm get system.thermalsettings.ThirdPartyPCIFanResponse 
+To disable the response: (default is enabled) 
+racadm set system.thermalsettings.ThirdPartyPCIFanResponse 1 
+To enable the response: (if disabled by above command) 
+racadm set system.thermalsettings.ThirdPartyPCIFanResponse 0 
+  
+
+===== PAGE 8 =====
+ 
+ 
+8 Disabling a Third-Party PCIe Card Cooling Response with Dell PowerEdge Servers  
+ 
+Using WSMAN Commands: 
+Use the following wsman command to check current status of third party PCI fan response: 
+winrm e http://schemas.dmtf.org/wbem/wscim/1/cim- 
+schema/2/root/dcim/DCIM_SystemEnumeration -u:root -p:calvin -r:https://[idrac_ip]/wsman -
+SkipCNcheck -SkipCAcheck -encoding:utf-8 -a:basic 
+ 
+To disable the response: (default is enabled) 
+ 
+winrm i SetAttribute http://schemas.dell.com/wbem/wscim/1/cim-
+schema/2/root/dcim/DCIM_SystemManagementService?__cimnamespace=root/dcim+SystemCreationCl
+assName=DCIM_ComputerSystem+SystemName=srv:system+CreationClassName=DCIM_SystemManagement
+Service+Name=DCIM:SystemManagementService -u:root -p:calvin -r:https://[idrac_ip]/wsman -
+SkipCNcheck -SkipCAcheck -encoding:utf-8 -a:basic 
+@{Target="System.Embedded.1";AttributeName="ThermalSettings.1 
+#ThirdPartyPCIFanResponse";AttributeValue="Disabled"} 
+ 
+ 
+To enable the response: (if disabled by above command) 
+winrm i SetAttribute http://schemas.dell.co 
+m/wbem/wscim/1/cim-schema/2/root/dcim/DCIM_SystemManagementService?__cimnamespac 
+e=root/dcim+SystemCreationClassName=DCIM_ComputerSystem+SystemName=srv:system+Cr 
+eationClassName=DCIM_SystemManagementService+Name=DCIM:SystemManagementService - 
+u:root -p:calvin -r:https://[idrac_ip]/wsman -SkipCNcheck -SkipCAcheck -encod 
+ing:utf-8 -a:basic @{Target="System.Embedded.1";AttributeName="ThermalSettings.1 
+#ThirdPartyPCIFanResponse";AttributeValue="Enabled"} 
+ 

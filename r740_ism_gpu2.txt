@@ -1,0 +1,614 @@
+
+
+===== OM PAGE 101 =====
+NOTE:  When using systems with GPU, ensure that you install PSUs with 1100 W or higher, and set the PSU configuration 
+to non-redundant mode.
+NOTE:  Generally, any GPU that is greater than 75 W requires a power cable. GPUs with 75 W or less does not require a 
+power cable.
+Removing a GPU
+Prerequisites
+NOTE:  Removal instructions for the FPGA are similar to the GPU card procedure.
+1. Follow the safety guidelines listed in Safety instructions .
+2. Follow the procedure listed in Before working inside your system .
+3. Press the blue tabs on either sides of the shroud and remove the top cover of the GPU air shroud.
+Figure 86. Removing the top cover of GPU air shroud
+Steps
+1. Lift the expansion card latch.
+2. Close the PCIe card holder latch on the GPU air shroud.
+3. Hold the GPU by its edges and slide out the GPU at an angle to release it from the connector on the riser.
+Installing and removing system components 101
+
+
+===== OM PAGE 102 =====
+Figure 87. Removing GPU 1
+Figure 88. Removing GPU 2 and 3
+4. Disconnect the GPU/FPGA power cable from the GPU and system board.
+5. If you are removing the GPU permanently, install a filler bracket over the empty slot opening, and close the expansion card 
+latch.
+NOTE:  You must install a filler bracket over an empty expansion card slot to maintain Federal Communications 
+Commission (FCC) certification of the system. The brackets also keep dust and dirt out of the system and aid in 
+proper cooling and airflow inside the system. The filler bracket is necessary to maintain proper thermal conditions.
+Next steps
+Install the GPU card .
+102 Installing and removing system components
+
+
+===== OM PAGE 103 =====
+Installing a GPU
+Prerequisites
+NOTE:  Installation instructions for the FPGA are similar to the GPU card procedure.
+1. Follow the safety guidelines listed in Safety instructions .
+2. Remove the air shroud .
+3. Remove the heat sink .
+4. Remove the cooling fans  and replace them with Install the cooling fans .
+5. Unpack the GPU cards and the GPU kit.
+6. Install the heat sink  from the kit.
+7. Install the risers .
+8. Install the GPU air shroud on the system.
+Figure 89. Installing GPU air shroud
+9. Press the blue tabs on either sides of the shroud and remove the top cover of the shroud.
+Installing and removing system components 103
+
+
+===== OM PAGE 104 =====
+Figure 90. Removing the top cover of the shroud
+10. If applicable, remove the shroud filler from the GPU air shroud slots.
+NOTE:  Shroud fillers are available in the GPU air shroud for GPUs installed on riser 2 and 3.
+Figure 91. Removing the shroud filler from GPU air shroud slots
+NOTE:  Shroud fillers are available in the GPU air shroud for GPUs installed only on risers 2 and 3.
+NOTE:  Ensure that the PCIe card holder latches on GPU air shroud and risers are closed before installing the GPU. 
+Full-length GPU do not require the PCIe card holder latch on the risers to secure the GPU in place.
+NOTE:  Ensure that you install the first GPU on riser 1.
+104 Installing and removing system components
+
+
+===== OM PAGE 105 =====
+NOTE:  While installing a GPU on riser 3, place the GPU on the system with the GPU label side facing up.
+Steps
+1. Connect the GPU/FPGA power cable to the connector on the system board.
+NOTE:  While installing a GPU on riser 1, connect the GPU/FPGA power cable to the connector on riser 1 and route the 
+cable through the slot on the GPU air shroud.
+NOTE:  While installing a GPU on risers 2 or riser 3, connect the GPU/FPGA power cable to the connector on the 
+system board.
+2. Connect the other end of the GPU/FPGA power cable to the GPU.
+3. Lift the expansion card latch and remove the filler bracket.
+NOTE:  You must install a filler bracket over an empty expansion card slot to maintain Federal Communications 
+Commission (FCC) certification of the system. The brackets also keep dust and dirt out of the system and aid in 
+proper cooling and airflow inside the system.
+NOTE:  The filler bracket is necessary to maintain proper thermal conditions.
+4. Align the connector on the GPU with the connector on the riser.
+5. Insert the GPU into the riser until it is fully seated.
+6. Press the PCIe lock on the GPU air shroud and riser to release the PCIe card holder latch.
+NOTE:  Ensure that the GPU edges are seated properly in the GPU air shroud slot and PCIe card holder latch to secure 
+the GPU in place.
+7. Close the expansion card latch.
+Figure 92. Installing GPU 1
+Installing and removing system components 105
+
+
+===== OM PAGE 106 =====
+Figure 93. Securing GPU 1
+Figure 94. Installing GPU 2 and 3
+106 Installing and removing system components
+
+
+===== OM PAGE 107 =====
+Figure 95. Securing GPU 2 and 3
+Next steps
+1. Install the top cover of the GPU air shroud. If available, remove the plastic cover fixed on the memory socket numbers 
+marked on the air shroud.
+Figure 96. Installing the top cover of GPU air shroud
+2. To install mylar foam on the system cover:
+a. Place the system cover with the Service Information Label (SIL) side facing up.
+b. For easier handling, peel off a small section of the adhesive cover and align the mylar foam with the system cover.
+c. Remove rest of the adhesive cover and install mylar foam on the system cover.
+d. Press along the length of the mylar foam to ensure that it is firmly affixed to the system cover.
+Installing and removing system components 107
+
+
+===== REFGUIDE PAGE 6 =====
+Supported operating systems
+The PowerEdge R740 supports the following operating systems:
+Canonical Ubuntu LTS
+Citrix XenServer
+Microsoft Windows Server with Hyper-V
+Red Hat Enterprise Linux
+SUSE Linux Enterprise Server
+VMware ESXi
+NOTE:  For more information, go to www.dell.com/ossupport.
+PSU specifications
+The PowerEdge R740 system supports up to two AC or DC power supply units (PSUs).
+Table 3. PSU specifications 
+PSU Class Heat
+dissipation
+(maximum)
+Frequenc
+y
+Voltage High line
+200v240 V
+Low line
+100– 140 V
+DC Current
+495 W AC Platinum 1908 BTU/hr 50/60 Hz 100–240 V AC,
+autoranging
+495 W 495 W NA 6.5 A–3 A
+750 W AC Platinum 2891 BTU/hr 50/60 Hz 100–240 V AC,
+autoranging
+750 W 750 W NA 10 A–5 A
+750 W AC Titanium 2843 BTU/hr 50/60 Hz 200–240 V AC,
+autoranging
+750 W NA 5 A
+750 W
+Mixed
+Mode
+HVDC (for
+China
+only)
+Platinum 2891 BTU/hr 50/60 Hz 100–240 V AC,
+autoranging
+750 W 750 W NA 10 A–5 A
+Platinum 2891 BTU/hr N/A 240 V DC,
+autoranging
+NA NA 750W 4.5 A
+750 W
+Mixed
+Mode
+Platinum 2891 BTU/hr 50/60 Hz 100–240 V AC,
+autoranging
+750 W 750 W NA 10 A–5 A
+Platinum(F
+or China
+only)
+2891 BTU/hr N/A 240 V DC,
+autoranging
+NA NA 750 W 5 A
+1100 W AC Platinum 4100 BTU/hr 50/60 Hz 100–240 V AC,
+autoranging
+1100 W 1050 W 12 A–6.5 A
+1100 W DC N/A 4416 BTU/hr N/A –(48 V to –60 V)
+DC, autoranging
+NA NA 1100 W 32 A
+1100 W
+Mixed
+Mode
+HVDC (for
+China and
+Japan
+only)
+Platinum 4100 BTU/hr 50/60 Hz 100–240 V AC,
+autoranging
+1100 W 1050 W 12 A–6.5 A
+N/A 4100 BTU/hr N/A 200–380 V DC,
+autoranging
+NA NA 1100 W 6.4 A–3.2 A
+1600 W
+AC
+Platinum 6000 BTU/hr 50/60 Hz 100–240 V AC,
+autoranging
+1600 W 800 W NA 10 A
+6 Technical specifications
+
+
+===== REFGUIDE PAGE 7 =====
+Table 3. PSU specifications (continued)
+PSU Class Heat
+dissipation
+(maximum)
+Frequenc
+y
+Voltage High line
+200v240 V
+Low line
+100– 140 V
+DC Current
+2000 W
+AC
+Platinum 7500 BTU/hr 50/60 Hz 100–240 V AC,
+autoranging
+2000 W 1000 W NA 11.5 A
+2400 W
+AC
+Platinum 9000 BTU/hr 50/60 Hz 100–240 V AC,
+autoranging
+2400 W 1400 W NA 16 A
+NOTE:  Heat dissipation is calculated using the PSU wattage rating.
+NOTE:  This system is also designed to connect to the IT power systems with a phase to phase voltage not exceeding 240
+V.
+NOTE:  PSUs rated for 1100 W Mixed Mode HVDC or 1100 W AC and higher require high-line voltage (200–240 V AC) to
+supply their rated capacity.
+System battery specifications
+The PowerEdge R740 system supports CR 2032 3.0-V lithium coin cell system battery.
+Expansion bus specifications
+The PowerEdge R740 system supports up to eight PCI express (PCIe) generation 3 expansion cards that can be installed on the
+system board using expansion card risers. The following table provides detailed information about the expansion card riser
+specifications:
+Table 4. Expansion card riser configurations 
+Expansion
+card riser
+PCIe slots on the
+riser
+Height Length Link
+Riser 1A Slot 1 Full Height Full Length x16
+Slot 3 Full Height Half Length x16
+Riser 1B Slot 1 Full Height Full Length x8
+Slot 2 Full Height Full Length x8
+Slot 3 Full Height Half Length x8
+Riser 1D Slot 1 Full Height Full Length x16
+Slot 2 Full Height Full Length x8
+Slot 3 Full Height Half Length x8
+Riser 2A Slot 4 Full Height Full Length x16
+Slot 5 Full Height Full Length x8
+Slot 6 Low Profile Half Length x8
+Riser 2B Slot 4 Low Profile Half Length x8
+Riser 2C Slot 4 Low Profile Half Length x16
+Riser 3A Slot 7 Full Height Full Length x8
+Slot 8 Full Height Full Length x16
+Technical specifications 7
+
+
+===== REFGUIDE PAGE 8 =====
+Table 5. Expansion card riser specifications 
+Riser
+configuration
+and supported
+risers
+Slot
+description
+PCIe slots on
+riser 1 (Height
+and length)
+Processo
+r
+connectio
+n
+PCIe slots on
+riser 2 (Height
+and length)
+Processor
+connectio
+n
+PCIe slots on
+riser 3 (Height
+and length)
+Processo
+r
+connecti
+on
+Riser
+configuration 0
+(No riser)
+No PCIe slots
+(only rear
+storage)
+N/A N/A N/A N/A N/A N/A
+Riser
+configuration 1
+(1B+2B)
+Four x8 slots
+Slot 1: x8 full-
+height, full
+length
+Processor
+1
+Slot 4: x8 low
+profile, half
+length
+Processor
+1 N/A N/A
+Slot 2: x8 full-
+height, full
+length
+Processor
+1
+Slot 3: x8 full-
+height, half
+length
+Processor
+1
+Riser
+configuration 2
+(1B+2C)
+Three x8 and
+one x16 slots
+Slot 1: x8 full-
+height, full
+length
+Processor
+1
+Slot 4: x16 low
+profile, half
+length
+Processor
+2 N/A N/A
+Slot 2: x8 full-
+height, full
+length
+Processor
+1
+Slot 3: x8 full-
+height, half
+length
+Processor
+1
+Riser
+configuration 3
+(1A+2A)
+Two x8 and
+three x16 slots
+Slot 1: x16 full-
+height, full
+length
+Processor
+1
+Slot 4: x16 full-
+height, full length
+Processor
+2
+N/A N/AN/A N/A Slot 5: x8 full-
+height, full length
+Processor
+2
+Slot 3: x16 full-
+height, half
+length
+Processor
+1
+Slot 6: x8 low
+profile, half
+length
+Processor
+1
+Riser
+configuration 4
+(1A+2A+3A)
+Three x8 and
+four x16 slots
+Slot 1: x16 full-
+height, full
+length
+Processor
+1
+Slot 4: x16 full-
+height, full length
+Processor
+2
+Slot 7: x8 full-
+height, full
+length
+Processor
+2
+N/A N/A Slot 5: x8 full-
+height, full length
+Processor
+2
+Slot 8: x16 full-
+height, full
+length
+Processor
+2
+Slot 3: x16 full-
+height, half
+length
+Processor
+1
+Slot 6: x8 low
+profile, half
+length
+Processor
+1
+Riser
+configuration 5
+(1B+2A+3A)
+Six x8 and two
+x16 slots
+Slot 1: x8 full-
+height, full
+length
+Processor
+1
+Slot 4: x16 full-
+height, full length
+Processor
+2
+Slot 7: x8 full-
+height, full
+length
+Processor
+2
+Slot 2: x8 full-
+height, full
+length
+Processor
+1
+Slot 5: x8 full-
+height, full length
+Processor
+2
+Slot 8: x16 full-
+height, full
+length
+Processor
+2
+Slot 3: x8 full-
+height, half
+length
+Processor
+1
+Slot 6: x8 low
+profile, half
+length
+Processor
+1
+8 Technical specifications
+
+
+===== REFGUIDE PAGE 14 =====
+Expanded operating temperature
+Table 16. Expanded operating temperature specifications 
+Expanded operating temperature Specifications
+Continuous operation 5°C to 40°C at 5% to 85% RH with 29°C dew point.
+NOTE:  Outside the standard operating temperature (10°C to
+35°C), the system can operate continuously in temperatures as low
+as 5°C and as high as 40°C.
+For temperatures between 35°C to 40°C, de-rate maximum allowable
+temperature by 1°C per 175 m above 950 m (1°F per 319 ft).
+≤ 1% of annual operating hours –5°C to 45°C at 5% to 90% RH with 29°C dew point.
+NOTE:  Outside the standard operating temperature (10°C to
+35°C), the system can operate down to –5°C or up to 45°C for a
+maximum of 1% of its annual operating hours.
+For temperatures between 40°C and 45°C, de-rate maximum
+allowable temperature by 1°C per 125 m above 950 m (1°F per 228 ft).
+NOTE:  When operating in the expanded temperature range, system performance may be impacted.
+NOTE:  When operating in the expanded temperature range, ambient temperature warnings may be reported in the System
+Event Log.
+Expanded operating temperature restrictions
+● 128 GB LRDIMM is not supported for FAC.
+● Do not perform a cold startup below 5°C.
+● The operating temperature specified is for a maximum altitude of 3050 m (10,000 ft).
+● 150 W/8 core, 165 W/12 core and higher wattage processor [Thermal Design Power (TDP)>165 W] are not supported.
+● Redundant power supply unit is required.
+● Non-Dell qualified peripheral cards and/or peripheral cards greater than 25 W are not supported.
+● PCIe SSD is not supported.
+● NVDIMM-Ns are not supported.
+● DCPMMs are not supported.
+● GPU is not supported.
+● Tape backup unit is not supported.
+Thermal restrictions
+Following table lists the configuration required for efficient cooling.
+Table 17. Thermal restrictions configuration 
+Configuratio
+n
+Number
+of
+processo
+rs
+Heatsink Processor/DIMM
+blank
+DIMM
+blanks
+Type of air
+shroud
+Fan
+PowerEdge
+R740
+1 One 1U standard heat sink
+for CPU ≤ 125 W
+Required Not
+required
+Standard Four standard
+fans and one
+blank to cover
+two fan slotsOne 2U standard heat sink
+for CPU > 125 W
+PowerEdge
+R740
+2 Two 1U standard heat sink
+for CPU ≤ 125 W
+Not required Not
+required
+Standard Six standard
+fans
+14 Technical specifications
+
+
+===== REFGUIDE PAGE 15 =====
+Table 17. Thermal restrictions configuration (continued)
+Configuratio
+n
+Number
+of
+processo
+rs
+Heatsink Processor/DIMM
+blank
+DIMM
+blanks
+Type of air
+shroud
+Fan
+Two 2U standard heat sink
+for CPU > 125 W
+PowerEdge
+R740 with
+GPU
+2 Two 1U high performance
+heat sink
+Not required Not
+required
+GPU air shroud Six high
+performance
+fans
+Ambient temperature limitations
+The following table lists configurations that require ambient temperature less than 35°C.
+NOTE:  The ambient temperature limit must be adhered to ensure proper cooling and to avoid excess CPU throttling, which
+may impact system performance.
+Table 18. Configuration based ambient temperature restrictions 
+System Front backplane Processor
+Thermal
+Design Power
+(TDP)
+Processor heat
+sink
+Fan type GPU Ambient
+restriction
+PowerEdge
+R740
+8 x 3.5 inch SAS/
+SATA
+150 W/8 core,
+165 W/12 core,
+200 W, 205 W
+1U high
+performance
+High
+performance fan
+≥1 double-
+width/single-
+width
+30°C
+8 x 2.5 inch SAS/
+SATA
+150 W/8 core,
+165 W/12 core,
+200 W, 205 W
+1U high
+performance
+High
+performance fan
+≥1 double-
+width/single-
+width
+30°C
+16 x 2.5 inch
+SAS/SATA
+150 W/8 core,
+165 W/12 core,
+200 W, 205 W
+1U high
+performance
+High
+performance fan
+≥1 double-
+width/single-
+width
+30°C
+Particulate and gaseous contamination specifications
+The following table defines the limitations that help avoid any equipment damage or failure from particulate and gaseous
+contamination. If the levels of particulate or gaseous pollution exceed the specified limitations and result in equipment damage
+or failure, you may need to rectify the environmental conditions. Remediation of environmental conditions is the responsibility of
+the customer.
+Table 19. Particulate contamination specifications 
+Particulate contamination Specifications
+Air filtration Data center air filtration as defined by ISO Class 8 per ISO 14644-1
+with a 95% upper confidence limit.
+NOTE:  The ISO Class 8 condition applies to data center
+environments only. This air filtration requirement does not apply to
+IT equipment designed to be used outside a data center, in
+environments such as an office or factory floor.
+NOTE:  Air entering the data center must have MERV11 or MERV13
+filtration.
+Conductive dust Air must be free of conductive dust, zinc whiskers, or other
+conductive particles.
+NOTE:  This condition applies to data center and non-data center
+environments.
+Technical specifications 15
