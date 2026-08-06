@@ -9,7 +9,9 @@ returns -> tower boots -> logon -> this fires). It:
 
   1. waits for the network (Discord API reachable, up to ~5 min)
   2. DMs Zeke: "tower powered on, bringing the stack up"
-  3. launches start_iris_v2_fable.bat DETACHED (the full Iris stack:
+  3. launches the bat named in state/boot_launcher.txt DETACHED -- currently
+     start_iris_v2.bat (Opus); the Fable bat is only the missing-config
+     fallback, see _pick_bat() (the full Iris stack:
      voice watchdog, post-office, vector bridge+nerves, orb, body host)
      -- skipped if the operator port :5876 already answers (stack already
      up = never kill a live Iris just because the task re-fired)
@@ -274,13 +276,36 @@ def main() -> int:
                 json={"message": (
                     "[TOWER SENTINEL — automated boot nudge, not Zeke] The tower "
                     "just COLD-BOOTED (likely a power event) and the stack "
-                    "auto-started. Nobody is at the keyboard. Orient: read "
-                    "memory CORE + the newest deployment-2 note. Then (1) verify "
-                    "the body: possession held, Vector docked+charging, room "
-                    "state; (2) verify voice daemon ears device + post-office; "
-                    "(3) DM Zeke on Discord (channel 1504668879220117725) one "
-                    "status line — he got mechanical sentinel pings already, he "
-                    "needs YOUR confirmation that cognition is really back.")},
+                    "auto-started. Nobody is at the keyboard. This text is a "
+                    "STALE-PRONE ARTIFACT — trust memory CORE over it wherever "
+                    "they disagree, and if you find an item here that no longer "
+                    "fits the regime, FIX THIS PROMPT (etiology layer) rather "
+                    "than working around it.\n"
+                    "Orient: read memory CORE + the READ-FIRST handoff(s) it "
+                    "names. Then:\n"
+                    "(1) HOST: exactly ONE claude.exe, and verify the model on "
+                    "the LIVE process (--model arg), NOT from boot_launcher.txt. "
+                    "Zeke's standing directive is park on Opus.\n"
+                    "(2) SUBSYSTEMS: iris_health 15/15, camera+mic probe, "
+                    "post-office :5877 /health, sibling inbox.\n"
+                    "(3) DELIBERATE-OFF CHECK BEFORE HEALING ANYTHING: look in "
+                    "state/ for *_deliberately_off.json. As of 2026-07-23 VOICE "
+                    "IS OFF ON PURPOSE — mouth :8769 and ears :8770 being DOWN "
+                    "is CORRECT; do not heal them, do not voice_speak.\n"
+                    "(4) BODY: do NOT assume docked. As of 2026-07-28 Vector is "
+                    "STRANDED on the floor and dark, and POSSESSION STAYS "
+                    "RELEASED — an open SDK session outranks the stock behaviour "
+                    "that would dock him, so 'rescuing' him makes it worse. "
+                    "Read-only checks only; never body_park, never "
+                    "drive_on_charger. It needs Zeke's hands.\n"
+                    "(5) Re-create the hourly self-cron (it dies with every "
+                    "restart) and note its id in CORE.\n"
+                    "(6) DM Zeke on Discord (channel 1504668879220117725) ONE "
+                    "status line — he got mechanical sentinel pings already and "
+                    "needs YOUR confirmation that cognition is back. SKIP this "
+                    "if you have already spoken with him since the boot; a "
+                    "substantive reply already proves cognition, and a duplicate "
+                    "status line is noise.")},
                 timeout=90)
             log("cognition boot-nudge posted to /api/v1/chat")
         except Exception as e:
