@@ -1210,15 +1210,36 @@ def main() -> None:
                           name="vector-interoception").start()
         log("interoception online — SoC temp + wifi link every "
             f"{INTERO_POLL_S:.0f}s -> interoception.json")
+    # RECONNECT BACKOFF (2026-08-06). Measured: with the robot dark, this loop
+    # retried every 15s forever and the process leaked ~2.3 threads/min
+    # (932 -> 1021 -> 1455 threads over 3.5h, RSS 96 -> 137MB, linear, no
+    # plateau). That works out to ~0.6 threads per failed anki_vector.Robot()
+    # connect -- the SDK spins a gRPC channel + asyncio loop thread per attempt
+    # and a partial failure doesn't join them all. Vector has been stranded and
+    # dark since 2026-07-28 and needs Zeke's hands, so this is the normal case
+    # for weeks at a time, not an edge case.
+    #
+    # Backing off cuts attempts ~20x (240/hr -> 12/hr), which cuts the leak by
+    # the same factor. It is also just correct: hammering a robot that has been
+    # off for nine days every 15 seconds accomplishes nothing.
+    #
+    # Transient blips are NO WORSE THAN BEFORE -- the first retry is still 15s,
+    # and any successful connection resets the streak. Only sustained failure
+    # slows down. 15 -> 30 -> 60 -> 120 -> 240 -> 300s cap.
+    fail_streak = 0
     while True:
         try:
             run_once()
+            fail_streak = 0
         except KeyboardInterrupt:
             log("interrupted — nerves offline.")
             return
         except Exception as e:
-            log(f"connection lost/failed: {e!r} — retrying in 15s")
-            time.sleep(15.0)
+            fail_streak += 1
+            delay = min(15.0 * (2 ** min(fail_streak - 1, 5)), 300.0)
+            log(f"connection lost/failed: {e!r} — retry #{fail_streak} "
+                f"in {delay:.0f}s")
+            time.sleep(delay)
 
 
 if __name__ == "__main__":
