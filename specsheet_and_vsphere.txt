@@ -1,0 +1,368 @@
+### SPEC SHEET pages 2
+
+== SPEC PAGE 1 ==
+ R740 SPEC SHEET
+R740 Spec Sheet
+© 2019 Dell Inc. or its subsidiaries.
+Expand and optimize application performance
+The scalable business architecture of the R740 can scale up to three 300W or six 150W GPUs, or up to three  
+double-width or four single-width FPGAs. With up to 16 2.5” drives or 8 3.5” drives the R740 provides the versatility  
+to adapt to virtually any application and provides the perfect platform for VDI deployments.
+• Scale your VDI deployments with 3 double-width GPUs, supporting up to 50% more users when compared to R730.
+• Free up storage space using internal M.2 SSDs optimized for boot.
+• Scale compute resources with 2nd Generation Intel® Xeon® Scalable processors and tailor performance based  
+on your unique workload requirements.
+Automate systems management with OpenManage 
+The Dell EMC OpenManage™ portfolio helps deliver peak efficiency for PowerEdge servers, delivering intelligent, 
+automated management of routine tasks. Combined with unique agent-free management capabilities, the R740 is simply 
+managed, freeing up time for high profile projects.
+• Simplify management with the New OpenManage Enterprise™ console, with customized reporting  
+and automatic discovery.
+• Take advantage of QuickSync 2 capabilities and gain access to your servers easily through your phone or tablet.
+Rely on PowerEdge with built-in security
+Every PowerEdge server is designed as part of a cyber resilient architecture, integrating security into the full server 
+lifecycle. The R740 leverages new security features built-into every new PowerEdge server strengthening protection  
+so you can reliably and securely deliver accurate data to your customers no matter where they are. By considering  
+each aspect of system security, from design to retirement, Dell EMC ensures trust and delivers a worry-free,  
+secure infrastructure without compromise.
+• Rely on a secure component supply chain to ensure protection from factory  
+to the data center.
+• Maintain data safety with cryptographically signed firmware packages  
+and Secure Boot.
+• Protect your server from malicious malware with iDRAC9 Server Lockdown mode 
+(requires Enterprise or Datacenter license)
+• Wipe all data from storage media including hard drives, SSDs and system memory 
+quickly and securely with System Erase.
+POWEREDGE R740
+Optimized for workload acceleration
+The PowerEdge R740 was designed to accelerate application 
+performance leveraging accelerator cards and storage 
+scalability. The 2-socket, 2U platform has the optimum balance 
+of resources to power the most demanding environments.
+PowerEdge R740
+Persistent Memory 
+NVDIMM-N can 
+increase database 
+performance by 10x
+
+
+== SPEC PAGE 2 ==
+ Payment solutions provided and serviced by Dell Financial Services L.L.C or its affiliate or designee (“DFS”) for qualified customers. Offers may not be available or may 
+vary in certain countries. Where available, offers may be changed without notice and are subject to product availability, credit approval, execution of documentation 
+provided by and acceptable to DFS, and may be subject to minimum transaction size. Offers not available for personal, family or household use. Product availability may 
+vary by region. Please contact your Dell EMC representative for more information. Dell EMC and the Dell EMC logo are trademarks of Dell Inc. Restrictions and additional 
+requirements may apply to transactions with governmental or public entities.
+Copyright © January 07, 2020 Dell Inc. or its subsidiaries. All Rights Reserved.
+*
+Learn more at Dell.com/PowerEdge
+End-to-end technology solutions
+Reduce IT complexity, lower costs and eliminate inefficiencies by making IT and business solutions work harder for you. You can count on Dell EMC for end-to-end solutions to maximize your performance 
+and uptime. A proven leader in Servers, Storage and Networking, Dell EMC Services deliver innovation at any scale. And if you’re looking to preserve cash or increase operational efficiency, Dell EMC 
+Financial Services™ has a wide range of options to make technology acquisition easy and affordable. Contact your Dell EMC Sales Representative for more information.*
+1 ESXi (only OS supported)
+2 Only available in China and Japan   
+3 Dimenisons do not include bezel
+PowerEdge R740
+Features Technical Specification
+Processor Up to two 2nd Generation Intel® Xeon® Scalable processors, up to 28 cores per processor
+Memory 24 DDR4 DIMM slots, Supports RDIMM /LRDIMM, speeds up to 2933MT/s, 3TB max
+Up to 12 NVDIMM, 192 GB Max
+Up to 12 Intel® Optane™ DC persistent memory PMem, 6.14TB max (7.68TB max with PMem + LRDIMM) 
+Supports registered ECC DDR4 DIMMs only
+Storage controllers
+Internal Boot
+Internal Controllers: PERC H330, H730P, H740P, HBA330 
+External Controllers: H840, 12 Gbps SAS HBA 
+Software RAID:S140 
+Boot Optimized Storage Subsystem (BOSS):HWRAID 2 x M.2 SSDs 240GB, 480GB 
+Internal Dual SD Module1   
+Storage Front drive bays: Up to 16 x 2.5” SAS/SATA (HDD/SSD) max 122.88TB or up to 8 x 3.5” SAS/SATA HDD max 128TB
+Optional DVD-ROM, DVD+RW
+Power supplies Titanium 750W, Platinum 495W, 750W, 
+750W 240VDC,2 1100W, 
+1100W 380VDC2
+1600W, 2000W and 2400W, Gold 1100W -48VDC  
+Hot plug power supplies with full redundancy
+Up to 6 hot plugs fans with full redundancy
+Dimensions Form factor: Rack (2U) Height: 86.8mm (3.4”)   
+Width3: 434.0mm (17.08”)  
+Depth3: 737.5mm (29.03”)
+Weight: 28.6kg (63lbs.)   
+Embedded management iDRAC9, iDRAC Direct, iDRAC RESTful with Redfish, Quick Sync 2 wireless module (optional)
+Bezel Optional LCD Bezel or Security bezel
+OpenManage™ Software OpenManage Enterprise OpenManage Mobile
+OpenManage Power Manager
+Integrations and
+connections
+Integrations:
+Microsoft® System Center
+VMware® vCenter™
+BMC Truesight
+Red Hat® Ansible® Modules 
+Connections:
+Nagios® Core & Nagios® XI
+Micro Focus Operations Manager I
+IBM Tivoli Netcool/OMNIbus 
+Security TPM 1.2/2.0, TCM 2.0 optional
+Cryptographically signed firmware
+Secure Boot
+System Lockdown (requires iDRAC Enterprise or Datacenter)
+Secure erase 
+Silicon Root of Trust
+I/O & Ports Network daughter card options
+4 x 1GbE or 2 x 10GbE + 2 x 1GbE or 4 x 10GbE or 2 x 25GbE
+Front ports: 1 x Dedicated iDRAC Direct Micro-USB, 2 x USB 2.0, 1 x USB 3.0 (optional), 1 x VGA
+Rear ports: 1 x Dedicated iDRAC network port, 1 x Serial, 2 x USB 3.0, 1 x VGA
+Video card: 2 x VGA
+Riser options with up to 8 PCIe Gen 3 slots, maximum of 4 x 16 slots
+Accelerator options Up to three 300W or six 150W GPUs,  
+or up to three double-width or four single-width FPGAs. 
+See Dell.com/GPU for latest information.
+Supported operating
+systems
+Canonical® Ubuntu® Server LTS
+Citrix® Hypervisor
+Microsoft Windows Server® LTSC with Hyper-V
+Oracle® Linux
+Red Hat® Enterprise Linux
+SUSE® Linux Enterprise Server
+VMware® ESXi 
+For specifications and interoperability details,  
+see Dell.com/OSsupport.
+OEM-ready version
+available
+From bezel to BIOS to packaging, your servers can look and feel as if they were designed and built by you.  
+For more information, visit Dell.com/OEM.
+Recommended support Dell EMC ProSupport Plus for critical systems or Dell EMC ProSupport for premium hardware and software support for your PowerEdge
+solution. Consulting and deployment offerings are also available. Contact your Dell EMC representative today for more
+information. Availability and terms of Dell EMC Services vary by region. For more information, visit Dell.com/ServiceDescriptions.
+
+
+### VSPHERE DOC pages 17
+KW R740 -> [11, 13, 14, 16, 17]
+KW support matrix -> [1, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+KW M10 -> [10, 11, 13, 14, 15]
+KW V100 -> [10, 11, 13, 14, 15]
+KW T4 -> [10, 11, 13, 15, 16, 17]
+KW RTX -> [10, 12, 15]
+KW P100 -> [11, 14, 15]
+
+== VSPHERE PAGE 11 ==
+ GPU support matrix with Dell EMC PowerEdge servers 
+11 Dell EMC PowerEdge Servers with NVIDIA GPUs and VMware vSphere | Technical white paper 
+3.2 PowerEdge yx4x servers supporting NVIDIA GPU  
+ yx4x PowerEdge servers and NVIDIA GPU support 
+  
+NVIDIA Tesla K80 
+NVIDIA Quadro P4000 
+NVIDIA Tesla P100 
+NVIDIA Tesla M60 
+NVIDIA Tesla P4  
+NVIDIA Tesla V100 
+NVIDIA Tesla P40 
+NVIDIA Tesla M10 
+NVIDIA Tesla T4 
+PowerEdge R940xa N N Y N N Y Y N N 
+PowerEdge R840 N N Y N N Y Y Y N 
+PowerEdge R740 Y Y Y Y Y Y Y Y Y 
+PowerEdge R740xd Y Y Y Y Y Y Y Y Y 
+Dell XC740xd-24 N N N Y N N N N N 
+PowerEdge R7425 N N N N Y Y Y Y Y 
+PowerEdge R640 N N N N N N N N Y 
+PowerEdge T640 Y N Y Y N Y Y Y N 
+PowerEdge T440 N Y N N N N N N N 
+PowerEdge C4140 N N Y N N Y Y N N 
+PowerEdge C6420 N N N N N N N N Y 
+ 
+  
+
+== VSPHERE PAGE 13 ==
+ GPU support matrix with Dell EMC PowerEdge servers 
+13 Dell EMC PowerEdge Servers with NVIDIA GPUs and VMware vSphere | Technical white paper 
+3.4 vGPU support matrix 
+3.4.1 vGPU supported servers and GPUs matrix 
+ vGPU supported PowerEdge servers and GPUs 
+  
+Tesla M10 
+Tesla M60 
+Tesla P4 
+Tesla P40 
+Tesla V100 
+Tesla T4 
+PowerEdge C4140 N N N Y Y N 
+PowerEdge C4130 Y Y N Y Y N 
+PowerEdge R640 N N N N N Y 
+Power Edge XR2 N N N N N Y 
+PowerEdge R740 Y Y Y Y Y Y 
+PowerEdge R740xd Y Y Y Y Y Y 
+PowerEdge R7425 Y N Y Y Y Y 
+PowerEdge R730 Y Y Y Y N N 
+Dell XC740xd Y Y Y Y Y N 
+Dell XC730-16G Y Y N N N N 
+PowerEdge R940xa N N N Y Y N 
+PowerEdge R840 Y N N Y Y N 
+PowerEdge T640 Y Y N Y Y N 
+PowerEdge T630 N Y N Y Y N 
+ 
+  
+
+== VSPHERE PAGE 14 ==
+ GPU support matrix with Dell EMC PowerEdge servers 
+14 Dell EMC PowerEdge Servers with NVIDIA GPUs and VMware vSphere | Technical white paper 
+3.5 vDGA support matrix 
+3.5.1 vDGA certified on PowerEdge servers with NVIDIA GPUs 
+ vDGA certified on PowerEdge servers with NVIDIA GPUs 
+ 
+Grid K1 
+Grid K2 
+Quadro K2000 
+Quadro K2200 
+Quadro K400 
+Quadro K4200 
+Quadro K5200 
+Quadro K6000 
+Quadro M2000 
+Quadro P5000 
+PowerEdge R720 Y Y Y N  Y N N N N N 
+Dell Precision Rack 7910 N Y N Y N Y Y Y Y Y 
+PowerEdge T620 N Y Y N Y N N N N N 
+PowerEdge C8220x N N N N N N N N N N 
+PowerEdge R730 Y Y N N N N N N N N 
+PowerEdge T630 N Y N N N N N N N N 
+Dell XC730-16G Y Y N N N N N N N N 
+PowerEdge C4130 Y Y N N N N N N N N 
+PowerEdge R740 N N N N N N N N N N 
+PowerEdge R740xd N N N N N N N N N N 
+PowerEdge R840 N N N N N N N N N N 
+PowerEdge R940xa N N N N N N N N N N 
+PowerEdge T640 N N N N N N N N N N 
+PowerEdge C4140 N N N N N N N N N N 
+Dell XC740xd-24 N N N N N N N N N N 
+PowerEdge R7425 N N N N N N N N N N 
+PowerEdge R7515 N N N N N N N N N N 
+PowerEdge R6515 N N N N N N N N N N 
+ 
+ 
+ vDGA certified on PowerEdge servers with NVIDIA GPUs 
+ 
+Tesla P6000 
+Tesla M4000 
+Tesla M60 
+P100 12 GB 
+P100 16 GB 
+V100 16 GB 
+V100 32 GB 
+P40 
+M10 
+V4 
+P4 
+PowerEdge R720 N N N N N N N N N N N 
+Dell Precision Rack 7910 Y Y N N N N N N N N N 
+PowerEdge T620 N N N N N N N N N N N 
+PowerEdge C8220x N N N N N N N N N N N 
+PowerEdge R730 N N Y N N N N N N N N 
+PowerEdge T630 N N Y N N N N N N N N 
+Dell XC730-16G N N N N N N N N N N N 
+PowerEdge C4130 N N Y N N N N N N N N 
+PowerEdge R740 N N Y Y Y Y Y N N N N 
+PowerEdge R740xd N N Y Y Y Y Y N N N N 
+PowerEdge R840 N N N Y Y Y Y Y Y N N 
+PowerEdge R940xa N N N Y Y Y N Y Y N N 
+PowerEdge T640 N N Y Y Y Y Y Y Y N N 
+
+== VSPHERE PAGE 16 ==
+ Known issues and resolution 
+16 Dell EMC PowerEdge Servers with NVIDIA GPUs and VMware vSphere | Technical white paper 
+4 Known issues and resolution 
+This section focuses on the known issues for configuring the GPU features described in this document.  
+1. PowerEdge R730 with NVIDIA Grid K2 and ESXi 6.x, a Windows 7 64-bit VM configured with vDGA fails 
+to boot and display BSOD. 
+- Resolution: 
+This is a known issue and to overcome the VM crash, set pciPassthru0.msiEnabled is set to False in 
+the VMs VMX file. By default, pciPassthru0.msiEnabled is set to True. 
+ 
+2. VM configured with vGPU fails to start with the following error:  
+The available memory resources in the parent resource pool are insufficient for the operation . 
+- Resolution: 
+Verify the memory assigned to the VM. Ensure that it does not exceed or result in a memory overcommit.   
+ 
+3. VMs configured with vGPU cannot utilize vMotion and DRS functionalities.  
+- Resolution:  
+With versions of ESXi 6.0.x and 6.5.x, the vMotion or similar live operations on VM are not supported. 
+With ESXi 6.7.x, VM configured with vGPU can use vMotion, provided the destination host has the 
+required, supported, and compatible hardware. 
+ 
+4. VM configured with vGPU fails to power on. 
+- Resolution:  
+Ensure that the service X.Org is in a running state on the ESXi host. Operations such as start and stop 
+can be performed either from vSphere Web Client or through SSH to the ESXi host.  
+ 
+5. On the PowerEdge R740 server, after installing the vGPU VIB in ESXi, the command nvidia-smi fails 
+to display the GPU statistics with following error message:  
+Failed to initialize NVML: Unknown Error 
+- Resolution: 
+The above error can occur for many reasons, including misconfiguration. To resolve the issue: 
+1. Ensure that the VGPU VIB installed successfully without any errors. 
+2. Verify that the NVIDIA GPUs in the ESXi host are not configured as pass-through devices for VM 
+DirectPath IO or vDGA. 
+3. Run the command lspci | grep -i nvida on ESXi shell and ensure that there are entries 
+related to NVIDIA GPUs present in the server. 
+4. On Dell EMC PowerEdge yx4x servers, ensure the below settings in System BIOS are set:  
+• Memory Mapped I/O above 4 GB is set to Enable 
+• Memory Mapped I/O Base is set to 512 GB 
+ 
+6. On the PowerEdge R740 server with NVIDIA Tesla T4, an attempt to configure a VM with an assigned 
+vGPU or to perform a GPU pass-through fails.  
+- Resolution: 
+When the above failure is encountered, verify if Tesla T4 is enumerated as 32 separate GPUs in ESXi. If 
+it is, ensure that the SR-IOV capability is enabled in the server BIOS and retry.  
+ 
+  
+
+== VSPHERE PAGE 17 ==
+ Known issues and resolution 
+17 Dell EMC PowerEdge Servers with NVIDIA GPUs and VMware vSphere | Technical white paper 
+7. On the PowerEdge R740 with NVIDIA Tesla T4 and installed with ESXi 6.7 and attempt to list the NVIDIA 
+GPU in Ispci command fails. 
+- Resolution:  
+This behavior may be due to multiple reasons. Check the following: 
+• Ensure that both the PSUs are plugged-in and working. 
+• Ensure that the correct wattage of PSU is used for the GPU configuration. 
+• Ensure that the GPU power cables are connected. 
+• Ensure that the GPU is not configured as a pass-through device in the ESXi host. 
+ 
+8. On the PowerEdge R730 server with Tesla M60, the VM configured with Tesla M60 for vDGA displays a 
+blank screen or fails to power-on. 
+- Resolution: 
+The Tesla M60 can work in both graphics mode and computation mode. Ensure that, the NVIDIA M60 
+GPU is configured in graphics mode and not in computation mode. For toggling the modes, use the tool 
+gpumodeswitch. For more information, see the document GPUMODESWITCH User Guide at NVIDIA 
+support site. 
+ 
+9. On the PowerEdge R740 with Tesla T4 and ESXi 6.5, VM configured with multi vGPU fails to power on or 
+fails to initialize vGPU after boot. 
+- Resolution: 
+Assigning multiple vGPUs is not supported in ESXi 6.5. Either update the host to ESXi 6.7 U3 or ensure 
+that the VM has only one vGPU associated to it.  
+ 
+10. On the PowerEdge R740 server with Tesla T4 and ESXi 6.5 U1, the VM with vGPU associated to it fails 
+to boot. 
+- Resolution: 
+The VM associated with vGPU power-on fails with the error message “The amount of graphics resource 
+available in the parent resource pool is insufficient for the operation.” This behavior is seen if the VM 
+Graphics Type is set to Shared. Change the Graphics Type to the Shared Direct option. Note that the 
+default option is set to Shared.   
+ 
+11. On a PowerEdge R730 with M60 GPU and ESXi 6.5 U3, the VM failed to power-on. The VM log file 
+contains the following entry: 
+2019-10-07T06:57:51.499Z| vmx| I120: PCIPassthru: total number of pages needed (2097186) exceeds 
+limit (917504), failing 
+2019-10-07T06:57:51.499Z| vmx| I120: Module DevicePowerOn power on failed  
+- Resolution: 
+In order to resolve this issue, either reduce the memory assigned to the VM and power on, or perform the 
+followings: 
+• Ensure that the BIOS configuration setting Memory Mapped I/O above 4GB is set to Enable. 
+• Add the below command in the VMX file of VM: 
+o pciPassthru.use64bitMMIO=”TRUE” 
+o pciPassthru.64bitMMIOSizeGB = “64” 
+ 

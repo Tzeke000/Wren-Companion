@@ -1,0 +1,433 @@
+
+
+===== PAGE 7 =====
+Table 2. Comparison of PowerEdge R740/R740xd and R730/R730xd  (continued)
+Feature PowerEdge R740/R740xd PowerEdge R730/R730xd
+Rack height 2U 2U
+Power supply ● AC (Platinum): 495W, 750W, 1100W,
+1600W, 2000W, 2400W
+● AC (Titanium): 750W
+● DC: 1100W
+● DC: 750 W Mixed Mode Platinum (for China
+only)
+● AC: 750 W Mixed Mode Platinum
+● Mixed mode/HVDC: 750W, 1100W
+● AC: 495W, 750W, 1100W
+● DC: 750W, 1100W
+System
+management
+Lifecycle Controller 3.x, OpenManage,
+QuickSync2.0, OMPC3, Digital License Key,
+iDRAC Direct(dedicated micro-USB port), Easy
+Restore, vFlash
+Lifecycle Controller 3.x, OpenManage, QuickSync1.0,
+PM3, Digital License Key, iDRAC8, iDRAC
+Direct( dedicated micro-USB port), Easy Restore, vFlash
+Internal GPU ● *3 x 300W (double-width) or 6 x 150W
+(single-width)
+NOTE:  *Only supports up to 2 x NVIDIA
+M10 GPUs.
+● 2 x 300W (double-wide) or 4 x 150W (single-wide)
+● Not supported on R730xd
+● FPGAs not supported on the R730/xd.
+Availability ● Hot-plug drives
+● Hot-plug redundant cooling
+● Hot-plug redundant power supplies
+● IDSDM support
+● Boot Optimized Storage Subsystem (BOSS)
+● Hot-plug drives
+● Hot-plug redundant cooling
+● Hot-plug redundant power supplies
+● IDSDM support
+Product specifications
+Table 3. R740 product specifications 
+Features Technical Specification
+Processor ● Up to two 2nd Generation Intel® Xeon® Scalable processors
+● Up to 28 cores per processor
+Memory ● 24 DDR4 DIMM slots
+● Supports RDIMM /LRDIMM, 3TB max
+● Speeds up to 2933MT/s
+● Up to 12 NVDIMM, 192 GB Max
+● Up to 12 Intel® Optane™ DC persistent memory DCPMM, 6.14TB max, (7.68TB max with
+DPCMM + LRDIMM)
+Storage controllers Internal controllers:
+● PERC H330
+● PERC H350
+● PERC H730P
+● PERC H740P
+● Software RAID (SWRAID) S140
+● H750
+● HBA350i
+Boot Optimized Storage Subsystem:
+● HW RAID 2 x M.2 SSDs 240GB or 480GB
+External PERC (RAID):
+● PERC H840
+System features 7
+
+
+===== PAGE 8 =====
+Table 3. R740 product specifications (continued)
+Features Technical Specification
+● HBA355e
+12Gbps SAS HBAs (non-RAID):
+● External - 12Gbps SAS HBA (non-RAID)
+● Internal- HBA330 (non-RAID)
+Drive bays Front drive bays: Up to 16 x 2.5" SAS/SATA (HDD/SSD) max 122.88TB or up to 8 x 3.5" SAS/
+SATA HDD max 128TB Optional DVD-ROM, DVD+RW
+Power supplies ● Titanium 750W
+● Platinum 495W, 750W, 750W Mixed Mode HVDC (for China only), 750 W Mixed Mode 240 V
+DC (For china only),1100W, 1600W, 2000W, and 2400W
+● 1100W 380VDC (China and Japan only)
+● Gold 1100W -48VDC
+● Hot plug power supplies with full redundancy. Up to 6 hot plugs fans with full redundancy
+Dimensions ● Form factor: Rack (2U)
+● Height: 86.8mm (3.4”)
+● Width: 434.0mm (17.08”)
+● Depth: 737.5mm (29.03”)
+● Weight: 28.6kg (63lbs.)
+NOTE:  Dimensions do not include bezel
+Embedded management iDRAC9, iDRAC RESTful with Redfish, iDRAC Direct, Quick Sync 2 wireless module optional
+Bezel Optional LCD Bezel or Security bezel
+OpenManage™
+Software
+● OpenManage Enterprise
+● OpenManage Mobile
+● OpenManage Power Center
+Integrations and
+connections
+Integrations:
+● Microsoft® System Center
+● VMware® vCenter™
+● BMC Truesight
+● Red Hat Ansible
+Connections:
+● Nagios Core & Nagios XI
+● Micro Focus Operations Manager i (OMi)
+● IBM Tivoli Netcool/OMNIbus
+● IBM Tivoli® Network Manager IP Edition
+Security ● TPM 1.2/2.0, optional TCM 2.0
+● Cryptographically signed firmware
+● Secure Boot
+● System Lockdown (requires OpenManage Enterprise)
+● Secure erase
+I/O & Ports Network daughter card options
+● 4 x 1GbE
+● 2 x 10GbE + 2 x 1GbE
+● 4 x 10GbE
+● 2 x 25GbE
+Front ports:
+● Video
+● 2 x USB 2.0
+8 System features
+
+
+===== PAGE 9 =====
+Table 3. R740 product specifications (continued)
+Features Technical Specification
+● 1 x USB 3.0 (optional)
+● 1 x Dedicated iDRAC Direct Micro-USB
+Rear ports:
+● Video, serial
+● 2 x USB 3.0
+● 1 x Dedicated iDRAC network port
+Video card: VGA
+Riser options with up to 8 PCIe Gen 3 slots, maximum of 4 x 16 slots
+Accelerator options Up to three 300W or six 150W GPUs, or up to three double-width or four single-width FPGAs.
+Supported operating
+systems
+● Canonical® Ubuntu® LTS
+● Citrix® Hypervisor
+● Oracle® Linux
+● Microsoft Windows Server® LTSC with Hyper-V
+● Red Hat® Enterprise Linux
+● SUSE® Linux Enterprise Server
+● VMware® ESXi
+For specifications and interoperability details, see dell.com/OSsupport
+Recommended support Dell ProSupport Plus for critical systems or Dell ProSupport for premium hardware and software
+support for your PowerEdge solution. Consulting and deployment offerings are also available.
+R740xd product specifications
+The following table shows the technical specifications for the PowerEdge R740xd:
+Table 4. R740xd product specifications 
+Features Technical Specifications
+Processor ● Up to two 2nd Generation Intel® Xeon® Scalable processors
+● Up to 28 cores per processor
+Memory ● 24 DDR4 DIMM slots
+● Supports RDIMM /LRDIMM, up to 3TB
+● Speeds up to 2933 MT/s
+● Up to 12 NVDIMM, 192 GB Max
+● Up to 12 Intel® Optane™ DC persistent memory DCPMM, 6.14TB max, (7.68TB max with
+DPCMM + LRDIMM)
+Storage controllers Internal controllers:
+● PERC H730P
+● H750
+● HBA350i
+● PERC H740P
+● Software RAID (SWRAID) S140 Boot Optimized
+Boot Optimized Storage Subsystem:
+● HW RAID 2 x M.2 SSDs 240 GB or 480 GB
+External PERC (RAID):
+● PERC H840
+● HBA355e
+System features 9
+
+
+===== PAGE 10 =====
+Table 4. R740xd product specifications (continued)
+Features Technical Specifications
+12Gbps SAS HBAs (non-RAID):
+● External - 12Gbps SAS HBA (non-RAID)
+● Internal - HBA330 (non-RAID)
+Drive bays Front bays:
+● Up to 24 x 2.5” SAS/SSD/NVMe, max 184TB
+● Up to 12 x 3.5" SAS/SATA HDD max 192TB
+Mid bay:
+● up to 4 x 2.5” SAS/SSD, max 30.72TB
+● Up to 4 x 3.5" max 64TB
+Rear bays:
+● Up to 4 x 2.5” SAS/SSD/, max 30.72TB
+● Up to 2 x 3.5" max 32TB SAS/SATA HDD
+Power supplies ● Titanium 750W
+● Platinum 495W, 750W, 750W Mixed Mode HVDC (for China only), 750W Mixed Mode 240 V
+DC (For China only),1100W, 1600W, 2000W, and 2400W
+● 1100W 380VDC (China and Japan only)
+● Gold 1100W -48VDC
+● Hot plug power supplies with full redundancy
+● Up to 6 hot plugs fans with full redundancy
+Dimensions ● Form factor: Rack (2U)
+● Height: 86.8m (3.4”)
+● Width*: 434mm (17.1")
+● Depth*: 737.5mm (29.0")
+● Weight: 33.1kg (73.0lbs.)
+NOTE:  * Dimensions do not include bezel.
+Embedded management ● iDRAC9
+● Quick Sync 2 wireless module optional
+● iDRAC RESTful with Redfish
+● iDRAC Direct
+Bezel Optional LCD Bezel or Security bezel
+OpenManage™ Software ● OpenManage Enterprise
+● OpenManage Mobile
+● OpenManage Power Center
+Integrations and
+connections
+Integrations:
+● Microsoft® System Center
+● VMware® vCenter™
+● BMC Truesight
+● Red Hat Ansible
+Connections:
+● Nagios Core & Nagios XI
+● Micro Focus Operations Manager i (OMi)
+● IBM Tivoli Netcool/OMNIbus
+● IBM Tivoli® Network Manager IP Edition
+Security ● TPM 1.2/2.0, TCM 2.0 optional
+● Cryptographically signed firmware
+● Secure Boot
+10 System features
+
+
+===== PAGE 11 =====
+Table 4. R740xd product specifications (continued)
+Features Technical Specifications
+● System Lockdown (requires OpenManage Enterprise)
+● Secure erase
+I/O & Ports Network daughter card options:
+● 4 x 1GbE or
+● 2 x 10GbE + 2 x 1GbE or
+● 4 x 10GbE or
+● 2 x 25GbE
+Front ports:
+● VGA
+● 2 x USB 2.0
+● 1 x USB 3.0 (optional)
+● 1 x Dedicated iDRAC direct USB
+Rear ports:
+● VGA
+● Serial
+● 2 x USB 3.0
+● 1 x Dedicated iDRAC network port
+Video card:
+● VGA
+Riser options with p to 8 PCIe Gen 3 slots, maximum of 4 x 16 slots
+Accelerator options ● Up to three 300W or six 150W GPUs or
+● Up to three double-width or four single-width FPGAs.
+● GPU and FPGA options are available only on 24 x 2.5 -inch drive chassis. Up to two GPUs
+are supported on NVMe configurations.
+Supported operating
+systems
+● Canonical® Ubuntu® LTS
+● Citrix® Hypervisor
+● Microsoft® Windows Server® LTSC with Hyper-V
+● Oracle® Linux
+● Red Hat® Enterprise Linux
+● SUSE® Linux Enterprise Server
+● VMware® ESXi®
+Recommended support Dell ProSupport Plus for critical systems or Dell ProSupport for premium hardware and software
+support for your PowerEdge solution. Consulting and deployment offerings are also available.
+System features 11
+
+
+===== PAGE 36 =====
+Networking and PCIe
+The PowerEdge R740/740xd offers balanced, scalable I/O capabilities, including integrated PCIe 3.0-capable expansion slots.
+Dell EMC Network Daughter Cards allow you to choose the right network fabric without using up a valuable PCI slot. You
+can pick the speed, technology, vendor, and other options, such as switch-independent partitioning, which allows you to
+share and manage bandwidth on 10 GbE connections. For details on the various networking cards available, talk to Dell
+representative or visit  https://www.dell.com/en-us/work/shop/povw/poweredge-r740  or https://www.dell.com/en-us/work/
+shop/povw/poweredge-r740xd  and choose the green view configurations button at the top for a full list of options.
+PCIe subsystem
+There are a number of riser combinations offered for the R740 and R740xd. Specific riser options are required for certain
+options like GPU enablement and NVMe PCIe SSD enablement.
+The following list the PCIe risers offered for both R740 and R740xd:
+NOTE:  The R740 and R740xd also offer "no riser" options for customers that do not require any PCIe cards in their system
+The below table shows the PCIe expansion card riser configuration for R740 and R740xd:
+Table 11. PCIe expansion card riser configuration for R740 and R740xd 
+Expansion card riser PCIe slots on the
+riser
+Height Length Link
+Riser 1A Slot 1 Full Height Full Length x16
+Slot 3 Full Height Half Length x16
+Riser 1B Slot 1 Full Height Full Length x8
+Slot 2 Full Height Full Length x8
+Slot 3 Full Height Half Length x8
+Riser 1D Slot 1 Full Height Full Length x16
+Slot 2 Full Height Full Length x8
+Slot 3 Full Height Half Length x8
+Riser 2A or 2E or 2D or
+2F
+Slot 4 Full Height Full Length x16
+Slot 5 Full Height Full Length x8
+Slot 6 Low Profile Half Length x8
+Riser 2B Slot 4 Low Profile Half Length x8
+Riser 2C Slot 4 Low Profile Half Length x16
+Riser 3A or 3B Slot 7 Full Height Full Length x8
+Slot 8 Full Height Full Length x16
+The below table shows the PCIe riser configuration for R740 and R740xd:
+Table 12. PCIe riser configuration 
+Riser configuration Numbers of CPUs Supported PERC type Possible rear storage
+No riser 1 or 2 Mini-Mono Yes
+7
+36 Networking and PCIe
+
+
+===== PAGE 39 =====
+Power, thermal and acoustics
+Topics:
+• Power
+• Thermal
+• Acoustics
+Power
+Energy Smart power supplies have intelligent features, such as the ability to dynamically optimize efficiency while maintaining
+availability and redundancy. Also featured are enhanced power- consumption reduction technologies, such as high- efficiency
+power conversion and advanced thermal- management techniques, and embedded power- management features, including high-
+accuracy power monitoring.
+Table 13. PSU specification 
+Wattage Frequency Voltage Class Heat dissipation
+495W 50/60Hz 100-240Vac/6.5-3A Platinum 1908 BTU/hr
+750W 50/60Hz 100-240Vac/10-5A Platinum 2891 BTU/hr
+750WT 50/60Hz 200-240Vac/5A Titanium 2843 BTU/hr
+750W Mix Mode/
+HVDC(China Only)
+50/60Hz 100-240Vac/10-5A Platinum 2891 BTU/hr
+N/A 240Vdc/4.5A N/A
+1100W DC - -48--60Vdc/32A Gold 4416 BTU/hr
+1100W 50/60Hz 100-240Vac/12-6.5A Platinum 4100 BTU/hr
+1100W Mix  Mode/
+HVDC(China and
+Japan Only)
+50/60Hz 100-240Vac/12A-6.5A Platinum 4100 BTU/hr
+N/A 200-380Vdc/6.4A-3.2A N/A 4100 BTU/hr
+1600W 50/60Hz 100-240Vac/10A Platinum 6000 BTU/hr
+2000W 50/60Hz 100-240Vac/11.5A Platinum 7500 BTU/hr
+2400W 50/60Hz 100-240Vac/16A Platinum 9000 BTU/hr
+Table 14. PSU efficiency 
+Form factor Output Class 10% 20% 50% 100%
+Redundant 86mm 495W AC Platinum 82.00% 90.00% 94.00% 91.00%
+750W AC Titanium 90.00% 94.00% 96.00% 91.00%
+750W AC Platinum 82.00% 90.00% 94.00% 91.00%
+750W HVDC Platinum 82.00% 90.00% 94.00% 91.00%
+1100W AC Platinum 89.00% 93.00% 94.50% 92.00%
+1100W DC Gold 80.00% 88.00% 91.00% 88.00%
+1600W AC Platinum 87.00% 90.00% 94.00% 91.00%
+2000W AC Platinum 89.00% 93.0 0% 94.00% 91.00%
+9
+Power, thermal and acoustics 39
+
+
+===== PAGE 40 =====
+Table 14. PSU efficiency (continued)
+Form factor Output Class 10% 20% 50% 100%
+2400W AC Platinum 89.00% 93.00% 94.00% 91.50%
+Thermal
+Thermal management of the PowerEdge R740 and R740xd delivers high performance for the right amount of cooling to
+components at the lowest fan speeds across a wide range of ambient temperatures from 10°C to 35°C (50°F to 95°F) and to
+extended ambient temperature ranges (see Environmental Specifications ). The benefits to you are lower fan power consumption
+(lower server system power and data center power consumption) and greater acoustical versatility.
+NOTE:  The recommended ambient temperature for R740 and R740xd is generally 30°C, there are some exceptions for
+R740xd GPU and NVMe configurations that can be found in the support documentation.
+Thermal design
+The PowerEdge R740 and R740xd server cooling builds on the features and capability of previous Dell EMC servers but expands
+support for higher power processors, PCIe cooling, and increased NVMe count. A new chassis mechanical architecture enables
+increased airflow capability for cooling of higher power and dense system configurations and results in fewer system restrictions
+and increased feature density. Dell Server Thermal, Mechanical, and Thermal Control designs are based on the following key
+tenets and order of priority.
+The thermal design of the system reflects the following:
+● Optimized thermal design: The system layout is architected for optimum thermal design. System component placement and
+layout are designed to provide maximum airflow coverage to critical components with minimal expense of fan power.
+● Comprehensive thermal management: The thermal control system regulates the system fan speeds based on feedback
+from system component temperature sensors, as well as for system inventory and subsystem power draw. Temperature
+monitoring includes components such as processors, DIMMs, chipset, system inlet air temperature and hard disk drives.
+● Open and closed loop fan speed control: Open loop fan control uses system configuration to determine fan speed based on
+system inlet air temperature. Closed loop thermal control uses temperature feedback to dynamically adjust fan speeds based
+on system activity and cooling requirements.
+● User-configurable settings: With the understanding and realization that every customer has a unique set of circumstances
+or expectations from the system, in this generation of servers, we have introduced limited user-configurable settings in the
+iDRAC9BIOS setup screen. For more information, see the Dell EMC PowerEdge system Installation and Service Manual on
+Dell.com/Support/Manuals and “Advanced Thermal Control: Optimizing across Environments and Power Goals” on Dell.com.
+● Cooling redundancy: The system allows N+1 fan redundancy, allowing continuous operation with one fan failure in the
+system.
+Acoustics
+The PowerEdge R740 is quiet enough to be used in an office environment in typical and minimum configurations, and the
+R740Xd can also operate at a similar level in certain configurations.
+Acoustical design
+The acoustical design of the PowerEdge R740 and R740xd reflect the following:
+● Versatility:  The R740 and R740xd save you power draw in the data center but are also quiet enough for office environment
+in typical and minimum configurations. You may find that the system is sufficiently quiet where the sound it emits blends into
+the environment.
+● Adherence to Dell EMC's high sound quality standards:  Sound quality is different from sound power level and sound
+pressure level in that it describes how humans respond to annoyances in sound, like whistles and hums. One of the sound
+quality metrics in the Dell EMC specification is prominence ratio of a tone.
+● Noise ramp and descent at boot-up from power off:  Fan speeds and noise levels ramp during the boot process(from
+power- off to power-on) in order to add a layer of protection for component cooling in the event that the system were not
+to boot properly. In order to keep the boot-up process as quiet as possible, the fan speed reached during boot-up is limited
+to about half of full speed.
+40 Power, thermal and acoustics
+
+
+===== PAGE 41 =====
+● Noise level dependencies:  If acoustics is important to you, several configuration choices and settings are important to
+consider:
+○ For lower acoustical output, use a small number of lower rotational- speed SATA hard drives, nearline SAS hard drives, or
+non- rotational devices like SSDs. 15k hard drives generate more acoustic noise than that of lower rotational- speed hard
+drives, and noise increases with number of hard drives.
+○ Fan speeds and noise may increase from baseline factory configurations if certain profiles are changed by the user or the
+system configurations are updated.
+￭ iDRAC9 BIOS settings: Performance Per Watt (DAPC or OS) may be quieter than Performance or Dense
+Configuration (iDRAC Settings > Thermal > Max. Exhaust Temperature or Fan speed offset).
+￭ The quantity and type of PCIe cards installed: This affects overall system acoustics. Installation of more than two
+PCIe cards results in an increase in overall system acoustics.
+￭ Using a GPU card: This results in an increase in overall system acoustics.
+￭ PCIe controller-based SSD drives: Drives such as Express flash drives and Fusion- IO cards require greater airflow for
+cooling, and result in significantly higher noise levels.
+￭ Systems with an H330 PERC: This configuration may be quieter than those with an H730P PERC with battery
+backup. However, higher noise levels result when a system is configured as non-RAID.
+￭ Hot spare feature of power supply unit: In the system default setting, the Hot Spare Feature is disabled; acoustical
+output from the power supplies is lowest in this setting.
+The following table shows the reference points and output comparisons:
+Table 15. Reference points and output comparison 
+Value measured at your ears Equivalent familiar noise experience
+LpA, dBA, re 20 µPa Loudness, sones
+90 80 Loud concert
+75 39 Data center, vacuum cleaner, voice must
+be elevated to be heard
+60 10 Conversation levels
+Power, thermal and acoustics 41
