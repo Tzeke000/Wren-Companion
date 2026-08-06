@@ -97,6 +97,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "expression_detect_every_n": 10,
         "attention_detect_every_n": 60,
         "insight_face_every_n": 6,
+        # visual_attention target-lock hysteresis (2026-08-06). Raw per-frame
+        # booleans oscillate — iris_attention_sources learned this the hard way
+        # — so locking needs N consecutive hits and losing needs M consecutive
+        # misses. Read inside the loop so they stay live-tunable.
+        "attention_acquire_frames": 3,
+        "attention_lose_frames": 8,
     },
     "behavior": {
         # Iris's IDENTITY-aligned defaults: don't auto-engage, do auto-

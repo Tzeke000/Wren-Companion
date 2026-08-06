@@ -142,6 +142,28 @@ class _IrisPaths:
     def orb_active_tab(self) -> Path:
         return self.state_dir / "orb_active_tab.txt"
 
+    # ── visual attention (2026-08-06) ────────────────────────────────────────
+    # Added when brain/visual_attention.py was built. Note that the vision and
+    # vector state paths that predate this are hardcoded module constants in
+    # their own files; these are declared here because that is the convention
+    # this file exists to enforce, and new code should follow it.
+    @property
+    def attention_dir(self) -> Path:
+        return self.state_dir / "attention"
+
+    @property
+    def attention_state(self) -> Path:
+        """Live snapshot of what I'm looking at — target, lock status, bearing,
+        and what that bearing costs me. Written atomically a few times a second
+        at most; a consumer should treat anything older than ~2.5s as stale."""
+        return self.attention_dir / "attention_state.json"
+
+    @property
+    def attention_log(self) -> Path:
+        """Append-only transition log (target set / acquired / lost / home).
+        Transitions ONLY, never per-frame — rotates at 5MB."""
+        return self.attention_dir / "attention_log.jsonl"
+
 
 # Module-level singleton — import as `from brain.iris_paths import paths`.
 paths = _IrisPaths()
