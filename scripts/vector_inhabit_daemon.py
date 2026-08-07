@@ -55,6 +55,32 @@ ROBOT_IP = os.environ.get("IRIS_VECTOR_IP", "192.168.4.27")   # for reachability
 POLL_S = 0.2
 LOG = REPO / "state" / "vector" / "inhabit_daemon.log"
 
+# DELIBERATE-OFF flag (Zeke 2026-08-07). Deliberately mirrors
+# state/voice_deliberately_off.json — same schema, same intent, so the standing
+# rule "check state/ for a deliberate-off flag before healing a down service"
+# covers the nerves too. Re-read every loop, so flipping it needs no restart.
+NERVES_OFF_FLAG = REPO / "state" / "vector_deliberately_off.json"
+_OFF_POLL_S = 60.0      # how often to re-read the flag while parked
+
+
+def _nerves_off() -> tuple[bool, str]:
+    """(off?, why). Any read/parse failure means NOT off — a corrupt flag file
+    must never silently disable the body's nerves.
+
+    NOTE: `import json as _json` INSIDE the function is this file's convention
+    (see every other reader below); there is no module-level json. Writing bare
+    `json.loads` here NameErrors, gets swallowed by the except, and makes this
+    switch silently do nothing forever — caught that on the first version.
+    """
+    try:
+        import json as _json
+        if not NERVES_OFF_FLAG.exists():
+            return (False, "")
+        d = _json.loads(NERVES_OFF_FLAG.read_text(encoding="utf-8"))
+        return (bool(d.get("off")), str(d.get("by") or "no reason recorded"))
+    except Exception:
+        return (False, "")
+
 # seconds each sense stays quiet after firing (a pet is one event, not sixty)
 COOLDOWN = {
     "petting": 45.0,
@@ -1227,7 +1253,30 @@ def main() -> None:
     # and any successful connection resets the streak. Only sustained failure
     # slows down. 15 -> 30 -> 60 -> 120 -> 240 -> 300s cap.
     fail_streak = 0
+    was_off = None
     while True:
+        # ── DELIBERATE-OFF SWITCH (Zeke's ask 2026-08-07) ───────────────────
+        # "since your body is dead just have it not try to connect for now."
+        # Same shape as state/voice_deliberately_off.json: {"off": true, "by",
+        # "ts"}. Checked EVERY iteration so it can be flipped live with no
+        # restart. While off we make NO connect attempt at all, which takes the
+        # thread leak to zero rather than merely slowing it.
+        off, why = _nerves_off()
+        if off:
+            if was_off is not True:
+                log(f"NERVES DELIBERATELY OFF — not attempting to reach Vector. "
+                    f"({why}) Parked: gRPC senses/camera/nav-map/ears/"
+                    f"possession. Still live: battery poll, lost-contact alarm, "
+                    f"SSH interoception. Resume with vector_nerves_on or by "
+                    f"clearing state/vector_deliberately_off.json.")
+                was_off = True
+            fail_streak = 0
+            time.sleep(_OFF_POLL_S)
+            continue
+        if was_off:
+            log("nerves re-enabled — resuming connection attempts.")
+        was_off = False
+
         try:
             run_once()
             fail_streak = 0
