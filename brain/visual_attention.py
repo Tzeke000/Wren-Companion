@@ -558,6 +558,11 @@ def observe(g: dict[str, Any], *, frame_shape: tuple[int, int] | None = None) ->
             dx, dy = _bbox_offset(face, fw, fh)
             st["offset"] = {"dx": round(dx, 3), "dy": round(dy, 3)}
             st["confidence"] = float(face.get("confidence") or 0.0)
+            # Kept so probe_depth() can ask about the target without re-detecting.
+            try:
+                st["last_bbox"] = [int(v) for v in list(face.get("bbox") or [])[:4]]
+            except Exception:
+                st["last_bbox"] = None
             if st["acquire_frames"] >= need_hits:
                 st["status"] = "locked"
         else:
@@ -622,6 +627,43 @@ def _append_log(rec: dict) -> None:
 # ═════════════════════════════════════════════════════════════════════════════
 # READOUT
 # ═════════════════════════════════════════════════════════════════════════════
+
+def probe_depth(g: dict[str, Any]) -> dict:
+    """Fill the depth_hint slot for the current target. ~40ms on the 3060.
+
+    Deliberately NOT in `observe()`. Depth answers "where is it / is it coming
+    toward me", which is an occasional question; running a model every tick to
+    keep a field warm is the kind of cost that hides. Call it when you want to
+    know.
+    """
+    with _LOCK:
+        st = _state(g)
+        tid = st.get("target")
+        bbox = st.get("last_bbox")
+        if not tid:
+            return {"ok": False, "error": "no target set"}
+        if st.get("status") != "locked" or not bbox:
+            return {"ok": False, "error": f"target not locked (status="
+                                          f"{st.get('status')}) — nothing to measure"}
+    try:
+        from brain import depth_sense, frame_store
+    except Exception as e:
+        return {"ok": False, "error": f"depth unavailable: {e!r}"}
+    res = frame_store.get_buffered_frame(max_age_sec=2.0)
+    if res.frame is None:
+        return {"ok": False, "error": f"no fresh frame ({res.freshness}) — "
+                                     f"won't estimate depth from a stale view"}
+    r = depth_sense.depth_for_bbox(res.frame, bbox, track_key=tid)
+    if r.get("ok"):
+        with _LOCK:
+            st = _state(g)
+            st["depth_hint"] = {"band": r.get("band"),
+                                "relative": r.get("relative"),
+                                "trend": r.get("trend"),
+                                "metric": False, "ts": time.time()}
+            _persist(g, st, _actuator(g))
+    return r
+
 
 def attention_cost(g: dict[str, Any] | None = None) -> dict:
     """What am I giving up by looking where I'm looking?
@@ -715,8 +757,15 @@ def attention_now(g: dict[str, Any] | None = None) -> str:
     else:
         bits.append("fixed camera — I can't look around, only look")
 
-    if st.get("depth_hint") is None:
-        bits.append("no depth sense (not built)")
+    dh = st.get("depth_hint")
+    if dh is None:
+        bits.append("no depth reading yet (ask for one — it isn't automatic)")
+    else:
+        age = time.time() - float(dh.get("ts") or 0)
+        trend = dh.get("trend")
+        bits.append(f"depth: {dh.get('band')}"
+                    + (f", {trend}" if trend and trend != "steady" else "")
+                    + f" (relative, not a distance; {age:.0f}s ago)")
 
     return "; ".join(bits) + "."
 
