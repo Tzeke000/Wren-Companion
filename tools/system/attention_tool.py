@@ -97,10 +97,44 @@ def _attention_cost_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, A
         return {"ok": False, "error": str(e)[:300]}
 
 
+def _attention_depth_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """How near is what I'm tracking, and is it coming toward me?
+
+    RELATIVE, never metric — a single camera has no baseline, so 'six feet' is
+    not recoverable. Needs a locked target and a fresh frame; refuses rather
+    than guessing from a stale view. ~40ms on the 3060.
+    """
+    try:
+        from brain import visual_attention as va
+        r = va.probe_depth(g)
+        if r.get("ok"):
+            r["summary"] = va.attention_now(g)
+        return r
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+def _depth_status_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from brain import depth_sense
+        if str(params.get("unload") or "").lower() in ("1", "true", "yes"):
+            return {**depth_sense.unload(), **depth_sense.status()}
+        return depth_sense.status()
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
 def _attention_selftest_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     try:
         from brain import visual_attention as va
-        return va.self_test()
+        out = va.self_test()
+        try:
+            from brain import depth_sense
+            out["depth"] = depth_sense.self_test()
+            out["ok"] = bool(out.get("ok")) and bool(out["depth"].get("ok"))
+        except Exception as e:
+            out["depth"] = {"ok": False, "error": str(e)[:200]}
+        return out
     except Exception as e:
         return {"ok": False, "error": str(e)[:300]}
 
@@ -131,6 +165,15 @@ try:
                   "What I'm giving up by looking where I'm looking. A head "
                   "that turns can only watch one thing.",
                   1, _attention_cost_fn)
+    register_tool("attention_depth",
+                  "How near is the thing I'm tracking, and is it approaching? "
+                  "RELATIVE ordering only — never a distance in feet. Needs a "
+                  "locked target and a fresh frame, and refuses otherwise.",
+                  1, _attention_depth_fn)
+    register_tool("depth_status",
+                  "Monocular depth model state (Depth Anything V2 Small). Pass "
+                  "unload=true to free its VRAM.",
+                  1, _depth_status_fn)
     register_tool("attention_selftest",
                   "Hardware-free self-test of the attention subsystem, "
                   "including that the fixed-camera stub refuses to fake "
