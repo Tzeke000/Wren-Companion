@@ -66,7 +66,14 @@ BOOT_WAIT_S = 600    # post-restart wait for a fresh heartbeat
 # not the machine. See memory/wedge_cause_video_download_2026-08-03.md.
 SESSIONS_DIR = MEMORY_DIR.parent          # ~/.claude/projects/D--Wren-Companion
 LLM_DIR = REPO / "state" / "iris_llm"
-SDK_STALE_S = 45 * 60     # cognition silent this long, with work waiting = wedged
+SDK_STALE_S = 90 * 60     # silent this long AND stuck mid-tool-call = wedged.
+                          # Raised 45->90 after the 08-07 false alarms: a
+                          # legitimate long single tool call (waiting on a
+                          # ~50min bake) is indistinguishable from a wedge on the
+                          # shorter window, and a wedge needs a human nudge
+                          # anyway, so detecting it late costs almost nothing
+                          # while a false DM to a man on night shift costs real
+                          # trust.
 SDK_MIN_WAITING = 2       # need >=2 requests submitted since it went quiet
 SDK_GRACE_S = 300         # warn -> act window (longer than the loop check: a
                           # long tool call is normal, a 45-min one is not)
@@ -213,6 +220,81 @@ def newest_session_write_age_s(sessions_dir: Path | None = None,
     return None if newest is None else max(0.0, now - newest)
 
 
+def newest_session_file(sessions_dir: Path | None = None) -> Path | None:
+    newest, newest_m = None, None
+    try:
+        for p in (sessions_dir or SESSIONS_DIR).glob("*.jsonl"):
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if newest_m is None or m > newest_m:
+                newest, newest_m = p, m
+    except Exception:
+        return None
+    return newest
+
+
+def transcript_ends_mid_tool_call(path: Path | None, tail_bytes: int = 262144) -> bool | None:
+    """Does the transcript end with a tool call that never got a result?
+
+    ★ THIS IS THE ACTUAL WEDGE DISCRIMINATOR, and it exists because the first
+    version of this check FALSE-ALARMED Zeke on a night shift (2026-08-07 21:44).
+    That version treated "transcript quiet + requests piling up" as a wedge, on
+    my reasoning that an idle-but-healthy session still answers its background
+    reflection requests every ~15 min so would keep writing. THAT PREMISE WAS
+    WRONG: reflection requests are only answered when something rewakes the
+    session, and nothing does while it sits genuinely idle. So idle and wedged
+    were indistinguishable, and 45 quiet minutes was enough to cry wolf.
+
+    What actually differs: a wedged session died INSIDE a tool call — the
+    2026-08-02 wedge was a download_attachment that never returned. Its
+    transcript therefore ends with a tool_use whose tool_use_id never gets a
+    matching tool_result. An idle session's transcript ends cleanly on a
+    completed assistant message. That is a real structural difference rather
+    than a proxy for one.
+
+    Returns True (stuck mid-call), False (ended clean), or None (can't tell).
+    """
+    if path is None:
+        return None
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            if size > tail_bytes:
+                f.seek(size - tail_bytes)
+                f.readline()          # drop the partial first line
+            raw = f.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        log(f"transcript tail read failed: {e!r}")
+        return None
+    open_calls: dict[str, bool] = {}
+    saw_any = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        content = ((rec.get("message") or {}).get("content"))
+        if not isinstance(content, list):
+            continue
+        for c in content:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "tool_use" and c.get("id"):
+                open_calls[str(c["id"])] = True
+                saw_any = True
+            elif c.get("type") == "tool_result" and c.get("tool_use_id"):
+                open_calls.pop(str(c["tool_use_id"]), None)
+                saw_any = True
+    if not saw_any:
+        return None
+    return len(open_calls) > 0
+
+
 def waiting_requests(since_ts: float, llm_dir: Path | None = None,
                      now: float | None = None) -> tuple[int, float | None]:
     """(count, newest_age_s) of pending requests submitted AFTER since_ts.
@@ -293,6 +375,19 @@ def sdk_probe(now: float | None = None, sessions_dir: Path | None = None,
         ev["verdict"] = "idle"
         ev["why"] = (f"transcript quiet {age / 60:.1f} min but only {waiting} "
                      f"request(s) waiting — idle, not wedged")
+        return ev
+    # THE discriminator. Requests piling up while the transcript is quiet is NOT
+    # enough — that is exactly what a genuinely idle session looks like, which is
+    # how the first version of this check false-alarmed Zeke at 21:44 on 08-07.
+    # A wedge died inside a tool call; idleness did not.
+    stuck = transcript_ends_mid_tool_call(newest_session_file(sessions_dir))
+    ev["ends_mid_tool_call"] = stuck
+    if stuck is not True:
+        ev["verdict"] = "idle"
+        ev["why"] = (f"transcript quiet {age / 60:.1f} min with {waiting} "
+                     f"requests waiting, but it ends on a COMPLETED turn"
+                     + ("" if stuck is False else " (couldn't parse the tail)")
+                     + " — idle or unwoken, not wedged mid-call")
         return ev
     n = claude_processes() if procs is None else procs
     ev["claude_processes"] = n
@@ -550,6 +645,29 @@ def _selftest() -> int:
                     json.dumps({"id": f"r{i}", "ts": now - age_s,
                                 "status": "pending"}), encoding="utf-8")
 
+        def transcript_stuck(age_s: float) -> None:
+            """A transcript ending on a tool_use with no result = wedged mid-call."""
+            p = sess / "s.jsonl"
+            p.write_text("\n".join([
+                json.dumps({"type": "assistant", "message": {"role": "assistant",
+                            "content": [{"type": "tool_use", "id": "t1",
+                                         "name": "download_attachment"}]}}),
+            ]) + "\n", encoding="utf-8")
+            os.utime(p, (now - age_s, now - age_s))
+
+        def transcript_clean(age_s: float) -> None:
+            """A transcript ending on a resolved call = idle, however long ago."""
+            p = sess / "s.jsonl"
+            p.write_text("\n".join([
+                json.dumps({"type": "assistant", "message": {"role": "assistant",
+                            "content": [{"type": "tool_use", "id": "t1",
+                                         "name": "reply"}]}}),
+                json.dumps({"type": "user", "message": {"role": "user",
+                            "content": [{"type": "tool_result",
+                                         "tool_use_id": "t1"}]}}),
+            ]) + "\n", encoding="utf-8")
+            os.utime(p, (now - age_s, now - age_s))
+
         # 1. fresh transcript = healthy, whatever else is true
         transcript(60); pendings(50, 30)
         check("fresh transcript", sdk_probe(now, sess, llm, 5.0, 1)["verdict"],
@@ -562,13 +680,26 @@ def _selftest() -> int:
         transcript(3 * 3600); pendings(134, 44 * 3600)
         check("stale backlog ignored", sdk_probe(now, sess, llm, 5.0, 1)["verdict"],
               "idle")
-        # 4. the real signature: quiet + work submitted since it went quiet
-        transcript(3 * 3600); pendings(4, 30 * 60)
-        check("wedge signature", sdk_probe(now, sess, llm, 5.0, 1)["verdict"],
-              "wedged")
-        # 5. same, but no claude.exe = absent, a different fault
+        # 4. THE REGRESSION TEST for the 21:44 false alarm: quiet + work piling
+        #    up, but the transcript ends on a COMPLETED turn. This is an idle
+        #    session that nothing has rewoken. The first version called this
+        #    "wedged" and DM'd Zeke mid-night-shift.
+        transcript_clean(3 * 3600); pendings(4, 30 * 60)
+        check("REGRESSION 21:44 — idle with work waiting is NOT wedged",
+              sdk_probe(now, sess, llm, 5.0, 1)["verdict"], "idle")
+        # 5. the real signature: quiet + work waiting + ended MID TOOL CALL
+        transcript_stuck(3 * 3600); pendings(4, 30 * 60)
+        check("wedge signature (stuck mid tool call)",
+              sdk_probe(now, sess, llm, 5.0, 1)["verdict"], "wedged")
+        # 6. same, but no claude.exe = absent, a different fault
         check("absent (no process)", sdk_probe(now, sess, llm, 5.0, 0)["verdict"],
               "absent")
+        # 7. an unparseable tail must NEVER read as wedged
+        (sess / "s.jsonl").write_text("not json at all\n", encoding="utf-8")
+        os.utime(sess / "s.jsonl", (now - 3 * 3600, now - 3 * 3600))
+        check("unparseable tail falls back to idle, never wedged",
+              sdk_probe(now, sess, llm, 5.0, 1)["verdict"], "idle")
+        transcript_stuck(3 * 3600)
         # 6. runtime down too = not ours, don't double-alarm
         check("runtime stale defers", sdk_probe(now, sess, llm, 999.0, 1)["verdict"],
               "unknown")
