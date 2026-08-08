@@ -46,8 +46,23 @@ _lock = threading.Lock()
 _state = {"model": None, "proc": None, "device": None}
 
 
+_MIN_FREE_BYTES = 1200 * 1024 * 1024      # ~600MB weights + headroom for activations
+
+
 def _ensure_model():
-    """Lazy-load OWL-ViT once, resident in-process (~600MB VRAM on the 3060)."""
+    """Lazy-load OWL-ViT once, resident in-process (~600MB VRAM on the 3060).
+
+    VRAM PRECHECK (added 2026-08-08): the little brain is served by ollama, which
+    loads its model onto this same 12GB card on demand and holds ~6.9GB until its
+    keep-alive expires. Measured during a real window: 11790 MiB of 12288 used,
+    i.e. ~0.5GB free — not enough for this model. Without the check, a detect()
+    call landing in that window dies on a CUDA OOM inside a blanket except and
+    returns a soft {ok: False} with an inscrutable error, and the caller cannot
+    tell "nothing is there" from "I couldn't look".
+
+    So: refuse EARLY and say why. A refusal that names the reason is worth far
+    more than a failure that looks like an empty room.
+    """
     if _state["model"] is not None:
         return
     with _lock:
@@ -56,6 +71,19 @@ def _ensure_model():
         import torch
         from transformers import OwlViTForObjectDetection, OwlViTProcessor
         dev = "cuda" if torch.cuda.is_available() else "cpu"
+        if dev == "cuda":
+            try:
+                free, total = torch.cuda.mem_get_info()
+            except Exception:
+                free, total = None, None
+            if free is not None and free < _MIN_FREE_BYTES:
+                raise RuntimeError(
+                    f"refusing to load OWL-ViT: only {free / 2**30:.1f} GiB free "
+                    f"of {total / 2**30:.1f} GiB on the GPU, need ~"
+                    f"{_MIN_FREE_BYTES / 2**30:.1f} GiB. Something big is "
+                    f"resident — usually ollama serving the little brain, which "
+                    f"releases when its keep-alive expires. Retry in a minute, or "
+                    f"free it deliberately; do NOT read this as 'nothing in view'.")
         proc = OwlViTProcessor.from_pretrained(_MODEL_ID)
         model = OwlViTForObjectDetection.from_pretrained(_MODEL_ID).to(dev).eval()
         _state.update(model=model, proc=proc, device=dev)
