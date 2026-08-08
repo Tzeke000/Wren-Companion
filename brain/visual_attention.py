@@ -436,6 +436,66 @@ def _match_face(faces: list[dict], target_id: str) -> dict | None:
     return None
 
 
+_OBJ_CACHE: dict[str, dict] = {}
+
+
+def _match_object(target_id: str, *, ttl_s: float = 1.0,
+                  now: float | None = None) -> dict | None:
+    """Resolve an `object:<thing>` target with OWL-ViT on the live webcam.
+
+    WHY THIS EXISTS (2026-08-08): `canonical_target` has always minted
+    `object:<thing>` ids and `attention_look` has always advertised
+    `'object:mug'` — but `_match_face` returns None for anything not starting
+    with "person:", so an object target could only ever accumulate misses and
+    die at `lost`. **The state machine promised a capability it could not
+    perform.** OWL-ViT went live on the webcam on 08-07, so the resolver that
+    was missing now exists.
+
+    Returns a record shaped like an insight_face record ({bbox, confidence, ...})
+    so the rest of observe() needs no special-casing.
+
+    COST, stated plainly because that is this module's whole point: an uncached
+    call is a full OWL-ViT inference — measured 89-176ms end-to-end on the 3060,
+    vs ~0ms for a face match, which reads a detection the capture loop already
+    did. Hence the short cache: observe() is documented as safe at a few Hz, and
+    without it an `attention_observe` burst of 5 would cost most of a second of
+    GPU. Cached results are reused for ttl_s and no longer.
+
+    Never guesses: a stale frame or an unavailable detector is a MISS, which the
+    caller's hysteresis then handles, exactly as if the thing were not in view.
+    """
+    if not target_id.startswith("object:"):
+        return None
+    now = time.time() if now is None else now
+    hit = _OBJ_CACHE.get(target_id)
+    if hit and (now - float(hit.get("ts") or 0.0)) < ttl_s:
+        return hit.get("rec")
+    want = target_id.split(":", 1)[1].strip()
+    if not want:
+        return None
+    rec = None
+    try:
+        min_score = float(_tune("attention_object_min_score", 0.10))
+        from brain import frame_store, vector_owl
+        res = frame_store.get_buffered_frame(max_age_sec=2.0)
+        if res.frame is not None:
+            r = vector_owl.detect(res.frame, [want], threshold=min_score,
+                                  max_results=5, bgr=True)
+            if r.get("ok"):
+                for o in (r.get("objects") or []):
+                    box = o.get("box") or []
+                    if len(box) >= 4 and float(o.get("score") or 0.0) >= min_score:
+                        rec = {"bbox": [int(v) for v in box[:4]],
+                               "confidence": float(o.get("score") or 0.0),
+                               "label": o.get("label"), "resolver": "owlvit"}
+                        break          # objects are score-sorted already
+    except Exception as e:
+        _log(f"object match failed for {target_id!r} (treating as miss): {e!r}")
+        rec = None
+    _OBJ_CACHE[target_id] = {"ts": now, "rec": rec}
+    return rec
+
+
 def _bbox_offset(face: dict, frame_w: int, frame_h: int) -> tuple[float, float]:
     """Normalised (-1..1) offset of a face centre from frame centre.
 
@@ -478,8 +538,20 @@ def set_target(g: dict[str, Any], spec: str, *, actuator: Actuator | None = None
                          "ok": bool(r.get("ok")), "ts": now})
             return {"ok": True, "target": "home", "moved": bool(r.get("moved")),
                     "actuator": act.name, "state": dict(st)}
+        # Clear every per-target reading, not just the counters.
+        # FOUND 2026-08-08 by testing the negative case: switching from
+        # 'object:sofa' to 'object:giraffe' kept the SOFA's offset, confidence,
+        # bbox and depth_hint. The readout then said "looking for giraffe" while
+        # carrying the sofa's depth band, and because probe_depth() measures
+        # st['last_bbox'], asking for depth after a switch but before an
+        # observe() would have measured the sofa and reported it as the
+        # giraffe's distance — a confident wrong answer, which is the only kind
+        # that actually costs anything. A reading belongs to the target it was
+        # taken from; it does not survive the target.
         st.update({"target": tid, "target_label": label, "status": "seeking",
-                   "since_ts": now, "acquire_frames": 0, "miss_frames": 0})
+                   "since_ts": now, "acquire_frames": 0, "miss_frames": 0,
+                   "last_seen_ts": 0.0, "offset": None, "confidence": None,
+                   "last_bbox": None, "depth_hint": None, "resolved_by": None})
         _persist(g, st, act)
         _append_log({"ev": "target_set", "target": tid, "actuator": act.name,
                      "can_move": bool(act.capabilities().get("can_pan")),
@@ -539,6 +611,12 @@ def observe(g: dict[str, Any], *, frame_shape: tuple[int, int] | None = None) ->
 
         faces = _faces_from_g(g)
         face = _match_face(faces, tid)
+        # Object targets resolve through OWL-ViT instead of the face pipeline.
+        # Before 2026-08-08 there was no resolver for them at all, so
+        # `attention_look 'object:mug'` could only ever reach `lost`.
+        if face is None and tid.startswith("object:"):
+            face = _match_object(tid)
+        st["resolved_by"] = (face or {}).get("resolver", "face" if face else None)
 
         if frame_shape is None:
             try:
