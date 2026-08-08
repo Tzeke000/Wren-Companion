@@ -567,8 +567,15 @@ def set_target(g: dict[str, Any], spec: str, *, actuator: Actuator | None = None
 def clear_target(g: dict[str, Any]) -> dict:
     with _LOCK:
         st = _state(g)
+        # Same leak set_target had (found 08-08): without this, `status: idle`
+        # and "not tracking anything" ship alongside the last target's offset,
+        # bbox and confidence. Lower stakes than the set_target case — probe_depth
+        # refuses outright when target is None — but a state dict that reports a
+        # bbox while claiming to track nothing is just untrue.
         st.update({"target": None, "target_label": None, "status": "idle",
-                   "acquire_frames": 0, "miss_frames": 0, "since_ts": time.time()})
+                   "acquire_frames": 0, "miss_frames": 0, "since_ts": time.time(),
+                   "offset": None, "confidence": None, "last_bbox": None,
+                   "depth_hint": None, "resolved_by": None})
         _persist(g, st, _actuator(g))
         return {"ok": True, "state": dict(st)}
 
