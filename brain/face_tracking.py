@@ -68,7 +68,8 @@ def _state(g: dict[str, Any]) -> dict[str, Any]:
 
 
 def update(g: dict[str, Any], *, recognized_person_id: str | None,
-           similarity: float | None = None, frame_ts: float | None = None) -> dict[str, Any]:
+           similarity: float | None = None, frame_ts: float | None = None,
+           faces_present: bool | None = None) -> dict[str, Any]:
     """Called per frame from the face-recognition pipeline. Returns a status
     dict including whether a new-person promotion fired this frame.
 
@@ -76,10 +77,32 @@ def update(g: dict[str, Any], *, recognized_person_id: str | None,
                             if no face / unknown face).
     `similarity`: best-match similarity score from InsightFace (optional;
                   used as a confidence input).
+    `faces_present`: whether the detector actually saw a face this frame.
+
+    WHY faces_present EXISTS (added 2026-08-07, before this was ever wired live):
+    the original code treated "unknown face" and "no face at all" as the same
+    input — see the old comment "Unknown face (or no face at all)". The live
+    capture loop reports person_id="unknown" for an EMPTY FRAME, so wiring this
+    up verbatim meant 12 seconds of an empty room would fire a new-person
+    promotion, write "There's an unknown person here" into my inner monologue,
+    and log an audit row for a person who does not exist. Pass faces_present
+    explicitly and nobody gets invented. None = unknown, preserves old behaviour
+    for the legacy callers.
     """
     if frame_ts is None:
         frame_ts = time.time()
     out: dict[str, Any] = {"promoted_new_person": False}
+
+    if faces_present is False:
+        # Nobody in frame. Not an unknown person — an empty room. Clear any
+        # in-flight candidacy so a person who leaves mid-jitter and a different
+        # person who arrives later never merge into one 12-second candidate.
+        with _TRACK_LOCK:
+            st = _state(g)
+            st["candidate_unknown"] = False
+            st["candidate_unknown_since_ts"] = 0.0
+        out["status"] = "no_face"
+        return out
 
     persistence = float(_cfg("temporal_filter", "unknown_persistence_seconds", default=12.0))
     cooldown = float(_cfg("temporal_filter", "promotion_cooldown_seconds", default=300.0))
@@ -144,6 +167,36 @@ def update(g: dict[str, Any], *, recognized_person_id: str | None,
     return out
 
 
+def tick_from_capture(g: dict[str, Any], face_results: Any = None,
+                      recognized_person_id: str | None = None,
+                      similarity: float | None = None,
+                      frame_ts: float | None = None) -> dict[str, Any]:
+    """THE hook the live video-capture loop calls. Takes raw loop state, does the
+    gating, calls update(). Never raises.
+
+    Wired into iris_runtime._iris_video_capture_loop 2026-08-07 — before that,
+    `update()` had never once run in the Iris runtime. Its only live-looking call
+    site was in brain/background_ticks.py, which is only reachable from
+    avaagent.py, which has not run since this became Iris's harness. So the whole
+    unknown-person promotion path was dead code that read as a feature.
+
+    The loop passes `g["_face_results"]` straight in; presence is derived HERE
+    rather than in the loop so the empty-room gate can be tuned by hot-swapping
+    this function instead of restarting the runtime. Keep it module-level and
+    closure-free — brain_hot_swap refuses closures.
+    """
+    try:
+        n = len(face_results) if face_results is not None else 0
+        pid = recognized_person_id
+        if pid == "unknown":
+            pid = None
+        return update(g, recognized_person_id=pid, similarity=similarity,
+                      frame_ts=frame_ts, faces_present=n > 0)
+    except Exception as e:
+        return {"promoted_new_person": False, "status": "error",
+                "error": repr(e)[:200]}
+
+
 def _on_promotion(g: dict[str, Any], temp_id: str, ts: float) -> None:
     """Side-effects when a new-person promotion fires:
     - Append to inner monologue.
@@ -162,15 +215,24 @@ def _on_promotion(g: dict[str, Any], temp_id: str, ts: float) -> None:
     except Exception as e:
         print(f"[face_tracking] inner_monologue note skipped: {e!r}")
 
+    # The signal bus. This block used to import `publish, SIGNAL_PERSON_ONBOARDED`
+    # from brain.signal_bus — NEITHER NAME HAS EVER EXISTED there (verified
+    # 2026-08-07: the module exposes SignalBus.fire / get_signal_bus /
+    # bootstrap_signal_bus and no module-level publish). So the import always
+    # raised, publish was always None, and the fire was silently skipped inside a
+    # bare `except: pass`. A dead code path that looked live for months, which is
+    # the more dangerous kind. Using the real API now.
     try:
-        from brain.signal_bus import publish, SIGNAL_PERSON_ONBOARDED  # may not exist; falls through
-    except Exception:
-        publish = None  # type: ignore
-    try:
-        if publish is not None:
-            publish(g, "SIGNAL_NEW_PERSON_DETECTED", {"temp_id": temp_id, "first_seen_ts": ts})
-    except Exception:
-        pass
+        bus = g.get("_signal_bus")
+        if bus is None:
+            from brain.signal_bus import get_signal_bus
+            bus = get_signal_bus()
+        if bus is not None:
+            bus.fire("new_person_detected",
+                     data={"temp_id": temp_id, "first_seen_ts": ts},
+                     priority="medium")
+    except Exception as e:
+        print(f"[face_tracking] signal fire skipped: {e!r}")
 
     # Audit trail
     try:

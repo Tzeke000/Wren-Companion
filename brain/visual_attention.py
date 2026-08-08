@@ -665,6 +665,62 @@ def probe_depth(g: dict[str, Any]) -> dict:
     return r
 
 
+def probe_objects(g: dict[str, Any] | None = None, prompts: Any = None,
+                  threshold: float = 0.05, max_results: int = 12,
+                  max_age_sec: float = 2.0) -> dict:
+    """Open-vocabulary "what is in front of me right now" — OWL-ViT on the webcam.
+
+    Sibling of probe_depth, same discipline: lazy heavy import, one shared frame
+    from frame_store, and a REFUSAL rather than a guess when the frame is stale.
+
+    Why this exists (2026-08-07): brain/vector_owl.py has been sitting complete
+    with its model already downloaded, reachable only through the robot path in
+    vector_session_tool._body_detect — which grabs a frame off Vector's camera.
+    Vector has been stranded and dark since 07-28 and its nerves are parked, so
+    that path silently falls back to a stale jpg on disk. The detector was fine;
+    it was pointed at a dead eye. Nothing about it is robot-specific (measured:
+    zero robot imports in the module), so it just needed the live frame.
+
+    Deliberately additive: the robot entry point is left untouched so OWL-ViT on
+    Vector's camera still works when he's back.
+
+    Unlike depth, this is NOT anchored to the attention target — it answers "what
+    is out there", which is how you FIND something to attend to. No target needed.
+    """
+    if prompts is None or (isinstance(prompts, (list, tuple)) and not prompts):
+        return {"ok": False, "error": "no prompts — open-vocabulary detection "
+                                      "needs to be told what to look for"}
+    try:
+        from brain import frame_store, vector_owl
+    except Exception as e:
+        return {"ok": False, "error": f"object detection unavailable: {e!r}"}
+    res = frame_store.get_buffered_frame(max_age_sec=max_age_sec)
+    if res.frame is None:
+        return {"ok": False, "error": f"no fresh frame ({res.freshness}) — won't "
+                                      f"report what's in front of me from a "
+                                      f"stale view"}
+    t0 = time.time()
+    r = vector_owl.detect(res.frame, prompts, threshold=threshold,
+                          max_results=max_results, bgr=True)
+    # vector_owl.infer_s times only the forward pass; with the PIL image-processor
+    # backend (no torchvision in this venv) preprocessing is CPU-side and real.
+    r["wall_s"] = round(time.time() - t0, 3)
+    r["source"] = "webcam"
+    r["frame_age_s"] = getattr(res, "age_sec", None)
+    if r.get("ok") and g is not None:
+        with _LOCK:
+            st = _state(g)
+            st["last_objects"] = {
+                "prompts": prompts if isinstance(prompts, list) else str(prompts),
+                "count": r.get("count"),
+                "top": [{"label": o.get("label"), "score": o.get("score"),
+                         "where": o.get("where"), "band": o.get("band")}
+                        for o in (r.get("objects") or [])[:5]],
+                "ts": time.time()}
+            _persist(g, st, _actuator(g))
+    return r
+
+
 def attention_cost(g: dict[str, Any] | None = None) -> dict:
     """What am I giving up by looking where I'm looking?
 

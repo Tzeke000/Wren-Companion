@@ -196,7 +196,12 @@ PERCEPTION_WAKE_SIGNALS = set(
 PERCEPTION_LEDGER_SIGNALS = set(
     s.strip() for s in os.environ.get(
         "IRIS_PERCEPTION_LEDGER_SIGNALS",
-        "face_appeared,face_lost,expression_changed,attention_changed,unknown_capture").split(",")
+        # new_person_detected added 2026-08-07: brain/face_tracking's promotion
+        # signal. Without it in this set, the promotion fires into the bus and
+        # nothing ever reads it — the signal existed but had no consumer, same
+        # dead-path-that-looks-live shape as the broken publish import it replaced.
+        "face_appeared,face_lost,expression_changed,attention_changed,unknown_capture,"
+        "new_person_detected").split(",")
     if s.strip()
 ) | PERCEPTION_WAKE_SIGNALS
 # --- Presence hysteresis (built 2026-06-29 from the flicker self-test, Zeke's spec) --------
@@ -1041,6 +1046,15 @@ def _describe_perception(sig):
                 + " photos of " + str(data.get("unknown_count") or "an") + " unknown person(s)"
                 + " in frame alongside " + known + " - saved to " + str(data.get("dir") or "faces/_drafts/")
                 + ". Suggestion: consider staging a draft profile and asking Zeke (or them) who they are.")
+    if stype == "new_person_detected":
+        # brain/face_tracking promoted a face that stayed unknown for the full
+        # persistence window. Deliberately phrased as an OBSERVATION, not an
+        # instruction: it is somebody I do not recognise, which is a fact, and
+        # what to do about it is mine to decide. Gated on a real face being in
+        # frame upstream, so this is never an empty room.
+        return ("Someone I don't recognise has been in view long enough to be "
+                "worth tracking (temp id " + str(data.get("temp_id") or "?")
+                + "). Nobody has told me who they are.")
     if stype == "expression_changed":
         expr = str(data.get("expression") or "").strip()
         return "Expression changed" + ((" to " + expr) if expr else "") + "."

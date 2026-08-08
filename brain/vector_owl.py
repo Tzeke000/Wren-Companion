@@ -1,4 +1,13 @@
-"""vector_owl.py — open-vocabulary object detection for my Vector eyes (2026-07-15).
+"""vector_owl.py — open-vocabulary object detection (2026-07-15).
+
+NOT ROBOT-SPECIFIC, despite the filename — this module has zero robot imports and
+takes whatever image you hand it. It was written for Vector's camera and for three
+weeks was reachable ONLY through the robot path (vector_session_tool._body_detect),
+which since 07-28 has been silently detecting against a stale jpg on disk because
+Vector is stranded and dark. The detector was fine; it was pointed at a dead eye.
+Live-webcam entry point added 2026-08-07: brain/visual_attention.probe_objects()
+-> the `attention_objects` registry tool. The robot path is left intact for when
+he's back.
 
 MORPHED from kingardor/vector-advanced-ai's src/owl.py (the one genuinely novel
 capability in the whole Vector open-source ecosystem — both research agents ranked
@@ -10,7 +19,15 @@ dependency-light, works on my hardware today.
 Why it matters: mediapipe EfficientDet (my `vector_detect`) only knows fixed COCO
 classes — "cone"/"charger"/"Vector's cube" aren't good COCO labels. OWL-ViT lets
 me detect by TEXT PROMPT ("an orange traffic cone", "a small robot", "a cube"), so
-I can look for exactly the thing I'm navigating to. ~0.7s/frame on the 3060.
+I can look for exactly the thing I'm navigating to.
+
+LATENCY, MEASURED 2026-08-07 on the live webcam (the old "~0.7s/frame" claim in
+this docstring was never measured and is ~8x too pessimistic): warm calls are
+**40ms forward pass, 89-176ms end-to-end** including PIL preprocessing and
+post-processing, on the tower's RTX 3060 with transformers' PIL image-processor
+backend (no torchvision in this venv, deliberately — see brain/depth_sense.py).
+The FIRST call pays ~15s of model load and CUDA warmup; budget for that once per
+process, or call vector_owl.unload() when done and pay it again next time.
 
 HONEST LIMIT (verified 2026-07-15 on a real dim body frame): it correctly found the
 lamp but the dim feed (brightness ~49) hid the small dark cones. Low-light research:
@@ -62,15 +79,52 @@ def _band(h_frac: float) -> str:
     return "near" if h_frac > 0.33 else ("far" if h_frac < 0.13 else "mid")
 
 
+def unload() -> dict:
+    """Drop the model and free its ~600MB. Symmetry with depth_sense.unload().
+
+    Perception already sits near 5GB of the 3060's 12GB, and this module had no
+    way to give VRAM back — a resident model with no unload path is a leak you
+    only notice when something else fails to allocate.
+    """
+    with _lock:
+        had = _state["model"] is not None
+        _state.update(model=None, proc=None, device=None)
+    if had:
+        try:
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+    return {"ok": True, "was_loaded": had, "freed_mb_approx": 600 if had else 0}
+
+
 def detect(image, prompts, threshold: float = 0.05, bright: bool = False,
-           max_results: int = 12) -> dict:
-    """Open-vocab detect. `image` = a PIL.Image or a path str. `prompts` = list of
-    text queries. Returns {ok, count, objects:[{label,score,box[xyxy],where,band,
-    center}], infer_s}. Objects sorted by score desc."""
+           max_results: int = 12, bgr: bool = True) -> dict:
+    """Open-vocab detect. `image` = a PIL.Image, a path str, or a numpy ndarray.
+    `prompts` = list of text queries. Returns {ok, count, objects:[{label,score,
+    box[xyxy],where,band,center}], infer_s}. Objects sorted by score desc.
+
+    ndarray inputs come from brain/frame_store.get_buffered_frame(), which hands
+    back cv2's **BGR** channel order — hence `bgr=True` by default. This matters
+    more than it looks: OWL-ViT is CLIP-text-conditioned, so feeding it swapped
+    channels does not raise, it just quietly degrades every prompt match. Pass
+    bgr=False only for an ndarray you know is already RGB.
+    """
     try:
         from PIL import Image
         if isinstance(image, (str, Path)):
             pil = Image.open(str(image)).convert("RGB")
+        elif hasattr(image, "shape") and not hasattr(image, "convert"):
+            # numpy ndarray (cv2 frame). .convert() would AttributeError here and
+            # the blanket except below would swallow it into a soft {ok: False}.
+            import numpy as np
+            arr = np.asarray(image)
+            if arr.ndim == 3 and arr.shape[2] >= 3:
+                arr = arr[:, :, 2::-1] if bgr else arr[:, :, :3]
+            pil = Image.fromarray(arr).convert("RGB")
         else:
             pil = image.convert("RGB")
         if bright:

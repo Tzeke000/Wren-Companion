@@ -4148,6 +4148,32 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                                              priority="medium")
                         except Exception:
                             pass
+                        # ── Temporal face filter (wired 2026-08-07) ──────────
+                        # brain/face_tracking.update() existed since May and had
+                        # NEVER run in this runtime: its only caller lives in
+                        # brain/background_ticks.py, reachable only from
+                        # avaagent.py, which Iris does not run. So "an unknown
+                        # face that persists 12s gets promoted to a tracked
+                        # person" was a feature on paper only.
+                        # Imported per-iteration on purpose so the gate can be
+                        # tuned via brain_hot_swap without restarting the
+                        # runtime (a running while-loop keeps its old code
+                        # object, so the CALL SITE can never be hot-swapped —
+                        # only what it calls into).
+                        try:
+                            from brain import face_tracking as _ft
+                            _ftr = _ft.tick_from_capture(
+                                g, face_results=results,
+                                recognized_person_id=g.get("_recognized_person_id"),
+                                similarity=g.get("_recognized_confidence"),
+                                frame_ts=time.time())
+                            g["_face_tracking_last"] = _ftr
+                            if _ftr.get("promoted_new_person"):
+                                print(f"[iris_video] new person promoted: "
+                                      f"{_ftr.get('temp_id')}", flush=True)
+                        except Exception as _fte:
+                            print(f"[iris_video] face_tracking tick error: {_fte!r}",
+                                  file=sys.stderr, flush=True)
                     except Exception as _ie:
                         print(f"[iris_video] insight analyze error: {_ie!r}", file=sys.stderr, flush=True)
 
