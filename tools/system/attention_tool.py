@@ -114,6 +114,30 @@ def _attention_depth_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, 
         return {"ok": False, "error": str(e)[:300]}
 
 
+def _attention_objects_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Open-vocabulary "what's in front of me" — OWL-ViT on the LIVE webcam.
+
+    params: prompts (comma string or list, required), threshold (default 0.05),
+            max_results (12), unload ("1" to free the ~600MB after answering).
+
+    Was previously reachable only through the robot path, which since 07-28 has
+    been reading a stale jpg off disk because Vector is dark. Same detector, live
+    eye. First call pays a one-time model load.
+    """
+    try:
+        from brain import visual_attention as va
+        prompts = params.get("prompts") or params.get("labels") or params.get("q")
+        r = va.probe_objects(g, prompts,
+                             threshold=float(params.get("threshold") or 0.05),
+                             max_results=int(params.get("max_results") or 12))
+        if str(params.get("unload") or "").lower() in ("1", "true", "yes"):
+            from brain import vector_owl
+            r["unloaded"] = vector_owl.unload()
+        return r
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
 def _depth_status_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     try:
         from brain import depth_sense
@@ -165,6 +189,13 @@ try:
                   "What I'm giving up by looking where I'm looking. A head "
                   "that turns can only watch one thing.",
                   1, _attention_cost_fn)
+    register_tool("attention_objects",
+                  "Open-vocabulary object detection on the LIVE webcam: give it "
+                  "prompts ('mug, keyboard, dog') and it reports what it finds, "
+                  "where in frame, and a rough near/mid/far band. No target "
+                  "needed — this is how I find something worth attending to. "
+                  "Pass unload=1 to give the ~600MB back afterwards.",
+                  1, _attention_objects_fn)
     register_tool("attention_depth",
                   "How near is the thing I'm tracking, and is it approaching? "
                   "RELATIVE ordering only — never a distance in feet. Needs a "
