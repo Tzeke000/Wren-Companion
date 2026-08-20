@@ -147,8 +147,10 @@ def _pick_person(g: dict[str, Any]) -> str | None:
         pid = str(f.get("person_id") or "").lower()
         if pid == "zeke":
             return "zeke"
-        if pid.startswith("unknown"):
+        if pid.startswith("unknown_"):
             unknown = unknown or pid.replace("unknown_", "person")
+        elif pid == "unknown":
+            pass  # bare 'unknown' = recognition still settling, not a target
         elif pid:
             best = best or pid
     return best or unknown  # None while recognition is still in flight
@@ -172,7 +174,11 @@ def _sentry_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -
                 # the running loop (people outrank things, always).
                 if str(st.get("last_target") or "").startswith("object:"):
                     person = _pick_person(g)
-                    if person:
+                    # Upgrade only to NAMED people: an unlabeled or personN
+                    # face is not better than a solid object lock — wait for
+                    # recognition. (Live 2026-08-20: upgraded to bare
+                    # 'unknown' mid-warm-up; same race, one branch further in.)
+                    if person and not person.startswith("person"):
                         try:
                             from brain import visual_attention as va2
                             va2.set_target(g, person)
