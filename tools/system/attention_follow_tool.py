@@ -239,6 +239,10 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
 
     while not stop.is_set():
         try:
+            # A gesture (nod/shake/glide) temporarily owns the gimbal.
+            if time.time() < float(st8.get("gesture_until") or 0.0):
+                stop.wait(period_s)
+                continue
             st8["cycles"] += 1
             res = va.observe(g)
             state = g.get("_attention_state_obj") or {}
@@ -272,6 +276,11 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
                     act.home()
                     st8["mode"] = "lost_hold"
                     st8["misses"] = _LOST_AFTER_MISSES
+                    # Cooldown (2026-08-20 01:4x): without it the loop churned
+                    # chase->abort->search->refind->chase (30 searches in min-
+                    # utes = the "eyes doing weird things"). After an abort,
+                    # sit at home and just watch for a while.
+                    st8["runaway_cooldown_until"] = time.time() + 60.0
                     _fire_signal(g, "follow_runaway_aborted",
                                  {"target": state.get("target")})
                     stop.wait(period_s)
@@ -283,6 +292,28 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
                 st8["mode"] = "follow"
                 st8["lost_since"] = None
                 lost_fired = False
+                # ── Wander (2026-08-20, Zeke: "when you get bored, find and
+                # switch to a different one"). UNTESTED-MULTI: built with one
+                # person in the room; needs a second face to prove.
+                if st8.get("wander"):
+                    now = time.time()
+                    st8.setdefault("following_since", now)
+                    span = float(st8.get("interest_span_s") or 240.0)
+                    if now - float(st8["following_since"]) > span:
+                        cur = str(state.get("target_label")
+                                  or state.get("target") or "")
+                        others = {str(f.get("person_id"))
+                                  for f in (g.get("_face_results") or [])
+                                  if f.get("person_id")
+                                  and str(f.get("person_id")) not in (cur, "unknown")}
+                        if others:
+                            hist = st8.setdefault("wander_history", {})
+                            pick = min(others, key=lambda p: hist.get(p, 0.0))
+                            hist[cur] = now
+                            va.set_target(g, pick)
+                            st8["following_since"] = now
+                            _fire_signal(g, "follow_wander_switch",
+                                         {"from": cur, "to": pick})
                 if status == "locked":
                     now = time.time()
                     if now - float(st8.get("_last_sighting_ts") or 0.0) >= _SIGHTING_MIN_GAP_S:
@@ -310,6 +341,7 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
                 should_search = (
                     st8["misses"] >= _LOST_AFTER_MISSES
                     and st8.get("last_seen_bearing")
+                    and time.time() > float(st8.get("runaway_cooldown_until") or 0.0)
                     and (st8.get("mode") != "lost_hold"
                          or time.time() - last_search_ts > _RESEARCH_EVERY_S))
                 if should_search:
@@ -353,7 +385,7 @@ def _attention_follow(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
             return {"ok": True, "running": True, "note": "already following",
                     "cycles": st8.get("cycles")}
         period = float(params.get("period_s") or _DEFAULT_PERIOD_S)
-        period = max(0.8, min(10.0, period))
+        period = max(0.5, min(10.0, period))
         stop = threading.Event()
         t = threading.Thread(target=_loop, args=(g, stop, period),
                              daemon=True, name="attention_follow")
@@ -362,11 +394,108 @@ def _attention_follow(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
         st8["thread"] = t
         st8["period_s"] = period
         st8["started_ts"] = time.time()
+        st8["wander"] = bool(params.get("wander"))
+        if params.get("interest_span_s"):
+            st8["interest_span_s"] = float(params["interest_span_s"])
         t.start()
         return {"ok": True, "running": True, "period_s": period,
                 "target": (g.get("_attention_state_obj") or {}).get("target")}
 
     return {"ok": False, "error": f"unknown action {action!r} — start|stop|status"}
+
+
+# ── Gestures + variable speed (2026-08-20 ~01:1x, Zeke's list) ───────────────
+# The persistent controller makes moves ~40ms, so smooth motion = many small
+# absolute steps. That gives us variable SPEED (the UVC absolute interface has
+# none) and expressive gestures: nod, shake, glide.
+
+def _bearing_of(act) -> tuple[float, float]:
+    b = act.bearing()
+    return float(b.get("pan_deg") or 0.0), float(b.get("tilt_deg") or 0.0)
+
+
+def _smooth_move(act, pan_to: float, tilt_to: float,
+                 speed_deg_s: float = 60.0, step_hz: float = 15.0) -> None:
+    """Glide to a bearing at a chosen speed via interpolated absolute steps."""
+    pan0, tilt0 = _bearing_of(act)
+    dist = max(abs(pan_to - pan0), abs(tilt_to - tilt0))
+    if dist < 0.5:
+        return
+    speed = max(5.0, min(300.0, float(speed_deg_s)))
+    steps = max(1, int((dist / speed) * step_hz))
+    for i in range(1, steps + 1):
+        f = i / steps
+        act.look_at(pan0 + (pan_to - pan0) * f, tilt0 + (tilt_to - tilt0) * f)
+        time.sleep(1.0 / step_hz)
+
+
+def _gesture_guard(g: dict[str, Any], seconds: float) -> None:
+    """Tell the follow loop to keep its hands off the gimbal briefly."""
+    st8 = g.setdefault("_attention_follow", {})
+    st8["gesture_until"] = time.time() + seconds
+
+
+def _attention_gesture(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Expressive head moves: nod (yes), shake (no), glide (variable-speed
+    look). Runs inline (a nod is ~2s). Follow loop pauses corrections while a
+    gesture owns the gimbal, then resumes tracking."""
+    from brain import visual_attention as va
+    act = va.build_actuator()
+    caps = act.capabilities()
+    if not caps.get("can_pan"):
+        return {"ok": False, "error": "no PTZ actuator — cannot gesture"}
+    kind = str(params.get("gesture") or params.get("action") or "").lower()
+    # Zeke's legibility findings (2026-08-20 01:3x, watching the real head):
+    # fewer than 3 reps reads as a PAN, not a gesture — so 3 is the floor.
+    # And tilt needs more amplitude than pan to be visible: nods at 8 deg were
+    # invisible; 16 shows.
+    times = max(3, min(6, int(params.get("times") or 3)))
+    amp = float(params.get("amplitude_deg") or (16 if kind == "nod" else 12))
+    amp = max(3.0, min(25.0, amp))
+    speed = float(params.get("speed_deg_s") or (110.0 if kind == "nod" else 80.0))
+
+    # ★ MEASURED 2026-08-20 01:5x: interpolated micro-steps DON'T WORK for
+    # gestures — commands ~66ms apart overwrite each other before the gimbal
+    # physically travels, so the nod returned ok=True while the head never
+    # visibly moved (Zeke watched it not happen, twice). Gestures now command
+    # the EXTREME and DWELL for physical travel before reversing. Interpolation
+    # stays only in glide, where it makes motion SLOWER than natural, not faster.
+    dwell = float(params.get("dwell_s") or 0.45)
+    if kind == "nod":
+        _gesture_guard(g, times * dwell * 2 + 3)
+        pan0, tilt0 = _bearing_of(act)
+        for _ in range(times):
+            act.look_at(pan0, tilt0 - amp)   # down-stroke (the emphatic one)
+            time.sleep(dwell)
+            act.look_at(pan0, tilt0 + amp * 0.5)
+            time.sleep(dwell)
+        act.look_at(pan0, tilt0)
+        return {"ok": True, "gesture": "nod", "times": times,
+                "amplitude_deg": amp, "dwell_s": dwell}
+    if kind == "shake":
+        _gesture_guard(g, times * dwell * 2 + 3)
+        pan0, tilt0 = _bearing_of(act)
+        for _ in range(times):
+            act.look_at(pan0 + amp, tilt0)
+            time.sleep(dwell)
+            act.look_at(pan0 - amp, tilt0)
+            time.sleep(dwell)
+        act.look_at(pan0, tilt0)
+        return {"ok": True, "gesture": "shake", "times": times,
+                "amplitude_deg": amp, "dwell_s": dwell}
+    if kind == "glide":
+        pan_to = float(params.get("pan_deg") or 0.0)
+        tilt_to = float(params.get("tilt_deg") or 0.0)
+        pan_to = max(_SOFT_PAN_RANGE[0], min(_SOFT_PAN_RANGE[1], pan_to))
+        tilt_to = max(_SOFT_TILT_RANGE[0], min(_SOFT_TILT_RANGE[1], tilt_to))
+        dist = max(abs(pan_to), abs(tilt_to)) + 1
+        _gesture_guard(g, dist / max(5.0, speed) + 3)
+        _smooth_move(act, pan_to, tilt_to, speed)
+        return {"ok": True, "gesture": "glide",
+                "bearing": {"pan_deg": pan_to, "tilt_deg": tilt_to},
+                "speed_deg_s": speed}
+    return {"ok": False,
+            "error": f"unknown gesture {kind!r} — nod | shake | glide"}
 
 
 def _attention_report(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
@@ -415,6 +544,16 @@ register_tool(
     "last-seen sweep (direction-biased), then holds. Never wanders.",
     2,
     _attention_follow,
+)
+
+register_tool(
+    "attention_gesture",
+    "Expressive PTZ head moves: gesture='nod' (yes) | 'shake' (no) | 'glide' "
+    "(variable-speed look: pan_deg, tilt_deg, speed_deg_s 5-300). Optional "
+    "times, amplitude_deg. Follow loop yields the gimbal during a gesture and "
+    "resumes after. Anticipation + settle baked in (Disney timing, v0).",
+    1,
+    _attention_gesture,
 )
 
 register_tool(
