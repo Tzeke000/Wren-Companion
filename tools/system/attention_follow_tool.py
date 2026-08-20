@@ -359,6 +359,19 @@ def _attention_follow(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
     st8 = g.get("_attention_follow") or {}
     running = bool(st8.get("thread") and st8["thread"].is_alive())
 
+    if action == "release_ptz":
+        # Repair lever (2026-08-20 02:0x): the persistent WinRT control
+        # connection can end up holding the video pin after the cv2 stream
+        # drops, locking the capture loop out of its own camera. This closes
+        # the cached MediaCapture so cv2 can reopen; the next PTZ move
+        # re-initializes cleanly.
+        from brain import visual_attention as va
+        try:
+            va.WinRtPtzActuator._drop_controller()
+            return {"ok": True, "released": True}
+        except Exception as e:
+            return {"ok": False, "error": repr(e)}
+
     if action == "status":
         out = {k: v for k, v in st8.items() if k not in ("thread", "stop")}
         out.update({"ok": True, "running": running})

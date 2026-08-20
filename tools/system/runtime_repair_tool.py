@@ -96,6 +96,51 @@ def _wire_voice_input_routes(params: dict[str, Any], g: dict[str, Any]) -> dict[
     return out
 
 
+def _respawn_capture_thread(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """Repair (2026-08-20 02:1x): after a camera USB wedge + replug, the ORIGINAL
+    capture thread's DirectShow state can be poisoned — VideoCapture(0) fails in
+    that thread forever while a fresh process (or thread) opens the device fine.
+    A thread can't be killed, but it can be orphaned: spawn a NEW
+    _iris_video_capture_loop thread (fresh COM apartment, fresh graph); the old
+    one keeps failing its 1s open-retry harmlessly until the next stack restart.
+    Idempotent-ish: refuses if a respawned thread is already alive."""
+    import sys as _sys
+    import threading as _threading
+    out: dict[str, Any] = {"ok": True}
+    prev = g.get("_capture_thread_respawn")
+    if prev is not None and prev.is_alive():
+        return {"ok": True, "note": "respawned capture thread already alive",
+                "thread": prev.name}
+    main = _sys.modules.get("__main__")
+    fn = getattr(main, "_iris_video_capture_loop", None)
+    if fn is None:
+        return {"ok": False,
+                "error": "_iris_video_capture_loop not found on __main__ — "
+                         "is this the iris_runtime worker?"}
+    t = _threading.Thread(target=fn, args=(g,), daemon=True,
+                          name="iris_video_capture_respawn")
+    t.start()
+    g["_capture_thread_respawn"] = t
+    out["thread"] = t.name
+    out["note"] = ("fresh capture thread started; old one will keep failing "
+                   "its open-retry until the next stack restart (harmless, "
+                   "logs noise)")
+    return out
+
+
+register_tool(
+    name="respawn_capture_thread",
+    description=(
+        "Repair: spawn a FRESH camera capture thread in the runtime worker after "
+        "a USB wedge+replug poisons the original thread's DirectShow state "
+        "(device opens fine externally but the old thread can't). Old thread is "
+        "orphaned harmlessly. Tier 2."
+    ),
+    tier=2,
+    handler=_respawn_capture_thread,
+)
+
+
 def _eyes_rest(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """Pause/resume the GPU face-detection step of the always-on camera loop
     (2026-07-10, born while Zeke gamed: background_ticks._video_frame_capture_thread
