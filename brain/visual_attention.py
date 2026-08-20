@@ -687,6 +687,20 @@ def _match_object(target_id: str, *, ttl_s: float = 1.0,
     if not want:
         return None
     rec = None
+    # ── fast path (2026-08-20): tracking-by-detection via brain/object_lock ──
+    # OWL-ViT acquires once, TrackerVit (~12ms CPU) follows frame-to-frame,
+    # detector revalidates every few seconds. Any failure in the lock layer
+    # returns None here and we fall through to the original per-cycle OWL-ViT
+    # path below, so this can only ever be faster, never blinder.
+    try:
+        from brain import object_lock
+        min_score = float(_tune("attention_object_min_score", 0.10))
+        rec = object_lock.resolve(target_id, want, min_score=min_score)
+        if rec is not None:
+            _OBJ_CACHE[target_id] = {"ts": now, "rec": rec}
+            return rec
+    except Exception as e:
+        _log(f"object_lock unavailable for {target_id!r} (falling back): {e!r}")
     try:
         min_score = float(_tune("attention_object_min_score", 0.10))
         from brain import frame_store, vector_owl
