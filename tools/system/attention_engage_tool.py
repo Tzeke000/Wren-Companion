@@ -167,6 +167,20 @@ def _sentry_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -
             if _follow_running(g):
                 st["mode"] = "yielding"   # follow loop owns the eyes
                 prev = None               # scene will have changed; re-baseline
+                # Priority upgrade: if we engaged a watchlist OBJECT and a
+                # person has since been recognized, the person wins — retarget
+                # the running loop (people outrank things, always).
+                if str(st.get("last_target") or "").startswith("object:"):
+                    person = _pick_person(g)
+                    if person:
+                        try:
+                            from brain import visual_attention as va2
+                            va2.set_target(g, person)
+                            st["last_target"] = person
+                            st["upgrades"] = st.get("upgrades", 0) + 1
+                            _log(f"sentry upgraded object -> {person!r}")
+                        except Exception as e:
+                            _log(f"sentry upgrade failed: {e!r}")
                 continue
             # gesture window: a nod/shake RETURNS to its start bearing, so
             # bearing-compare alone cannot see it (found live 2026-08-20 —
@@ -204,6 +218,13 @@ def _sentry_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -
 
             # ── policy: who/what deserves the eyes ──
             target = _pick_person(g)
+            if target is None and (g.get("_face_results") or []):
+                # Faces present but recognition still in flight: do NOT fall
+                # through to the watchlist — a person outranks any object, so
+                # wait a sample for the label. (Found live 2026-08-20: Zeke
+                # walked in carrying his backpack; the sentry engaged
+                # 'object:backpack' while his face was still unlabeled.)
+                continue
             if target is None and st.get("watchlist"):
                 try:
                     from brain import object_lock, vector_owl
