@@ -112,6 +112,11 @@ _SEARCH_PAN_STEPS = (0.0, 25.0, -25.0, 50.0, -50.0, 80.0, -80.0, 115.0, -115.0)
 _SEARCH_TILT_STEPS = (0.0, -25.0, 15.0)   # relative to last-seen tilt
 _SEARCH_ROUNDS = 2            # full sweeps before giving up -> hold at last-seen
 _RESEARCH_EVERY_S = 45.0      # while lost-held, retry a sweep this often
+_LOST_YIELD_S = 300.0         # lost this long WITH sentry armed -> stop the
+                              # loop, home the head, hand the room back to the
+                              # motion gate (wired 2026-08-20 pm: without this,
+                              # a departed person left the eyes sweeping every
+                              # 45s forever and the sentry never re-armed)
 
 
 def _any_face(g: dict[str, Any]) -> dict | None:
@@ -267,10 +272,21 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
                 hist = st8.setdefault("_chase_hist", [])
                 hist.append(dx)
                 del hist[:-_RUNAWAY_N]
+                # Spread test added 2026-08-20 pm after FIVE false aborts in
+                # one day, the last one caught in the signal ledger mid-abort:
+                # legit pursuit of a walking person also produces N
+                # same-direction non-shrinking errors (he outruns the
+                # correction step). The discriminator the phantom actually
+                # has: it is GLUED to my own view, so its offset barely
+                # changes no matter what the head does — near-zero spread.
+                # A walking person's offset fluctuates (gait, correction
+                # catch-up: ledger showed 0.41 -> -0.62 within seconds).
+                spread = (max(hist) - min(hist)) if hist else 1.0
                 if (len(hist) == _RUNAWAY_N
                         and all(abs(v) > 0.4 for v in hist)
                         and all((v > 0) == (hist[0] > 0) for v in hist)
-                        and abs(hist[-1]) >= abs(hist[0]) - 0.05):
+                        and abs(hist[-1]) >= abs(hist[0]) - 0.05
+                        and spread < 0.10):
                     st8["runaways"] = int(st8.get("runaways") or 0) + 1
                     hist.clear()
                     act.home()
@@ -324,6 +340,20 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
                                        or state.get("target") or "?"),
                             "pan": round(float(b_now.get("pan_deg") or 0.0), 1),
                             "tilt": round(float(b_now.get("tilt_deg") or 0.0), 1)})
+                        # Depth at sighting cadence (wired 2026-08-20 pm):
+                        # probe_depth was "call it when you want to know" —
+                        # but its TREND needs 3+ readings, so approach/recede
+                        # was never actually answerable. While locked, one
+                        # ~40ms probe per sighting (10s) keeps the trend live
+                        # for free; when not following, nothing runs.
+                        try:
+                            d = va.probe_depth(g)
+                            if d.get("ok") and d.get("trend"):
+                                st8["depth_trend"] = {"trend": d["trend"],
+                                                      "band": d.get("band"),
+                                                      "ts": now}
+                        except Exception:
+                            pass
                 if abs(dx) > _DEADBAND or abs(dy) > _DEADBAND:
                     correct_toward(dx, dy)
                 st8["misses"] = 0
@@ -338,6 +368,22 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
                                       "last_offset": prev_offset,
                                       "last_bearing": st8.get("last_seen_bearing")})
                         lost_fired = True
+                # Yield to sentry: lost long enough + the motion gate is armed
+                # -> this loop is the WRONG idle mode (45s blind sweeps vs a
+                # cheap gate that reacts in 1.6s). Home, stop, hand over.
+                sentry = g.get("_attention_sentry") or {}
+                sentry_alive = bool((sentry.get("thread") is not None)
+                                    and sentry["thread"].is_alive())
+                if (st8.get("lost_since")
+                        and time.time() - float(st8["lost_since"]) > _LOST_YIELD_S
+                        and sentry_alive):
+                    act.home()
+                    st8["mode"] = "yielded_to_sentry"
+                    _fire_signal(g, "follow_yielded_to_sentry",
+                                 {"target": state.get("target"),
+                                  "lost_for_s": round(
+                                      time.time() - float(st8["lost_since"]))})
+                    break
                 should_search = (
                     st8["misses"] >= _LOST_AFTER_MISSES
                     and st8.get("last_seen_bearing")

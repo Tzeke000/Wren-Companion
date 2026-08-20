@@ -69,6 +69,15 @@ def _attention_engage(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
     try:
         obs = va.observe(g)
         st = obs.get("state") or {}
+        # observe() has acquire hysteresis, so a fresh target often reports no
+        # bbox on the very first cycle even though resolution SUCCEEDED (found
+        # live 2026-08-20: engage on 'object:computer monitor' said
+        # acquired_now=false while the lock was demonstrably holding the box).
+        # Run a second observe if the first came back empty — by then the
+        # lock/face record exists and the state carries it.
+        if not st.get("last_bbox"):
+            obs = va.observe(g)
+            st = obs.get("state") or {}
         if st.get("last_bbox"):
             seen = {"bbox": st.get("last_bbox"),
                     "confidence": st.get("confidence"),
