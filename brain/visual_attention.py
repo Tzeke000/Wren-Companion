@@ -324,6 +324,212 @@ class V4L2PtzActuator(Actuator):
                 "commanded": sets}
 
 
+class WinRtPtzActuator(Actuator):
+    """EMEET PIXY via WinRT MediaCapture VideoDeviceController — the Windows
+    interim home (camera on the tower until the server exists).
+
+    ★ VERIFIED ON HARDWARE 2026-08-19: pan/tilt/zoom capabilities read live,
+    pan physically confirmed by frame comparison at -60/+60/home, and control
+    confirmed to work WHILE another process (the live capture loop, cv2 DSHOW)
+    streams the same camera. WinRT exposes PTZ in DEGREES (pan -150..150,
+    tilt -90..90, step 1) and zoom as 100..150 (= 1.0x..1.5x digital).
+
+    Design: control connections are SHORT-LIVED — init MediaCapture, set the
+    value, close. Position persists on the device. This costs ~0.3-1s per
+    move, which is fine for intent-level looking; it is NOT a 30Hz path.
+    Smooth pursuit needs the HID 0x63 jog protocol (not built).
+    """
+
+    name = "winrt_ptz"
+
+    PAN_LIMIT_DEG = 150.0
+    TILT_LIMIT_DEG = 90.0
+    # ★ MEASURED SCAR 2026-08-20: commanding tilt to the full -90 parked the
+    # head in the Pixy's PRIVACY POSE (lens into base). Every frame after was
+    # pure black, position commands were accepted-but-blind, and the only
+    # recovery was releasing + reopening the capture stream (body pause/resume).
+    # So the actuator refuses to go below TILT_FLOOR on its own authority.
+    TILT_FLOOR_DEG = -60.0
+    ZOOM_MIN, ZOOM_MAX = 1.0, 1.5
+
+    def __init__(self, device_match: str | None = None) -> None:
+        self.device_match = (device_match
+                             or os.environ.get("IRIS_PTZ_NAME", "PIXY")).upper()
+        self._last = {"pan_deg": 0.0, "tilt_deg": 0.0, "zoom": 1.0}
+        self._avail: bool | None = None  # probe cache
+
+    # ── async plumbing ──────────────────────────────────────────────────
+    # 2026-08-20 SPEED UPGRADE (Zeke: "so your tool calls are fast"): only
+    # MediaCapture INITIALIZATION is async; once initialized, try_set_value /
+    # try_get_value on the controller are plain synchronous calls. So we keep
+    # ONE control connection open per process (class-level) and moves cost
+    # milliseconds instead of ~0.5-1s. Self-heals: any controller error tears
+    # down the cached connection and reinitializes once.
+    _CTL_LOCK = threading.Lock()
+    _ctl_mc = None          # cached MediaCapture (control connection)
+    _ctl_vdc = None         # its video_device_controller
+
+    @staticmethod
+    def _run(coro, timeout: float = 10.0):
+        """Run a winsdk coroutine from sync code, safe from any thread
+        (fresh event loop in a worker thread; never touches a running loop)."""
+        import asyncio
+        box: dict = {}
+
+        def worker() -> None:
+            try:
+                box["result"] = asyncio.run(coro)
+            except Exception as e:  # noqa: BLE001 — carried to caller
+                box["error"] = e
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            raise TimeoutError(f"winrt ptz call exceeded {timeout}s")
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
+
+    async def _open_controller(self):
+        """Initialize a control-only MediaCapture for the matched camera."""
+        import winsdk.windows.devices.enumeration as wde
+        import winsdk.windows.media.capture as wmc
+        devs = await wde.DeviceInformation.find_all_async(
+            wde.DeviceClass.VIDEO_CAPTURE)
+        match = [d for d in devs if self.device_match in d.name.upper()]
+        if not match:
+            raise RuntimeError(f"no video device matching {self.device_match!r}")
+        mc = wmc.MediaCapture()
+        settings = wmc.MediaCaptureInitializationSettings()
+        settings.video_device_id = match[0].id
+        try:
+            # Control-only: don't touch the mic (the mouth pipeline may want it).
+            settings.streaming_capture_mode = wmc.StreamingCaptureMode.VIDEO
+        except Exception:
+            pass
+        await mc.initialize_async(settings)
+        return mc
+
+    def _controller(self):
+        """Cached controller, initializing on first use (thread-safe)."""
+        cls = WinRtPtzActuator
+        with cls._CTL_LOCK:
+            if cls._ctl_vdc is not None:
+                return cls._ctl_vdc
+            mc = self._run(self._open_controller())
+            cls._ctl_mc = mc
+            cls._ctl_vdc = mc.video_device_controller
+            return cls._ctl_vdc
+
+    @classmethod
+    def _drop_controller(cls) -> None:
+        with cls._CTL_LOCK:
+            try:
+                if cls._ctl_mc is not None:
+                    cls._ctl_mc.close()
+            except Exception:
+                pass
+            cls._ctl_mc = None
+            cls._ctl_vdc = None
+
+    def _with_controller_sync(self, fn):
+        """Apply fn(vdc) on the persistent controller; one reinit on failure."""
+        try:
+            return fn(self._controller())
+        except Exception:
+            self._drop_controller()
+            return fn(self._controller())
+
+    # ── Actuator interface ──────────────────────────────────────────────
+    def available(self) -> bool:
+        if not sys.platform.startswith("win"):
+            return False
+        if self._avail is not None:
+            return self._avail
+        try:
+            import winsdk.windows.media.capture  # noqa: F401 — probe import
+
+            def probe(vdc) -> bool:
+                return bool(vdc.pan.capabilities.supported)
+
+            self._avail = bool(self._with_controller_sync(probe))
+        except Exception as e:
+            _log(f"winrt_ptz probe failed: {e!r}")
+            self._avail = False
+        return self._avail
+
+    def capabilities(self) -> dict:
+        return {"can_pan": True, "can_tilt": True, "can_zoom": True,
+                "pan_range_deg": (-self.PAN_LIMIT_DEG, self.PAN_LIMIT_DEG),
+                "tilt_range_deg": (self.TILT_FLOOR_DEG, self.TILT_LIMIT_DEG),
+                "zoom_range": (self.ZOOM_MIN, self.ZOOM_MAX),
+                "step_deg": 1.0,
+                "absolute_only": True,
+                "verified_on_hardware": True,
+                "note": "EMEET PIXY over WinRT (Windows interim); tilt floored "
+                        "at -60 (privacy-pose trap below); intent-level moves "
+                        "only (~0.5s per move), not 30Hz"}
+
+    def bearing(self) -> dict:
+        try:
+            def read(vdc):
+                out = {}
+                for nm, attr in (("pan_deg", "pan"), ("tilt_deg", "tilt")):
+                    ok, val = getattr(vdc, attr).try_get_value()
+                    out[nm] = float(val) if ok else None
+                okz, z = vdc.zoom.try_get_value()
+                out["zoom"] = float(z) / 100.0 if okz else None
+                return out
+
+            got = self._with_controller_sync(read)
+            if got.get("pan_deg") is None and got.get("tilt_deg") is None:
+                raise RuntimeError("no confirmed values")
+            got = {k: (v if v is not None else self._last.get(k, 0.0))
+                   for k, v in got.items()}
+            got["confirmed"] = True
+            return got
+        except Exception:
+            out = dict(self._last)
+            out["confirmed"] = False
+            return out
+
+    def look_at(self, pan_deg: float, tilt_deg: float | None = None,
+                zoom: float | None = None) -> dict:
+        if not self.available():
+            return {"ok": False, "moved": False,
+                    "reason": f"winrt PTZ unavailable (platform={sys.platform})"}
+        pan_deg = max(-self.PAN_LIMIT_DEG, min(self.PAN_LIMIT_DEG, float(pan_deg)))
+        if tilt_deg is not None:
+            # Floor at TILT_FLOOR_DEG, not the hardware -90: full tilt-down is
+            # the privacy pose (black frames until stream reopen). See scar note.
+            tilt_deg = max(self.TILT_FLOOR_DEG,
+                           min(self.TILT_LIMIT_DEG, float(tilt_deg)))
+        if zoom is not None:
+            zoom = max(self.ZOOM_MIN, min(self.ZOOM_MAX, float(zoom)))
+
+        def act(vdc) -> dict:
+            results = {"pan": vdc.pan.try_set_value(float(round(pan_deg)))}
+            if tilt_deg is not None:
+                results["tilt"] = vdc.tilt.try_set_value(float(round(tilt_deg)))
+            if zoom is not None:
+                results["zoom"] = vdc.zoom.try_set_value(float(round(zoom * 100)))
+            return results
+
+        try:
+            results = self._with_controller_sync(act)
+        except Exception as e:
+            return {"ok": False, "moved": False, "reason": repr(e)}
+        if not all(results.values()):
+            return {"ok": False, "moved": False,
+                    "reason": f"try_set_value refused: {results}"}
+        self._last = {"pan_deg": pan_deg,
+                      "tilt_deg": tilt_deg if tilt_deg is not None else self._last["tilt_deg"],
+                      "zoom": zoom if zoom is not None else self._last["zoom"]}
+        return {"ok": True, "moved": True, "bearing": dict(self._last),
+                "commanded": results}
+
+
 def build_actuator(prefer: str | None = None) -> Actuator:
     """Pick the best actuator that's actually present.
 
@@ -331,6 +537,13 @@ def build_actuator(prefer: str | None = None) -> Actuator:
     back to the honest stub. Never fall back to something that fakes motion.
     """
     prefer = prefer or os.environ.get("IRIS_ATTENTION_ACTUATOR", "auto")
+    if prefer in ("auto", "winrt", "ptz") and sys.platform.startswith("win"):
+        w = WinRtPtzActuator()
+        if w.available():
+            _log(f"actuator: winrt PTZ matching {w.device_match!r}")
+            return w
+        if prefer != "auto":
+            _log(f"actuator: {prefer} requested but unavailable — using fixed")
     if prefer in ("auto", "v4l2", "ptz"):
         a = V4L2PtzActuator()
         if a.available():

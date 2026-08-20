@@ -240,14 +240,32 @@ def annotate_frame(frame: Any, face_results: list[dict[str, Any]] | None, g: dic
     return _overlay_attention(out, h, g)
 
 
+
+# 2026-08-20 (Zeke: "hand tracking is blinking in and out"): detection at room
+# distance drops out on many cycles, and the overlay used to strobe with it.
+# Keep the last non-empty result briefly so the skeleton persists through
+# single-cycle dropouts. Short TTL on purpose — a stale skeleton lying about a
+# hand that left the frame is worse than a blink.
+_HANDS_HOLD_S = 0.8
+_last_hands: dict[str, Any] = {"ts": 0.0, "hr": None}
+
+
 def _draw_hands(frame: Any, g: dict[str, Any]) -> Any:
     """Overlay the hand skeleton + gesture label from g['_hand_results'].
     No-op when there are no hands. Never raises — camera pipeline safety."""
+    import time as _time
     hr = g.get("_hand_results")
-    if not hr:
-        return frame
     hands = hr.get("hands") if isinstance(hr, dict) else None
-    if not hands:
+    now = _time.time()
+    if hands:
+        _last_hands["ts"] = now
+        _last_hands["hr"] = hr
+    else:
+        cached = _last_hands.get("hr")
+        if cached and (now - float(_last_hands.get("ts") or 0.0)) <= _HANDS_HOLD_S:
+            hr = cached
+            hands = hr.get("hands")
+    if not hr or not hands:
         return frame
     try:
         import cv2  # type: ignore
