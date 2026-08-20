@@ -86,7 +86,21 @@ _DEADBAND = 0.12          # normalized offset that counts as "centered enough"
 _GAIN = 0.8               # damped so a bad face box doesn't slingshot the head
 _MAX_STEP_DEG = 25.0      # per-cycle correction cap
 _MIN_STEP_DEG = 2.0       # ignore micro-corrections
-_DEFAULT_PERIOD_S = 1.5
+# 1.5 -> 0.9 -> 0.5 (2026-08-20): with the persistent controller moves cost
+# ~40ms and face detection refreshes at ~5Hz, so a 0.5s cycle is safe. Zeke's
+# lateral-evasion tests kept beating the slower cycles.
+_DEFAULT_PERIOD_S = 0.5
+
+# ── Runaway guards (2026-08-20 ~01:0x, after the head walked itself to the
+# -150 pan limit at tilt -90): it was chasing a face at a CONSTANT offset —
+# almost certainly my own feed on Zeke's monitor (camera chasing its display).
+# Three independent rails:
+_SOFT_PAN_RANGE = (-125.0, 125.0)   # corrections/search never command beyond
+_SOFT_TILT_RANGE = (-40.0, 45.0)    # people-height arc; hardware floor is -60
+_MIN_FACE_H_FRAC = 0.08             # faces smaller than this are screens/
+                                    # reflections/far phantoms — never chase
+_RUNAWAY_N = 5                      # same-direction corrections with a non-
+                                    # shrinking error = phantom -> abort chase
 
 
 # Lost→search tuning (2026-08-20, after Zeke evaded the head by crouching then
@@ -137,8 +151,14 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
         d_tilt = -dy * (_VFOV_DEG / 2.0) * _GAIN
         d_pan = max(-_MAX_STEP_DEG, min(_MAX_STEP_DEG, d_pan))
         d_tilt = max(-_MAX_STEP_DEG, min(_MAX_STEP_DEG, d_tilt))
+        # Soft range: a follow correction may never wedge the head into the
+        # corner limits (that's how the display-chase runaway parked at -150).
+        new_pan = max(_SOFT_PAN_RANGE[0],
+                      min(_SOFT_PAN_RANGE[1], b["pan_deg"] + d_pan))
+        new_tilt = max(_SOFT_TILT_RANGE[0],
+                       min(_SOFT_TILT_RANGE[1], b["tilt_deg"] + d_tilt))
         if abs(d_pan) >= _MIN_STEP_DEG or abs(d_tilt) >= _MIN_STEP_DEG:
-            r = act.look_at(b["pan_deg"] + d_pan, b["tilt_deg"] + d_tilt)
+            r = act.look_at(new_pan, new_tilt)
             if r.get("ok"):
                 st8["corrections"] += 1
                 st8["last_correction"] = {"d_pan": round(d_pan, 1),
@@ -175,6 +195,8 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
 
         def try_stop(pan: float, tilt: float) -> bool | None:
             """None = skip (near a visited stop); else dwell result."""
+            pan = max(_SOFT_PAN_RANGE[0], min(_SOFT_PAN_RANGE[1], pan))
+            tilt = max(_SOFT_TILT_RANGE[0], min(_SOFT_TILT_RANGE[1], tilt))
             for vp, vt in visited:
                 if abs(pan - vp) < 10.0 and abs(tilt - vt) < 10.0:
                     return None
@@ -222,9 +244,38 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
             state = g.get("_attention_state_obj") or {}
             offset = (res or {}).get("offset") or state.get("offset")
             status = (res or {}).get("status")
+            # Phantom filter: a "face" under ~8% of frame height is a screen,
+            # reflection, or someone in another postcode — never chase it.
+            bbox = state.get("last_bbox")
+            if offset and bbox and len(bbox) == 4:
+                try:
+                    if (float(bbox[3]) - float(bbox[1])) < _MIN_FACE_H_FRAC * 480.0:
+                        offset = None
+                        st8["phantom_skips"] = int(st8.get("phantom_skips") or 0) + 1
+                except Exception:
+                    pass
             if status in ("locked", "seeking") and offset:
                 dx = float(offset.get("dx") or 0.0)
                 dy = float(offset.get("dy") or 0.0)
+                # Runaway detector: N same-direction pan corrections while the
+                # error refuses to shrink = chasing something glued to my own
+                # view (display recursion). Abort: go home, declare lost.
+                hist = st8.setdefault("_chase_hist", [])
+                hist.append(dx)
+                del hist[:-_RUNAWAY_N]
+                if (len(hist) == _RUNAWAY_N
+                        and all(abs(v) > 0.4 for v in hist)
+                        and all((v > 0) == (hist[0] > 0) for v in hist)
+                        and abs(hist[-1]) >= abs(hist[0]) - 0.05):
+                    st8["runaways"] = int(st8.get("runaways") or 0) + 1
+                    hist.clear()
+                    act.home()
+                    st8["mode"] = "lost_hold"
+                    st8["misses"] = _LOST_AFTER_MISSES
+                    _fire_signal(g, "follow_runaway_aborted",
+                                 {"target": state.get("target")})
+                    stop.wait(period_s)
+                    continue
                 prev_offset = {"dx": dx, "dy": dy}
                 st8["last_offset"] = {"dx": dx, "dy": dy, "status": status}
                 b_now = act.bearing()
