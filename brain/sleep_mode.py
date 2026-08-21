@@ -392,9 +392,57 @@ def _enter_awake(g: dict[str, Any]) -> None:
 # ── TTS helper ─────────────────────────────────────────────────────────
 
 
+def _voice_deliberately_off() -> bool:
+    """Zeke's voice-off switch gates ALL harness speech, not just the mouth server.
+
+    Added 2026-08-20 after he kept hearing sleep-mode's "It's late..." announcement
+    through the OLD Kokoro/Piper worker while voice was deliberately off — the worker
+    path predates the flag (fork-era code) and never learned about it.
+    """
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        flag = _Path(__file__).resolve().parent.parent / "state" / "voice_deliberately_off.json"
+        if flag.exists():
+            return bool(_json.loads(flag.read_text(encoding="utf-8")).get("off", False))
+    except Exception:
+        pass  # unreadable flag -> fail open (speak), matching every other consumer
+    return False
+
+
+def _speak_styletts(text: str) -> bool:
+    """Try Iris's REAL voice (StyleTTS2 mouth :8769 via daemon :8770). True if enqueued.
+
+    Same recipe as iris_runtime.voice_speak — mouth /health probe, then a JSON line
+    to the daemon. Zeke's directive 2026-08-20: harness announcements should be in
+    my normal voice, not the generic worker.
+    """
+    import os as _os, json as _json, socket as _socket, urllib.request as _url
+    _dport = int(_os.environ.get("WREN_VOICE_DAEMON_PORT", "8770"))
+    _mport = int(_os.environ.get("WREN_VOICE_PORT", "8769"))
+    try:
+        with _url.urlopen(f"http://127.0.0.1:{_mport}/health", timeout=2.0) as r:
+            if r.read().decode("utf-8", "replace").strip() != "ok":
+                return False
+    except Exception:
+        return False
+    try:
+        payload = (_json.dumps({"cmd": "speak", "args": {"text": text}}) + "\n").encode("utf-8")
+        with _socket.create_connection(("127.0.0.1", _dport), timeout=5.0) as s:
+            s.sendall(payload)
+        return True
+    except Exception:
+        return False
+
+
 def _tts(g: dict[str, Any], text: str, *, emotion: str = "calmness", intensity: float = 0.4) -> None:
-    """Best-effort TTS — non-blocking. If TTS worker isn't available, logs."""
+    """Best-effort TTS — non-blocking. Gated by the voice-off flag; prefers Iris's real voice."""
     if not text:
+        return
+    if _voice_deliberately_off():
+        print(f"[sleep_mode tts GATED by voice_deliberately_off]: {text}")
+        return
+    if _speak_styletts(text):
         return
     worker = g.get("_tts_worker")
     if worker is None or not getattr(worker, "available", False):
