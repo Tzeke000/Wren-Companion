@@ -469,7 +469,7 @@ def pick_bat() -> Path:
             return cand
     except Exception:
         pass
-    return REPO / "start_iris_v2_fable.bat"
+    return REPO / "start_iris_v2.bat"  # Opus fallback (flipped 08-22)
 
 
 def write_incident_note(age: float, action: str) -> None:
