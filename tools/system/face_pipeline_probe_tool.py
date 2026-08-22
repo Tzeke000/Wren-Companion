@@ -36,6 +36,12 @@ def _probe(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     if (params or {}).get("repair"):
         try:
             import brain.insight_face_engine as ife
+            if (params or {}).get("reload_code"):
+                # Pick up on-disk edits to the ENGINE CLASS: methods of a live
+                # instance can't be code-swapped, so reload the module and let
+                # bootstrap build a fresh instance from the new class.
+                import importlib
+                ife = importlib.reload(ife)
             with ife._SINGLETON_LOCK:
                 ife._SINGLETON = None
             t0 = time.time()
