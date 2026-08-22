@@ -670,7 +670,17 @@ def voice_next_input(timeout: float = 300.0) -> dict:
     # the flag on exception paths.
     _voice_input_busy.set()
     try:
-        return _voice_next_input_inner(stt, timeout)
+        res = _voice_next_input_inner(stt, timeout)
+        # Voice x pointing join (2026-08-22, Zeke's timestamp design): a
+        # deictic utterance ("that", "there", ...) gets the nearest pointing
+        # ledger events attached so the session sees WHERE he pointed
+        # without an extra lookup. Never raises.
+        try:
+            from brain.pointing_context import attach_pointing_context
+            res = attach_pointing_context(res)
+        except Exception:
+            pass
+        return res
     finally:
         _voice_input_busy.clear()
 
