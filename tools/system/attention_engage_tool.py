@@ -62,6 +62,21 @@ def _attention_engage(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
     if not r_set.get("ok"):
         return {"ok": False, "error": f"set_target failed: {r_set}"}
 
+    # ── PIN (2026-08-21, Zeke: "you need to have it so you can specifically
+    # target an object over a person if you want to") ──
+    # An explicit engage is DELIBERATE intent; the sentry's people-outrank-
+    # things upgrade is ambient policy. Deliberate beats ambient: engaging an
+    # object pins it by default (pass pin=false to opt out; pin=true pins any
+    # target). Sentry's own policy engages never pin. Pin clears on follow stop.
+    tid_now = (g.get("_attention_state_obj") or {}).get("target") or target
+    pin = params.get("pin")
+    if pin is None:
+        pin = str(tid_now).startswith("object:")
+    if pin:
+        g["_attention_pin"] = str(tid_now)
+    else:
+        g.pop("_attention_pin", None)
+
     # Resolve once NOW so the caller learns immediately whether the thing is
     # actually in view (object targets acquire their tracking lock here).
     tid = (g.get("_attention_state_obj") or {}).get("target") or target
@@ -103,6 +118,7 @@ def _attention_engage(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
     return {"ok": bool(r_follow.get("ok")), "target": tid,
             "acquired_now": seen is not None, "seen": seen,
             "following": bool(r_follow.get("running")), "lock": lock,
+            "pinned": bool(g.get("_attention_pin") == str(tid)),
             "engage_ms": int((time.time() - t0) * 1000)}
 
 
@@ -169,10 +185,17 @@ def _sentry_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -
             if _follow_running(g):
                 st["mode"] = "yielding"   # follow loop owns the eyes
                 prev = None               # scene will have changed; re-baseline
-                # Priority upgrade: if we engaged a watchlist OBJECT and a
-                # person has since been recognized, the person wins — retarget
-                # the running loop (people outrank things, always).
-                if str(st.get("last_target") or "").startswith("object:"):
+                # Priority upgrade: if the eyes are on an OBJECT and a person
+                # has since been recognized, the person wins — retarget the
+                # running loop (people outrank things by DEFAULT). Two fixes
+                # 2026-08-21: key on the ACTUAL current target, not sentry's
+                # own last engage (stale memory); and respect the PIN — an
+                # explicitly pinned object was a deliberate choice, ambient
+                # policy keeps its hands off it.
+                cur_target = str((g.get("_attention_state_obj") or {})
+                                 .get("target") or st.get("last_target") or "")
+                if (cur_target.startswith("object:")
+                        and cur_target != str(g.get("_attention_pin") or "")):
                     person = _pick_person(g)
                     # Upgrade only to NAMED people: an unlabeled or personN
                     # face is not better than a solid object lock — wait for
@@ -321,7 +344,8 @@ register_tool(
     "ONE-CALL eye chain: set target ('zeke'|'object:mug'), resolve it NOW "
     "(objects acquire a cheap TrackerVit lock — OWL-ViT once, ~12ms/frame "
     "after), start the PTZ follow loop, return acquired/seen/following in a "
-    "single round-trip. Replaces look->objects->follow->status.",
+    "single round-trip. Explicit object engages PIN the target (sentry's "
+    "people-outrank-things upgrade defers to a pin; pin=false to opt out).",
     1,
     _attention_engage,
 )

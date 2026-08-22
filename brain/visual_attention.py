@@ -814,6 +814,23 @@ def _actuator(g: dict[str, Any] | None) -> Actuator:
     if not isinstance(a, Actuator):
         a = build_actuator()
         g["_attention_actuator"] = a
+    elif isinstance(a, FixedCameraActuator):
+        # SELF-HEAL (2026-08-21): a boot race (camera busy during runtime init)
+        # can fail the winrt probe once, permanently pinning the stub while the
+        # hardware is fine. Re-probe at most every 30s; upgrade cache if a real
+        # actuator appears. Restart no longer costs the neck.
+        now = time.time()
+        last = g.get("_attention_actuator_reprobe_ts", 0.0)
+        if now - last >= 30.0:
+            g["_attention_actuator_reprobe_ts"] = now
+            try:
+                fresh = build_actuator()
+                if not isinstance(fresh, FixedCameraActuator):
+                    _log(f"actuator self-heal: fixed → {fresh.name}")
+                    g["_attention_actuator"] = fresh
+                    a = fresh
+            except Exception as e:  # noqa: BLE001 — heal must never break observe
+                _log(f"actuator self-heal probe failed: {e!r}")
     return a
 
 

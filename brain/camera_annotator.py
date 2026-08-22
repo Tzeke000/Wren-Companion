@@ -125,7 +125,28 @@ def _prune_smooth_state(seen_pids: set[str]) -> None:
             _smooth_state.pop(k, None)
 
 
+# ── CLEAN-BUFFER GATE (2026-08-21) ───────────────────────────────────────────
+# The capture loops used to push ANNOTATED frames into frame_store — and the
+# object tracker locked onto the DRAWN hand dots / face mesh instead of the
+# real object (chased the graphics into the ceiling, live, during Pyraminx
+# play). Vision consumers (TrackerVit, OWL-ViT, sentry) must see reality only.
+# annotate_frame (the capture-path entry) now returns the frame UNTOUCHED;
+# display surfaces call annotate_display on a COPY at serve time
+# (operator_server.camera_live_frame). Flip only if you also re-route every
+# vision consumer off the shared buffer — you almost certainly should not.
+CAPTURE_PATH_CLEAN = True
+
+
 def annotate_frame(frame: Any, face_results: list[dict[str, Any]] | None, g: dict[str, Any]) -> Any:
+    """Capture-path entry. Since 2026-08-21 this is a PASS-THROUGH (see
+    CAPTURE_PATH_CLEAN above) so the shared frame buffer stays clean for the
+    vision stack. Display overlays live in annotate_display."""
+    if CAPTURE_PATH_CLEAN:
+        return frame
+    return annotate_display(frame, face_results, g)
+
+
+def annotate_display(frame: Any, face_results: list[dict[str, Any]] | None, g: dict[str, Any]) -> Any:
     """Draw face overlays on `frame` and return the modified frame.
 
     Falls back to the original frame on any error so the camera pipeline

@@ -90,6 +90,13 @@ _MIN_STEP_DEG = 2.0       # ignore micro-corrections
 # ~40ms and face detection refreshes at ~5Hz, so a 0.5s cycle is safe. Zeke's
 # lateral-evasion tests kept beating the slower cycles.
 _DEFAULT_PERIOD_S = 0.5
+# ── Post-correction settle (2026-08-21, Zeke watched the head live): after a
+# correction the gimbal takes ~0.3-0.5s to physically travel, and frames
+# captured MID-TRAVEL still show the object displaced — so the loop fired a
+# second same-direction correction off stale geometry and the head sailed past
+# a stopped object ("you're guessing where the object is going to be... but if
+# the object stops your head keeps moving"). Move -> settle -> sample -> move.
+_SETTLE_S = 0.7
 
 # ── Runaway guards (2026-08-20 ~01:0x, after the head walked itself to the
 # -150 pan limit at tilt -90): it was chasing a face at a CONSTANT offset —
@@ -169,6 +176,14 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
                 st8["last_correction"] = {"d_pan": round(d_pan, 1),
                                           "d_tilt": round(d_tilt, 1),
                                           "ts": time.time()}
+                # Hold fire until the gimbal has physically arrived and a
+                # post-move frame exists — mid-travel frames lie (see _SETTLE_S).
+                # Scaled by step size (2026-08-21, Zeke: "a little bit behind,
+                # not as smooth"): a 3-deg nudge arrives in a blink and needs
+                # almost no settle; only big swings need the full hold.
+                _step = max(abs(d_pan), abs(d_tilt))
+                st8["settle_until"] = time.time() + (
+                    0.25 + (_SETTLE_S - 0.25) * min(1.0, _step / _MAX_STEP_DEG))
 
     def _dwell_for_face(searches: int) -> bool:
         """Wait at the current bearing for a face; True when one shows."""
@@ -354,7 +369,16 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
                                                       "ts": now}
                         except Exception:
                             pass
-                if abs(dx) > _DEADBAND or abs(dy) > _DEADBAND:
+                # Settle gate applies to OBJECT targets only (Zeke 2026-08-21:
+                # "face tracking was decently good — same thing, different
+                # target"). Faces come from per-frame DETECTION (fresh absolute
+                # positions, errors don't compound); object boxes come from a
+                # history-dependent tracker that lags during head motion, so
+                # only objects need the move->settle->sample rhythm.
+                _is_obj = str(state.get("target") or "").startswith("object:")
+                if ((abs(dx) > _DEADBAND or abs(dy) > _DEADBAND)
+                        and (not _is_obj or time.time()
+                             >= float(st8.get("settle_until") or 0.0))):
                     correct_toward(dx, dy)
                 st8["misses"] = 0
             else:
@@ -386,13 +410,19 @@ def _loop(g: dict[str, Any], stop: threading.Event, period_s: float) -> None:
                     break
                 should_search = (
                     st8["misses"] >= _LOST_AFTER_MISSES
-                    and st8.get("last_seen_bearing")
                     and time.time() > float(st8.get("runaway_cooldown_until") or 0.0)
                     and (st8.get("mode") != "lost_hold"
                          or time.time() - last_search_ts > _RESEARCH_EVERY_S))
                 if should_search:
                     last_search_ts = time.time()
-                    if search(st8["last_seen_bearing"], prev_offset):
+                    # 2026-08-21: a thread that never ACQUIRED its target has
+                    # no last_seen_bearing — the old gate meant it could never
+                    # search and the head parked wherever it happened to point
+                    # (caught live at pan +46, 101 straight misses). Fall back
+                    # to home; the hotspot pass tries (0,0) first anyway.
+                    _base = (st8.get("last_seen_bearing")
+                             or {"pan_deg": 0.0, "tilt_deg": 10.0})
+                    if search(_base, prev_offset):
                         st8["misses"] = 0
         except Exception as e:  # noqa: BLE001 — loop must survive anything
             st8["error"] = repr(e)
@@ -427,6 +457,9 @@ def _attention_follow(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
         if running:
             st8["stop"].set()
             st8["thread"].join(timeout=5.0)
+        # A stopped follow ends the deliberate act — the pin dies with it
+        # (2026-08-21 object-over-person pin; see attention_engage_tool).
+        g.pop("_attention_pin", None)
         return {"ok": True, "running": False, "was_running": running,
                 "cycles": st8.get("cycles"), "corrections": st8.get("corrections")}
 
