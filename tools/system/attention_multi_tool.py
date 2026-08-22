@@ -67,10 +67,13 @@ def _pursuit_running(g: dict[str, Any]) -> str | None:
 
 
 def _multi_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -> None:
+    import cv2
+    import numpy as np
     from brain import frame_store, object_lock
 
     targets: dict[str, dict] = st["targets"]
     last_frame_ts = 0.0
+    odo_prev = None   # v2 (2026-08-21 night): odometry-compensated boxes
     try:
         while not stop.is_set():
             t0 = time.time()
@@ -82,8 +85,55 @@ def _multi_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
             frame = res.frame
             now = time.time()
             st["ticks"] = int(st.get("ticks") or 0) + 1
+            # ── v2: VISUAL ODOMETRY COMPENSATION — measure how the scene
+            # shifted between frames (head motion) and pre-shift every box by
+            # it, re-initing trackers when the jump exceeds their search
+            # window. This is what lets locks SURVIVE a panning head — the
+            # piece that forced v1 to be fixed-gaze. Same phase-correlate
+            # math as the smooth servo's odometry (0.425 deg/px at 160px;
+            # here we need the FULL-FRAME px shift = small-shift * 4).
+            shift_full = (0.0, 0.0)
+            try:
+                small = np.float32(cv2.cvtColor(
+                    cv2.resize(frame, (160, 120)), cv2.COLOR_BGR2GRAY)) / 255.0
+                if odo_prev is not None:
+                    (sx, sy), resp = cv2.phaseCorrelate(odo_prev, small)
+                    if resp >= 0.10 and (abs(sx) > 1.0 or abs(sy) > 1.0):
+                        # scene shifts +x when the head pans + — boxes of
+                        # STATIC objects move WITH the scene: shift = scene.
+                        shift_full = (sx * 4.0, sy * 4.0)
+                        st["odo_shifts"] = int(st.get("odo_shifts") or 0) + 1
+                odo_prev = small
+            except Exception:
+                pass
             alive = 0
             for want, t in targets.items():
+                # pre-shift the remembered box by measured head motion
+                if shift_full != (0.0, 0.0) and t.get("box"):
+                    bx, by, bw, bh = t["box"]
+                    t["box"] = (bx + shift_full[0], by + shift_full[1], bw, bh)
+                    # big jump: the tracker's local search window can't span
+                    # it — re-seat the tracker at the predicted spot
+                    if (abs(shift_full[0]) > 25 or abs(shift_full[1]) > 25) \
+                            and t.get("tracker") is not None:
+                        try:
+                            nb = t["box"]
+                            if 0 <= nb[0] < frame.shape[1] and \
+                                    0 <= nb[1] < frame.shape[0]:
+                                trk, _k = object_lock._new_tracker()
+                                trk.init(frame, (int(nb[0]), int(nb[1]),
+                                                 int(nb[2]), int(nb[3])))
+                                t["tracker"] = trk
+                                t["odo_reseats"] = \
+                                    int(t.get("odo_reseats") or 0) + 1
+                            else:
+                                # predicted out of frame: park the lock,
+                                # remember it went off-screen (not dead —
+                                # reval re-finds it when it re-enters)
+                                t["tracker"] = None
+                                t["offscreen"] = True
+                        except Exception:
+                            pass
                 if t.get("dead"):
                     continue
                 try:
@@ -161,6 +211,7 @@ def _target_view(want: str, t: dict) -> dict:
     now = time.time()
     return {"target": want,
             "alive": bool(not t.get("dead") and t.get("tracker") is not None),
+            "offscreen": bool(t.get("offscreen")),
             "box": [int(v) for v in t["box"]] if t.get("box") else None,
             "score": round(float(t.get("score") or 0.0), 3),
             "age_s": (round(now - t["acquired_ts"], 1)
@@ -217,11 +268,9 @@ def _attention_multi(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
         return {"ok": True, "path": str(out)}
 
     if action == "start":
-        busy = _pursuit_running(g)
-        if busy:
-            return {"ok": False,
-                    "error": f"eyes are busy ({busy}) — multi-lock is a "
-                             "fixed-gaze skill (v1); stop pursuit first"}
+        # v2 (2026-08-21 night): pursuit coexistence — odometry compensation
+        # keeps boxes seated through head motion, so the fixed-gaze refusal
+        # is gone. Follow one thing, know where the others are.
         raw = params.get("targets")
         if isinstance(raw, str):
             wants = [w.strip() for w in raw.split(",") if w.strip()]
@@ -258,12 +307,13 @@ def _attention_multi(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
 
 register_tool(
     "attention_multi",
-    "MULTI-object lock (fixed gaze, v1): hold TrackerVit locks on up to 5 "
-    "things at once from the current view — action='start' "
-    "(targets='mug, pyramid toy, helmet') | 'status' (boxes/scores/ages) | "
-    "'snapshot' (frame annotated with every lock) | 'stop'. Staggered OWL-ViT "
-    "revalidation; a lost lock fires multi_lock_lost and the rest keep going. "
-    "Head must be STILL — refuses while a pursuit loop runs.",
+    "MULTI-object lock v2: hold TrackerVit locks on up to 5 things at once — "
+    "action='start' (targets='mug, pyramid toy, helmet') | 'status' | "
+    "'snapshot' (annotated frame) | 'stop'. v2: visual-odometry compensation "
+    "pre-shifts every box by measured head motion, so locks SURVIVE a panning "
+    "head — runs alongside smooth pursuit (follow one, know the others). "
+    "Off-frame targets park (not die) and re-find on re-entry via staggered "
+    "OWL-ViT reval.",
     2,
     _attention_multi,
 )
