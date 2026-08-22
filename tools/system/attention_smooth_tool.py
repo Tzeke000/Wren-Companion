@@ -481,27 +481,47 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                 and abs(ry) < _STATIC_RATE:
                             uy *= 0.35
                         st["_prev_offset"] = {"dx": dx, "dy": dy, "ts": now_t}
-                        # ── static trim (see _STICTION_UNITS above): static
-                        # target + sub-stiction vector -> one absolute nudge.
-                        if (_static and _act is not None
+                        # ── static trim v2 (2026-08-21 23:2x, Zeke: "jitters
+                        # worse now"): v1 used ABSOLUTE look_at(est + d) — but
+                        # any est bias e turns every nudge into a d+e mis-jump,
+                        # and odometry propagates e forever (it tracks deltas,
+                        # never absolute truth). Same disease as the 100° drift
+                        # scar, smaller dose. v2: timed JOG PULSE — relative
+                        # motion, the proven jog sign convention, no est in the
+                        # loop. Dominant axis only; the next trim (>=1.5s later,
+                        # after vision settles) handles the residual.
+                        if (_static
                                 and abs(ux) < _STICTION_UNITS
                                 and abs(uy) < _STICTION_UNITS
                                 and now_t - float(st.get("_trim_ts") or 0.0)
                                     >= _TRIM_MIN_S):
+                            need_x = abs(dx) * _HFOV_DEG / 2.0
+                            need_y = abs(dy) * _VFOV_DEG / 2.0
+                            if need_x >= need_y:
+                                px = -_TRIM_PULSE_UNITS if dx > 0 else _TRIM_PULSE_UNITS
+                                py = 0.0
+                                t_pulse = need_x / (_TRIM_PULSE_UNITS * _UNIT_DEG_S)
+                            else:
+                                px = 0.0
+                                py = -_TRIM_PULSE_UNITS if dy > 0 else _TRIM_PULSE_UNITS
+                                t_pulse = need_y / (_TRIM_PULSE_UNITS * _UNIT_DEG_S)
+                            t_pulse = min(t_pulse, _TRIM_PULSE_MAX_S)
+                            # jog soft rails apply to pulses too (privacy scar)
+                            if est_tilt <= _EST_TILT_FLOOR and py < 0:
+                                py = 0.0
+                            if est_tilt >= _EST_TILT_CEIL and py > 0:
+                                py = 0.0
+                            if est_pan <= -_EST_PAN_LIMIT and px < 0:
+                                px = 0.0
+                            if est_pan >= _EST_PAN_LIMIT and px > 0:
+                                px = 0.0
+                            if px or py:
+                                jog.write_vector(px, py)
+                                stop.wait(t_pulse)
                             jog.stop()
-                            t_pan = max(-_EST_PAN_LIMIT, min(
-                                _EST_PAN_LIMIT,
-                                est_pan + (-dx * _HFOV_DEG / 2.0)))
-                            t_tilt = max(_EST_TILT_FLOOR, min(
-                                _EST_TILT_CEIL,
-                                est_tilt + (-dy * _VFOV_DEG / 2.0)))
-                            try:
-                                _act.look_at(t_pan, t_tilt)
-                                st["trims"] = int(st.get("trims") or 0) + 1
-                                st["_trim_ts"] = now_t
-                                st["mode"] = "trim"
-                            except Exception:
-                                pass
+                            st["trims"] = int(st.get("trims") or 0) + 1
+                            st["_trim_ts"] = time.time()
+                            st["mode"] = "trim"
                             stop.wait(period)
                             continue
                         # ── jog soft limits (see _EST_* above — privacy-pose
