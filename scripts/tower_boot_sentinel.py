@@ -10,8 +10,8 @@ returns -> tower boots -> logon -> this fires). It:
   1. waits for the network (Discord API reachable, up to ~5 min)
   2. DMs Zeke: "tower powered on, bringing the stack up"
   3. launches the bat named in state/boot_launcher.txt DETACHED -- currently
-     start_iris_v2.bat (Opus); the Fable bat is only the missing-config
-     fallback, see _pick_bat() (the full Iris stack:
+     start_iris_v2_fable.bat (Fable, since the 2026-08-09 flip); see
+     _pick_bat() (the full Iris stack:
      voice watchdog, post-office, vector bridge+nerves, orb, body host)
      -- skipped if the operator port :5876 already answers (stack already
      up = never kill a live Iris just because the task re-fired)
@@ -54,7 +54,7 @@ def _pick_bat() -> "Path":
             return cand
     except Exception:
         pass
-    return REPO / "start_iris_v2_fable.bat"
+    return REPO / "start_iris_v2.bat"  # Opus fallback (flipped 08-22)
 
 
 BAT = _pick_bat()
@@ -285,7 +285,9 @@ def main() -> int:
                     "names. Then:\n"
                     "(1) HOST: exactly ONE claude.exe, and verify the model on "
                     "the LIVE process (--model arg), NOT from boot_launcher.txt. "
-                    "Zeke's standing directive is park on Opus.\n"
+                    "Expected model per memory CORE (claude-opus-5 as of "
+                    "2026-08-22); if the live arg disagrees with CORE, CORE "
+                    "wins.\n"
                     "(2) SUBSYSTEMS: iris_health 15/15, camera+mic probe, "
                     "post-office :5877 /health, sibling inbox.\n"
                     "(3) DELIBERATE-OFF CHECK BEFORE HEALING ANYTHING: look in "
@@ -298,8 +300,9 @@ def main() -> int:
                     "that would dock him, so 'rescuing' him makes it worse. "
                     "Read-only checks only; never body_park, never "
                     "drive_on_charger. It needs Zeke's hands.\n"
-                    "(5) Re-create the hourly self-cron (it dies with every "
-                    "restart) and note its id in CORE.\n"
+                    "(5) Re-create the 3-hourly self-cron (it dies with every "
+                    "restart) and note its id in CORE (one home, the CORE "
+                    "line).\n"
                     "(6) DM Zeke on Discord (channel 1504668879220117725) ONE "
                     "status line — he got mechanical sentinel pings already and "
                     "needs YOUR confirmation that cognition is back. SKIP this "
