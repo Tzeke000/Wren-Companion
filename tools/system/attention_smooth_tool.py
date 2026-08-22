@@ -49,7 +49,12 @@ _REPORT = 32
 _UNIT_DEG_S = 0.85          # measured deg/s per vector unit
 _MAX_UNITS = 25.0           # app used ~±30; leave margin
 _DEADBAND = 0.05            # normalized offset that counts as centered
-_GAIN_UNITS = 40.0          # units per unit of offset (dx=0.5 -> 20u ≈ 17°/s)
+# 40 -> 20 (2026-08-21 late): at gain 40 the servo OSCILLATED on a STATIC
+# pyramid — the tracker's box lags the true position while the head moves, so
+# hot pursuit chases its own sampling lag past the target, exactly the step-
+# loop's overshoot in continuous form. Gentler gain + the sign-flip brake
+# below converge instead.
+_GAIN_UNITS = 20.0          # units per unit of offset (dx=0.5 -> 10u ≈ 8.5°/s)
 _PERIOD_S = 0.08            # ~12.5Hz servo/stream cadence
 _LOST_ZERO_MISSES = 2       # consecutive observe misses -> zero vector
 _LOST_HOLD_S = 8.0          # lost this long -> absolute home + keep watching
@@ -107,6 +112,67 @@ class _PixyJog:
             self._dev = None
 
 
+def _hand_centers(g: dict[str, Any]) -> list[tuple[float, float]]:
+    """Mean landmark position per visible hand, in frame pixels."""
+    hr = g.get("_hand_results")
+    hands = hr.get("hands") if isinstance(hr, dict) else None
+    out: list[tuple[float, float]] = []
+    for h in (hands or []):
+        lms = h.get("landmarks_px") or []
+        try:
+            if lms:
+                xs = [float(p[0]) for p in lms]
+                ys = [float(p[1]) for p in lms]
+                out.append((sum(xs) / len(xs), sum(ys) / len(ys)))
+        except Exception:
+            continue
+    return out
+
+
+_HAND_NEAR_PX = 130       # hand-to-box-center proximity that counts as "holding"
+_HAND_BREAK_TICKS = 8     # consecutive disagreeing ticks (~0.6s) before we act
+
+
+def _hand_consistency(g: dict[str, Any], st: dict[str, Any], state: dict) -> None:
+    """Zeke's rule (2026-08-21): when an object lock ACQUIRES in a hand, bind
+    them — afterward, hand visible in one place + 'object' in a completely
+    different place means the lock is probably wrong -> drop it and let the
+    detector re-find. No hands visible = no evidence, never break on absence.
+    (The failure this kills: TrackerVit drifting onto background while the
+    real object rides away in the hand.)"""
+    try:
+        if not str(state.get("target") or "").startswith("object:"):
+            st.pop("hand_bound", None)
+            return
+        from brain import object_lock
+        lk = object_lock.status()
+        box = lk.get("box")
+        if not box or not lk.get("locked"):
+            st.pop("hand_bound", None)
+            st["hand_breaks"] = 0
+            return
+        cx, cy = box[0] + box[2] / 2.0, box[1] + box[3] / 2.0
+        hands = _hand_centers(g)
+        if not hands:
+            return  # absence of evidence — hold the binding, don't break it
+        near = any(abs(hx - cx) < _HAND_NEAR_PX and abs(hy - cy) < _HAND_NEAR_PX
+                   for hx, hy in hands)
+        age = float(lk.get("age_s") or 0.0)
+        if near and (age < 3.0 or st.get("hand_bound")):
+            st["hand_bound"] = True
+            st["hand_breaks"] = 0
+        elif st.get("hand_bound") and not near:
+            st["hand_breaks"] = int(st.get("hand_breaks") or 0) + 1
+            if st["hand_breaks"] >= _HAND_BREAK_TICKS:
+                object_lock.drop("hand-object consistency: the hand moved and "
+                                 "the box did not — lock presumed drifted")
+                st["hand_bound"] = False
+                st["hand_breaks"] = 0
+                st["hand_drops"] = int(st.get("hand_drops") or 0) + 1
+    except Exception:
+        pass  # consistency layer must never break the servo
+
+
 def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -> None:
     from brain import visual_attention as va
 
@@ -135,6 +201,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                 offset = (res or {}).get("offset") or state.get("offset")
                 status = (res or {}).get("status")
                 if status in ("locked", "seeking") and offset:
+                    _hand_consistency(g, st, state)
                     dx = float(offset.get("dx") or 0.0)
                     dy = float(offset.get("dy") or 0.0)
                     st["last_offset"] = {"dx": round(dx, 3), "dy": round(dy, 3)}
@@ -154,6 +221,16 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                             ux = 0.0
                         if abs(dy) <= _DEADBAND:
                             uy = 0.0
+                        # Sign-flip brake: the offset crossing zero between
+                        # ticks means we just SAILED PAST the target on that
+                        # axis (sampling lag) — cut the reversal hard so the
+                        # correction decays instead of ringing.
+                        pv = st.get("_prev_offset") or {}
+                        if pv and (dx * float(pv.get("dx") or 0.0)) < 0:
+                            ux *= 0.35
+                        if pv and (dy * float(pv.get("dy") or 0.0)) < 0:
+                            uy *= 0.35
+                        st["_prev_offset"] = {"dx": dx, "dy": dy}
                         if jog.write_vector(ux, uy):
                             st["writes"] += 1
                             st["mode"] = "pursuit"
@@ -173,6 +250,14 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         if lost_since is None:
                             lost_since = time.time()
                         next_observe_ts = time.time() + 1.0  # GPU guard
+                    # Sentry-engaged runs auto-stop after prolonged loss so the
+                    # motion gate re-arms (mirrors the step-follow's
+                    # yield-to-sentry lifecycle; wired 2026-08-21 evening).
+                    auto_stop = float(st.get("auto_stop_lost_s") or 0.0)
+                    if (auto_stop > 0.0 and lost_since is not None
+                            and time.time() - lost_since > auto_stop):
+                        st["auto_stopped"] = True
+                        break
                     if (lost_since is not None
                             and time.time() - lost_since > _LOST_HOLD_S
                             and not homed_while_lost):
@@ -216,6 +301,9 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
         if running:
             st["stop"].set()
             st["thread"].join(timeout=4.0)
+        # A stopped pursuit ends the deliberate act — pin dies with it
+        # (same contract as the step follow's stop).
+        g.pop("_attention_pin", None)
         return {"ok": True, "running": False, "was_running": running,
                 "ticks": st.get("ticks"), "writes": st.get("writes")}
 
@@ -234,14 +322,18 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
                 return {"ok": False, "error": f"set_target failed: {r}"}
             # Explicit engage semantics: object targets pin (same rule as
             # attention_engage — deliberate choice beats ambient policy).
+            # pin=False opts out — the SENTRY passes it, because an ambient
+            # policy engage must never pin (2026-08-21).
             tid = (g.get("_attention_state_obj") or {}).get("target") or target
-            if str(tid).startswith("object:"):
+            if str(tid).startswith("object:") and params.get("pin") is not False:
                 g["_attention_pin"] = str(tid)
         elif not (g.get("_attention_state_obj") or {}).get("target"):
             return {"ok": False,
                     "error": "no target — pass target='zeke' or 'object:...'"}
         if running:
             return {"ok": True, "running": True, "note": "already smooth"}
+        # 0 = run forever (manual starts); sentry passes ~90 so it re-arms.
+        st["auto_stop_lost_s"] = float(params.get("auto_stop_lost_s") or 0.0)
         stop = threading.Event()
         th = threading.Thread(target=_servo_loop, args=(g, stop, st),
                               daemon=True, name="attention_smooth")

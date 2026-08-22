@@ -142,9 +142,15 @@ def _bearing_key(g: dict[str, Any]) -> tuple:
 
 
 def _follow_running(g: dict[str, Any]) -> bool:
+    """True if EITHER pursuit path owns the eyes: the step follow loop or the
+    smooth (HID jog) servo — the sentry must yield to both (2026-08-21)."""
     st8 = g.get("_attention_follow") or {}
     t = st8.get("thread")
-    return bool(t is not None and t.is_alive())
+    if t is not None and t.is_alive():
+        return True
+    sm = g.get("_attention_smooth") or {}
+    ts = sm.get("thread")
+    return bool(ts is not None and ts.is_alive())
 
 
 def _pick_person(g: dict[str, Any]) -> str | None:
@@ -273,12 +279,29 @@ def _sentry_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -
             st["last_target"] = target
             _log(f"sentry engaging {target!r} (motion {pct:.1%})")
             try:
-                from tools.system.attention_follow_tool import (
-                    _attention_follow, _fire_signal)
-                _attention_follow({"action": "start", "target": target}, g)
+                from tools.system.attention_follow_tool import _fire_signal
+                # Prefer SMOOTH pursuit (2026-08-21: HID jog servo — glides
+                # instead of stepping). auto_stop_lost_s makes it hand the
+                # room back to this motion gate after prolonged loss. Fall
+                # back to the step follow if the servo can't start.
+                engaged = False
+                try:
+                    from tools.system.attention_smooth_tool import (
+                        _attention_smooth)
+                    r = _attention_smooth({"action": "start", "target": target,
+                                           "auto_stop_lost_s": 90.0,
+                                           "pin": False}, g)
+                    engaged = bool(r.get("ok"))
+                except Exception as e2:
+                    _log(f"sentry smooth engage failed: {e2!r}")
+                if not engaged:
+                    from tools.system.attention_follow_tool import (
+                        _attention_follow)
+                    _attention_follow({"action": "start", "target": target}, g)
                 # nudge the signal bus so I hear about it (best-effort)
                 _fire_signal(g, "sentry_engaged",
-                             {"target": target, "motion_pct": round(pct, 3)})
+                             {"target": target, "motion_pct": round(pct, 3),
+                              "mode": "smooth" if engaged else "step"})
             except Exception as e:
                 _log(f"sentry engage failed: {e!r}")
         except Exception as e:
