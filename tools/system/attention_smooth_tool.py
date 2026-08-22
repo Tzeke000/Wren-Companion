@@ -49,6 +49,12 @@ _REPORT = 32
 _UNIT_DEG_S = 0.85          # measured deg/s per vector unit
 _MAX_UNITS = 25.0           # app used ~±30; leave margin
 _DEADBAND = 0.05            # normalized offset that counts as centered
+# ── HYSTERESIS (2026-08-21 late, Zeke: "your head jitters a bit even when I'm
+# staying still"): detector/tracker noise hovers right AT the deadband edge,
+# so the servo flip-flopped centered<->pursuit every few ticks — visible
+# micro-hunting on a static face. Once centered, stay parked until the offset
+# is CLEARLY out (or the target is actually moving, rate check below).
+_DEADBAND_OUT = 0.09        # exit-centered threshold (enter at _DEADBAND)
 _OBJECT_PERIOD_S = 0.05     # 20Hz for object targets (reval path is heavier)
 # 40 -> 20 (2026-08-21 late): at gain 40 the servo OSCILLATED on a STATIC
 # pyramid — the tracker's box lags the true position while the head moves, so
@@ -66,6 +72,13 @@ _GAIN_UNITS = 20.0          # units per unit of offset (dx=0.5 -> 10u ≈ 8.5°/
 # -> units = r*34/0.85 ≈ 40*r.
 _KD_UNITS = 40.0            # units per (offset-units/second) of target motion
 _D_EMA = 0.4                # smoothing on the rate estimate (tracker jitter)
+# ── RATE BASELINE (2026-08-21 jitter fix, part 2): at the 30Hz fast path the
+# derivative was (sub-pixel bbox noise)/(0.033s) — a STILL face measured as
+# rate ~0.2, above _STATIC_RATE, so the servo saw a phantom mover and the
+# feedforward commanded 40*0.2 = 8 units of pace-match for nothing. Rates are
+# now measured against an anchor sample at least this old, which divides the
+# noise by ~5 while adding ~150ms lag to the D term only (P is untouched).
+_RATE_BASELINE_S = 0.15
 _STATIC_RATE = 0.10         # |rate| below this = target static -> brake applies
 _PERIOD_S = 0.08            # ~12.5Hz servo/stream cadence
 _LOST_ZERO_MISSES = 2       # consecutive observe misses -> zero vector
@@ -90,6 +103,25 @@ _EST_PAN_LIMIT = 115.0
 # is the only sync that exists — readback is blind). Bounded drift, small
 # visible hitch, worth it.
 _RESYNC_S = 3.0
+# Resync gating (same jitter session): the snap exists to bound DEAD-RECKONING
+# drift, which only accumulates while actually jogging. On a near-static
+# target the head has barely moved since the last resync, est can't have
+# drifted, and the 3s snap was pure visible twitch. Skip it until we've
+# commanded at least this many degrees of motion since the last snap.
+_RESYNC_MIN_DEG = 4.0
+# ── STATIC TRIM (2026-08-21 jitter fix, part 3): sub-stiction jog vectors
+# move NOTHING (proven live: two frames 6s apart pixel-identical while the
+# servo wrote ~3-unit corrections every tick) — so a static face parked just
+# outside the deadband would sit there forever while the servo buzzed. When
+# the target is static and the PD output is below the stiction floor, make
+# ONE absolute look_at correction (sign convention proven in
+# attention_follow.correct_toward; base = odometry est because bearing
+# readback is jog-blind) and let vision confirm. Est is NOT hand-updated —
+# odometry measures the real motion (double-count hazard).
+_STICTION_UNITS = 5.0       # |vector| below this doesn't overcome the motor
+_TRIM_MIN_S = 1.2           # min gap between trims (let vision catch up)
+_HFOV_DEG = 68.0
+_VFOV_DEG = _HFOV_DEG * 3.0 / 4.0  # 4:3 sensor modes
 _TILT_MAX_UNITS = 12.0      # tilt arc is small; full-rate tilt overshoots hard
 # ── REAL-TIME FACE FAST PATH (2026-08-21 ~22:1x, Zeke: "track things like my
 # face in real time no lag"). The recognizer (InsightFace) updates ~5Hz, so
@@ -390,25 +422,44 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                     st["misses"] = 0
                     lost_since = None
                     homed_while_lost = False
-                    if abs(dx) <= _DEADBAND and abs(dy) <= _DEADBAND:
+                    # Rate estimate FIRST (moved above the centered branch
+                    # 2026-08-21 jitter fix): hysteresis needs to know whether
+                    # the target is moving, and rates must keep updating while
+                    # parked or the exit tick sees a stale-zero rate.
+                    now_t = time.time()
+                    pv = st.get("_prev_offset") or {}
+                    # Derivative against an ANCHOR >= _RATE_BASELINE_S old
+                    # (not the previous tick — see _RATE_BASELINE_S above).
+                    anc = st.get("_rate_anchor") or {}
+                    dt_a = now_t - float(anc.get("ts") or 0.0)
+                    rx = float(st.get("_rate_x") or 0.0)
+                    ry = float(st.get("_rate_y") or 0.0)
+                    if not anc:
+                        st["_rate_anchor"] = {"dx": dx, "dy": dy, "ts": now_t}
+                    elif dt_a >= _RATE_BASELINE_S:
+                        if dt_a < 1.0:
+                            raw_rx = (dx - float(anc.get("dx") or 0.0)) / dt_a
+                            raw_ry = (dy - float(anc.get("dy") or 0.0)) / dt_a
+                            rx = _D_EMA * raw_rx + (1 - _D_EMA) * rx
+                            ry = _D_EMA * raw_ry + (1 - _D_EMA) * ry
+                        else:
+                            rx = ry = 0.0  # stale anchor (came back from lost)
+                        st["_rate_anchor"] = {"dx": dx, "dy": dy, "ts": now_t}
+                    st["_rate_x"], st["_rate_y"] = rx, ry
+                    _static = abs(rx) < _STATIC_RATE and abs(ry) < _STATIC_RATE
+                    # Hysteresis: wider exit band once parked on a static
+                    # target; a MOVING target exits at the normal band so
+                    # pace-matching engages without extra lag.
+                    band = _DEADBAND_OUT if (st.get("mode") == "centered"
+                                             and _static) else _DEADBAND
+                    if abs(dx) <= band and abs(dy) <= band:
                         jog.stop()
                         st["zero_writes"] += 1
                         st["mode"] = "centered"
+                        st["_prev_offset"] = {"dx": dx, "dy": dy, "ts": now_t}
                     else:
                         # ── PD control: P centers, D matches the target's pace
                         # (see _KD_UNITS derivation above).
-                        now_t = time.time()
-                        pv = st.get("_prev_offset") or {}
-                        dt_o = now_t - float(pv.get("ts") or now_t)
-                        rx = ry = 0.0
-                        if pv and 0.0 < dt_o < 1.0:
-                            raw_rx = (dx - float(pv.get("dx") or 0.0)) / dt_o
-                            raw_ry = (dy - float(pv.get("dy") or 0.0)) / dt_o
-                            rx = (_D_EMA * raw_rx
-                                  + (1 - _D_EMA) * float(st.get("_rate_x") or 0.0))
-                            ry = (_D_EMA * raw_ry
-                                  + (1 - _D_EMA) * float(st.get("_rate_y") or 0.0))
-                        st["_rate_x"], st["_rate_y"] = rx, ry
                         ux = -( _GAIN_UNITS * dx + _KD_UNITS * rx)
                         uy = -( _GAIN_UNITS * dy + _KD_UNITS * ry)
                         ux = max(-_MAX_UNITS, min(_MAX_UNITS, ux))
@@ -430,6 +481,29 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                 and abs(ry) < _STATIC_RATE:
                             uy *= 0.35
                         st["_prev_offset"] = {"dx": dx, "dy": dy, "ts": now_t}
+                        # ── static trim (see _STICTION_UNITS above): static
+                        # target + sub-stiction vector -> one absolute nudge.
+                        if (_static and _act is not None
+                                and abs(ux) < _STICTION_UNITS
+                                and abs(uy) < _STICTION_UNITS
+                                and now_t - float(st.get("_trim_ts") or 0.0)
+                                    >= _TRIM_MIN_S):
+                            jog.stop()
+                            t_pan = max(-_EST_PAN_LIMIT, min(
+                                _EST_PAN_LIMIT,
+                                est_pan + (-dx * _HFOV_DEG / 2.0)))
+                            t_tilt = max(_EST_TILT_FLOOR, min(
+                                _EST_TILT_CEIL,
+                                est_tilt + (-dy * _VFOV_DEG / 2.0)))
+                            try:
+                                _act.look_at(t_pan, t_tilt)
+                                st["trims"] = int(st.get("trims") or 0) + 1
+                                st["_trim_ts"] = now_t
+                                st["mode"] = "trim"
+                            except Exception:
+                                pass
+                            stop.wait(period)
+                            continue
                         # ── jog soft limits (see _EST_* above — privacy-pose
                         # scar #2): past a limit, only inward motion passes.
                         if est_tilt <= _EST_TILT_FLOOR and uy < 0:
@@ -443,14 +517,21 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         uy = max(-_TILT_MAX_UNITS, min(_TILT_MAX_UNITS, uy))
                         # ── hard resync (see _RESYNC_S): snap physical to est
                         # on cadence so dead-reckoning error stays bounded.
+                        # Gated on ACTUAL jog effort since the last snap
+                        # (_RESYNC_MIN_DEG): no motion -> no drift -> no twitch.
+                        st["_jog_effort_deg"] = (
+                            float(st.get("_jog_effort_deg") or 0.0)
+                            + (abs(ux) + abs(uy)) * _UNIT_DEG_S * period)
                         if (_act is not None
-                                and time.time() - last_resync_ts >= _RESYNC_S):
+                                and time.time() - last_resync_ts >= _RESYNC_S
+                                and st["_jog_effort_deg"] >= _RESYNC_MIN_DEG):
                             jog.stop()
                             try:
                                 _act.look_at(est_pan, est_tilt)
                                 st["resyncs"] = int(st.get("resyncs") or 0) + 1
                             except Exception:
                                 pass
+                            st["_jog_effort_deg"] = 0.0
                             last_resync_ts = time.time()
                         if jog.write_vector(ux, uy):
                             st["writes"] += 1
