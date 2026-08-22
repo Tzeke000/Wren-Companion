@@ -285,6 +285,14 @@ def _eval_in_progress() -> bool:
         return False
 
 
+def _norm_req(s: str) -> str:
+    """Spam fingerprint: lowercase, digits masked (cycle counts / readings vary
+    between re-files of the SAME complaint), whitespace collapsed."""
+    import re as _re
+    s = _re.sub(r"\d+", "#", (s or "").lower())
+    return _re.sub(r"\s+", " ", s).strip()
+
+
 def ask_big_iris(request: str = "") -> str:
     """Escalate something little-Iris can't do up to big-Iris. Files it to a
     queue big-Iris checks on her next sweep; big-Iris resolves what she can and
@@ -296,9 +304,35 @@ def ask_big_iris(request: str = "") -> str:
     try:
         LB_ESCALATIONS.parent.mkdir(parents=True, exist_ok=True)
         import json as _json
+        origin = "eval" if _eval_in_progress() else "live"
+        # DEDUPE (2026-08-22, Zeke: "you just have to know if it was a
+        # different event or just the same one spammed"): re-filing the SAME
+        # complaint while the first is still PENDING bumps a counter on the
+        # existing entry instead of appending (one accel alarm filed 19 copies
+        # overnight 08-22). Keyed on normalized TEXT — a genuinely different
+        # warning arriving right after still files fresh. A RESOLVED entry
+        # never blocks a recurrence: that's a new event worth a new wake.
+        fp = _norm_req(req)
+        try:
+            rows = [_json.loads(ln) for ln in
+                    LB_ESCALATIONS.read_text(encoding="utf-8").splitlines()
+                    if ln.strip()]
+        except Exception:
+            rows = []
+        for e in rows:
+            if (e.get("status") == "pending" and e.get("origin") == origin
+                    and _norm_req(e.get("request") or "") == fp):
+                e["repeats"] = int(e.get("repeats") or 1) + 1
+                e["last_repeat_ts"] = _now_dt().isoformat()
+                body = "\n".join(_json.dumps(r, ensure_ascii=False)
+                                 for r in rows)
+                LB_ESCALATIONS.write_text(body + "\n", encoding="utf-8")
+                return (f"already handed up (same request, x{e['repeats']} "
+                        f"now) — big Iris has it; only re-file if something "
+                        f"NEW happens")
         line = _json.dumps({"ts": _now_dt().isoformat(),
                             "request": req[:600], "status": "pending",
-                            "origin": "eval" if _eval_in_progress() else "live"},
+                            "origin": origin},
                            ensure_ascii=False)
         with LB_ESCALATIONS.open("a", encoding="utf-8") as f:
             f.write(line + "\n")

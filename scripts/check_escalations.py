@@ -102,7 +102,9 @@ def main() -> int:
     # default: list pending
     print(f"PENDING={len(pending)}")
     for lineno, e in pending:
-        print(f"  [line {lineno}] {e.get('ts', '?')}  {e.get('request', '')}")
+        rep = int(e.get("repeats") or 1)
+        tag = f"  (x{rep}, last {e.get('last_repeat_ts', '?')})" if rep > 1 else ""
+        print(f"  [line {lineno}] {e.get('ts', '?')}  {e.get('request', '')}{tag}")
     if not pending:
         print("  (none — little-Iris hasn't handed anything up)")
     return 0
