@@ -55,10 +55,32 @@ _DEADBAND = 0.05            # normalized offset that counts as centered
 # loop's overshoot in continuous form. Gentler gain + the sign-flip brake
 # below converge instead.
 _GAIN_UNITS = 20.0          # units per unit of offset (dx=0.5 -> 10u ≈ 8.5°/s)
+# ── PACE MATCHING (2026-08-21 ~21:4x, Zeke watching live: "your head should
+# match pace with whatever you want to follow"). P alone always TRAILS a
+# moving target — the correction is proportional to how far behind we already
+# are. The feedforward D term estimates the target's angular velocity from the
+# offset's rate of change and commands that speed ON TOP of the P correction,
+# so the head moves WITH the target instead of forever catching up.
+# Derivation: offset rate r [1/s] -> target angular velocity r*(HFOV/2) deg/s
+# -> units = r*34/0.85 ≈ 40*r.
+_KD_UNITS = 40.0            # units per (offset-units/second) of target motion
+_D_EMA = 0.4                # smoothing on the rate estimate (tracker jitter)
+_STATIC_RATE = 0.10         # |rate| below this = target static -> brake applies
 _PERIOD_S = 0.08            # ~12.5Hz servo/stream cadence
 _LOST_ZERO_MISSES = 2       # consecutive observe misses -> zero vector
 _LOST_HOLD_S = 8.0          # lost this long -> absolute home + keep watching
 _HOME = (0.0, 10.0)         # measured level bearing at this desk perch
+# ── JOG SOFT LIMITS (2026-08-21 ~21:5x, THE SECOND PRIVACY-POSE SCAR): the
+# WinRT actuator's TILT_FLOOR (-60) only guards the ABSOLUTE path — the HID
+# jog stream has NO device-side floor, and the PD servo drove the head fully
+# down into the privacy pose (black frames, Zeke caught it by LOOKING at me).
+# Bearing readback is blind while jogging, so these rails run on the DEAD-
+# RECKONED estimate with fat margins: past a limit, only vectors that move
+# BACK INSIDE are allowed. Est is seeded from a real bearing read at servo
+# start (registers are valid until the first jog).
+_EST_TILT_FLOOR = -35.0
+_EST_TILT_CEIL = 60.0
+_EST_PAN_LIMIT = 115.0
 
 
 def _vec_report(x: float, y: float, z: float = 0.0) -> bytes:
@@ -180,7 +202,16 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
     st.update({"ticks": 0, "writes": 0, "zero_writes": 0, "misses": 0,
                "mode": "acquiring", "last_offset": None, "est_bearing": None,
                "error": None})
+    # Seed the dead-reckoned bearing from a REAL read — valid until the first
+    # jog (absolute paths keep the registers honest; jogging desyncs them).
     est_pan, est_tilt = float(_HOME[0]), float(_HOME[1])
+    try:
+        b0 = va.build_actuator().bearing()
+        if b0.get("confirmed"):
+            est_pan = float(b0.get("pan_deg") or est_pan)
+            est_tilt = float(b0.get("tilt_deg") or est_tilt)
+    except Exception:
+        pass
     lost_since: float | None = None
     homed_while_lost = False
     next_observe_ts = 0.0
@@ -213,24 +244,51 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         st["zero_writes"] += 1
                         st["mode"] = "centered"
                     else:
-                        # centering law: see module docstring sign notes
-                        ux = max(-_MAX_UNITS, min(_MAX_UNITS, -_GAIN_UNITS * dx))
-                        uy = max(-_MAX_UNITS, min(_MAX_UNITS, -_GAIN_UNITS * dy))
-                        # inside deadband on one axis -> freeze that axis
-                        if abs(dx) <= _DEADBAND:
-                            ux = 0.0
-                        if abs(dy) <= _DEADBAND:
-                            uy = 0.0
-                        # Sign-flip brake: the offset crossing zero between
-                        # ticks means we just SAILED PAST the target on that
-                        # axis (sampling lag) — cut the reversal hard so the
-                        # correction decays instead of ringing.
+                        # ── PD control: P centers, D matches the target's pace
+                        # (see _KD_UNITS derivation above).
+                        now_t = time.time()
                         pv = st.get("_prev_offset") or {}
-                        if pv and (dx * float(pv.get("dx") or 0.0)) < 0:
+                        dt_o = now_t - float(pv.get("ts") or now_t)
+                        rx = ry = 0.0
+                        if pv and 0.0 < dt_o < 1.0:
+                            raw_rx = (dx - float(pv.get("dx") or 0.0)) / dt_o
+                            raw_ry = (dy - float(pv.get("dy") or 0.0)) / dt_o
+                            rx = (_D_EMA * raw_rx
+                                  + (1 - _D_EMA) * float(st.get("_rate_x") or 0.0))
+                            ry = (_D_EMA * raw_ry
+                                  + (1 - _D_EMA) * float(st.get("_rate_y") or 0.0))
+                        st["_rate_x"], st["_rate_y"] = rx, ry
+                        ux = -( _GAIN_UNITS * dx + _KD_UNITS * rx)
+                        uy = -( _GAIN_UNITS * dy + _KD_UNITS * ry)
+                        ux = max(-_MAX_UNITS, min(_MAX_UNITS, ux))
+                        uy = max(-_MAX_UNITS, min(_MAX_UNITS, uy))
+                        # inside deadband AND target static on that axis ->
+                        # freeze it (a centered but MOVING target still needs
+                        # the feedforward to stay centered)
+                        if abs(dx) <= _DEADBAND and abs(rx) < _STATIC_RATE:
+                            ux = 0.0
+                        if abs(dy) <= _DEADBAND and abs(ry) < _STATIC_RATE:
+                            uy = 0.0
+                        # Sign-flip brake — STATIC targets only now: for a
+                        # mover, an offset zero-crossing is normal pace-
+                        # matching, not ringing.
+                        if pv and (dx * float(pv.get("dx") or 0.0)) < 0 \
+                                and abs(rx) < _STATIC_RATE:
                             ux *= 0.35
-                        if pv and (dy * float(pv.get("dy") or 0.0)) < 0:
+                        if pv and (dy * float(pv.get("dy") or 0.0)) < 0 \
+                                and abs(ry) < _STATIC_RATE:
                             uy *= 0.35
-                        st["_prev_offset"] = {"dx": dx, "dy": dy}
+                        st["_prev_offset"] = {"dx": dx, "dy": dy, "ts": now_t}
+                        # ── jog soft limits (see _EST_* above — privacy-pose
+                        # scar #2): past a limit, only inward motion passes.
+                        if est_tilt <= _EST_TILT_FLOOR and uy < 0:
+                            uy = 0.0
+                        if est_tilt >= _EST_TILT_CEIL and uy > 0:
+                            uy = 0.0
+                        if est_pan <= -_EST_PAN_LIMIT and ux < 0:
+                            ux = 0.0
+                        if est_pan >= _EST_PAN_LIMIT and ux > 0:
+                            ux = 0.0
                         if jog.write_vector(ux, uy):
                             st["writes"] += 1
                             st["mode"] = "pursuit"
