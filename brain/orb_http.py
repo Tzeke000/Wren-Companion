@@ -76,7 +76,18 @@ def _grab_camera_frame_b64() -> tuple[str | None, float]:
         if meta.frame is None:
             return None, 0.0
         import cv2  # noqa: WPS433
-        ok, jpg = cv2.imencode(".jpg", meta.frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        # Annotate a COPY at serve time (2026-08-21): the buffer holds CLEAN
+        # frames (vision consumers must never see drawn overlays — the tracker
+        # chased its own hand-dot graphics once). Display-only, this endpoint.
+        # NOTE: the same fix in operator_server.py was the WRONG server — the
+        # orb talks to THIS module on :5876.
+        frame = meta.frame
+        try:
+            from brain.camera_annotator import annotate_display as _annotate
+            frame = _annotate(frame.copy(), _g.get("_face_results"), _g)
+        except Exception:
+            pass  # raw frame beats no frame
+        ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
         if not ok:
             return None, 0.0
         return base64.b64encode(jpg.tobytes()).decode("ascii"), float(meta.age_sec)
