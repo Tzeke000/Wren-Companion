@@ -49,6 +49,7 @@ _REPORT = 32
 _UNIT_DEG_S = 0.85          # measured deg/s per vector unit
 _MAX_UNITS = 25.0           # app used ~±30; leave margin
 _DEADBAND = 0.05            # normalized offset that counts as centered
+_OBJECT_PERIOD_S = 0.05     # 20Hz for object targets (reval path is heavier)
 # 40 -> 20 (2026-08-21 late): at gain 40 the servo OSCILLATED on a STATIC
 # pyramid — the tracker's box lags the true position while the head moves, so
 # hot pursuit chases its own sampling lag past the target, exactly the step-
@@ -81,6 +82,42 @@ _HOME = (0.0, 10.0)         # measured level bearing at this desk perch
 _EST_TILT_FLOOR = -35.0
 _EST_TILT_CEIL = 60.0
 _EST_PAN_LIMIT = 115.0
+# ── HARD RESYNC (2026-08-21 ~22:0x, minutes after scar #2): dead-reckoning
+# alone CANNOT bound the physical pose — est said tilt −14 while Zeke watched
+# the head point straight UP (~100° divergence; the 0.85 deg/s/unit constant
+# is evidently wrong for sustained/fast streams). Every _RESYNC_S of pursuit,
+# zero the jog and SNAP the head to the estimate via the absolute path (write
+# is the only sync that exists — readback is blind). Bounded drift, small
+# visible hitch, worth it.
+_RESYNC_S = 3.0
+_TILT_MAX_UNITS = 12.0      # tilt arc is small; full-rate tilt overshoots hard
+# ── REAL-TIME FACE FAST PATH (2026-08-21 ~22:1x, Zeke: "track things like my
+# face in real time no lag"). The recognizer (InsightFace) updates ~5Hz, so
+# every consumer inherits ~200ms staleness — that IS the visible lag. Split:
+# identity stays with the slow recognizer; MOTION comes from a TrackerVit
+# seeded on the recognized face box and updated on EVERY fresh frame in this
+# loop. Recognizer results re-seat the tracker whenever they disagree (IoU),
+# so it can't drift onto another face for long. Servo runs faster too.
+# 0.05 -> 0.0333 (2026-08-21, Zeke: "make everything 30fps so everything is
+# on the same page and doesn't jitter"): capture runs 30fps (iris_runtime
+# interval=1/30), so the servo now ticks AT frame rate — every frame gets a
+# tracker update and a jog write; nothing beats or aliases against capture.
+# Budget per tick: vit ~10ms + odometry ~2ms + HID write ~1ms << 33ms.
+_PERSON_PERIOD_S = 1.0 / 30.0   # 30Hz — matched to the capture loop
+_FACE_IOU_RESEAT = 0.30
+_OBSERVE_STATE_S = 0.5      # slow va.observe cadence while fast path is live
+# ── VISUAL ODOMETRY (2026-08-21 ~22:1x, Zeke: "head drifts up and won't
+# follow me downward"). Root cause: est integrated COMMANDED velocity with a
+# constant that's wrong for sustained streams, so est sank below the tilt
+# floor while the head was physically high — the guard then clipped every
+# downward command (ratchet up). Fix: measure ACTUAL head motion by phase-
+# correlating consecutive downscaled frames (the same math that calibrated
+# the jog). 160px wide @ HFOV 68° -> 0.425 deg/px both axes; scene shift +x
+# = pan increased, +y = tilt increased (both verified 2026-08-21). Response
+# below _ODO_MIN_RESP (blur/motion) skips the update; the 3s resync mops up
+# residual drift.
+_ODO_DEG_PER_PX = 68.0 / 160.0
+_ODO_MIN_RESP = 0.10
 
 
 def _vec_report(x: float, y: float, z: float = 0.0) -> bytes:
@@ -195,6 +232,66 @@ def _hand_consistency(g: dict[str, Any], st: dict[str, Any], state: dict) -> Non
         pass  # consistency layer must never break the servo
 
 
+def _face_fast_offset(g: dict[str, Any], st: dict[str, Any],
+                      state: dict) -> tuple[float, float] | None:
+    """20Hz face position: TrackerVit rides the target's face between the
+    recognizer's ~5Hz updates; each NEW recognizer box re-seats the tracker
+    on IoU disagreement (identity slow, motion fast). Returns (dx, dy) or
+    None when there's nothing trustworthy — never guesses."""
+    try:
+        from brain import frame_store
+        from brain.object_lock import _iou, _new_tracker
+        res = frame_store.get_buffered_frame(max_age_sec=1.0)
+        if res.frame is None:
+            return None
+        label = str(state.get("target_label") or "").lower()
+        if not label:
+            t = str(state.get("target") or "")
+            label = t.split(":", 1)[1] if ":" in t else t
+        frame_new = res.capture_ts > float(st.get("_ft_frame_ts") or 0.0)
+        faces = g.get("_face_results") or []
+        m = next((f for f in faces
+                  if str(f.get("person_id") or "").lower() == label), None)
+        bb = (m.get("bbox") or m.get("box")) if m else None
+        if bb and len(bb) >= 4:
+            x1, y1, x2, y2 = (int(v) for v in bb[:4])
+            mb = (float(x1), float(y1),
+                  float(max(1, x2 - x1)), float(max(1, y2 - y1)))
+            sig = (x1, y1, x2, y2)
+            if sig != st.get("_ft_seed_sig"):
+                st["_ft_seed_sig"] = sig
+                cur = st.get("_ft_box")
+                if (st.get("_ft_trk") is None or cur is None
+                        or _iou(cur, mb) < _FACE_IOU_RESEAT):
+                    trk, _k = _new_tracker()
+                    trk.init(res.frame, (int(mb[0]), int(mb[1]),
+                                         int(mb[2]), int(mb[3])))
+                    st["_ft_trk"] = trk
+                    st["_ft_box"] = mb
+                    st["_ft_frame_ts"] = res.capture_ts
+                    st["_ft_reseats"] = int(st.get("_ft_reseats") or 0) + 1
+        trk = st.get("_ft_trk")
+        if trk is None:
+            return None
+        if frame_new:
+            ok, box = trk.update(res.frame)
+            st["_ft_frame_ts"] = res.capture_ts
+            if not ok:
+                st["_ft_trk"] = None
+                st["_ft_box"] = None
+                return None
+            st["_ft_box"] = tuple(float(v) for v in box)
+        box = st.get("_ft_box")
+        if not box:
+            return None
+        h, w = res.frame.shape[:2]
+        cx = box[0] + box[2] / 2.0
+        cy = box[1] + box[3] / 2.0
+        return ((cx - w / 2.0) / (w / 2.0), (cy - h / 2.0) / (h / 2.0))
+    except Exception:
+        return None
+
+
 def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -> None:
     from brain import visual_attention as va
 
@@ -215,22 +312,76 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
     lost_since: float | None = None
     homed_while_lost = False
     next_observe_ts = 0.0
+    last_resync_ts = time.time()
+    _odo_prev = None            # previous downscaled gray (visual odometry)
+    _odo_prev_ts = 0.0
+    try:
+        _act = va.build_actuator()
+        if not _act.capabilities().get("can_pan"):
+            _act = None
+    except Exception:
+        _act = None
     try:
         while not stop.is_set():
             t_tick = time.time()
             st["ticks"] += 1
             try:
+                state = g.get("_attention_state_obj") or {}
+                is_person = str(state.get("target") or "").startswith("person:")
+                period = _PERSON_PERIOD_S if is_person else _OBJECT_PERIOD_S
+                # ── visual odometry: est tracks MEASURED head motion, not
+                # commanded motion (see _ODO_* above). Runs on every fresh
+                # frame regardless of pursuit state.
+                try:
+                    import cv2 as _cv2
+                    import numpy as _np
+                    from brain import frame_store as _fs
+                    _ro = _fs.get_buffered_frame(max_age_sec=1.0)
+                    if _ro.frame is not None and _ro.capture_ts > _odo_prev_ts:
+                        _small = _np.float32(_cv2.cvtColor(
+                            _cv2.resize(_ro.frame, (160, 120)),
+                            _cv2.COLOR_BGR2GRAY)) / 255.0
+                        if _odo_prev is not None:
+                            (_sx, _sy), _resp = _cv2.phaseCorrelate(
+                                _odo_prev, _small)
+                            if (_resp >= _ODO_MIN_RESP
+                                    and abs(_sx) < 60 and abs(_sy) < 60):
+                                est_pan += _sx * _ODO_DEG_PER_PX
+                                est_tilt += _sy * _ODO_DEG_PER_PX
+                                est_pan = max(-150.0, min(150.0, est_pan))
+                                est_tilt = max(-60.0, min(90.0, est_tilt))
+                                st["est_bearing"] = {
+                                    "pan_deg": round(est_pan, 1),
+                                    "tilt_deg": round(est_tilt, 1)}
+                                st["odo_updates"] = int(
+                                    st.get("odo_updates") or 0) + 1
+                        _odo_prev = _small
+                        _odo_prev_ts = _ro.capture_ts
+                except Exception:
+                    pass
+                # ── real-time face fast path (person targets): 20Hz TrackerVit
+                # position, recognizer only for identity/reseat (see _PERSON_*).
+                fast_off = _face_fast_offset(g, st, state) if is_person else None
                 # ── GPU guard (measured 2026-08-21: while LOST, observe falls
                 # back to OWL-ViT re-acquisition — 12Hz of that pegged the 3060
                 # at 100%). Locked tracking is cheap (TrackerVit ~10ms CPU) and
-                # runs every tick; lost-mode re-detection runs at ~1Hz.
-                if t_tick < next_observe_ts:
-                    stop.wait(_PERIOD_S)
+                # runs every tick; lost-mode re-detection runs at ~1Hz. While
+                # the fast path is live, observe is state-upkeep only (~2Hz).
+                res = None
+                if t_tick >= next_observe_ts:
+                    res = va.observe(g)
+                    state = g.get("_attention_state_obj") or {}
+                    if fast_off is not None:
+                        next_observe_ts = t_tick + _OBSERVE_STATE_S
+                if fast_off is not None:
+                    offset = {"dx": fast_off[0], "dy": fast_off[1]}
+                    status = "locked"
+                elif res is not None:
+                    offset = (res or {}).get("offset") or state.get("offset")
+                    status = (res or {}).get("status")
+                else:
+                    stop.wait(period)
                     continue
-                res = va.observe(g)
-                state = g.get("_attention_state_obj") or {}
-                offset = (res or {}).get("offset") or state.get("offset")
-                status = (res or {}).get("status")
                 if status in ("locked", "seeking") and offset:
                     _hand_consistency(g, st, state)
                     dx = float(offset.get("dx") or 0.0)
@@ -289,14 +440,25 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                             ux = 0.0
                         if est_pan >= _EST_PAN_LIMIT and ux > 0:
                             ux = 0.0
+                        uy = max(-_TILT_MAX_UNITS, min(_TILT_MAX_UNITS, uy))
+                        # ── hard resync (see _RESYNC_S): snap physical to est
+                        # on cadence so dead-reckoning error stays bounded.
+                        if (_act is not None
+                                and time.time() - last_resync_ts >= _RESYNC_S):
+                            jog.stop()
+                            try:
+                                _act.look_at(est_pan, est_tilt)
+                                st["resyncs"] = int(st.get("resyncs") or 0) + 1
+                            except Exception:
+                                pass
+                            last_resync_ts = time.time()
                         if jog.write_vector(ux, uy):
                             st["writes"] += 1
                             st["mode"] = "pursuit"
-                            # dead-reckoned bearing (readback is blind to jog)
-                            est_pan += ux * _UNIT_DEG_S * _PERIOD_S
-                            est_tilt += uy * _UNIT_DEG_S * _PERIOD_S
-                            st["est_bearing"] = {"pan_deg": round(est_pan, 1),
-                                                 "tilt_deg": round(est_tilt, 1)}
+                            # est is maintained by VISUAL ODOMETRY above —
+                            # command-integration removed 2026-08-21 (its rate
+                            # constant was wrong for sustained streams and the
+                            # drifted est ratcheted the head upward).
                         else:
                             st["mode"] = "hid_error"
                 else:
@@ -333,10 +495,17 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
             except Exception as e:  # noqa: BLE001 — servo survives anything
                 st["error"] = repr(e)
                 jog.stop()
-            # keep cadence
+            # keep cadence (person 30Hz frame-matched, objects 20Hz)
+            try:
+                _p = (_PERSON_PERIOD_S
+                      if str((g.get("_attention_state_obj") or {})
+                             .get("target") or "").startswith("person:")
+                      else _OBJECT_PERIOD_S)
+            except Exception:
+                _p = _PERIOD_S
             dt = time.time() - t_tick
-            if dt < _PERIOD_S:
-                stop.wait(_PERIOD_S - dt)
+            if dt < _p:
+                stop.wait(_p - dt)
     finally:
         jog.close()
         st["mode"] = "stopped"
