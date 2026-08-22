@@ -166,6 +166,7 @@ class _PixyJog:
     def __init__(self) -> None:
         self._dev = None
         self._lock = threading.Lock()
+        self._burst_active = False  # for the PTZ audit: log burst edges, not 30Hz
 
     def _open(self):
         import hid
@@ -179,6 +180,18 @@ class _PixyJog:
                 if self._dev is None:
                     self._dev = self._open()
                 self._dev.write(_vec_report(x, y))
+                # Audit at burst EDGES only (2026-08-22 attributable-motion
+                # rule): a jog stream is 12-30Hz — log the transition into
+                # motion (with the opening vector) and back to zero.
+                moving = bool(x or y)
+                if moving != self._burst_active:
+                    self._burst_active = moving
+                    try:
+                        from brain.visual_attention import _ptz_audit
+                        _ptz_audit("jog_start" if moving else "jog_stop",
+                                   True, x=round(x, 1), y=round(y, 1))
+                    except Exception:
+                        pass
                 return True
             except Exception:
                 try:
