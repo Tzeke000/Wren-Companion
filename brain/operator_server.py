@@ -3137,6 +3137,16 @@ def create_app():
                     "age_sec": round(float(meta.age_sec), 3),
                     "freshness": str(meta.freshness),
                 }
+            # Annotate a COPY at serve time (2026-08-21): the buffer now holds
+            # CLEAN frames (vision consumers must never see drawn overlays —
+            # the tracker locked onto the hand-dot graphics). Zeke's
+            # "I can see what you see" overlays live here, display-only.
+            try:
+                from brain.camera_annotator import annotate_display as _annotate
+                host = _g()
+                frame = _annotate(frame.copy(), host.get("_face_results"), host)
+            except Exception:
+                pass  # raw frame beats no frame
             ok_enc, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if not ok_enc:
                 return {"ok": False, "error": "jpeg encode failed", "b64": None}

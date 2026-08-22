@@ -194,17 +194,16 @@ def _video_frame_capture_thread(g: dict[str, Any]) -> None:
                         except Exception as _ie:
                             print(f"[video_capture] insight analyze error: {_ie}")
 
-                # Annotate the frame with whatever face_results we currently have.
-                annotated = frame
-                try:
-                    from brain.camera_annotator import annotate_frame as _annotate
-                    annotated = _annotate(frame, g.get("_face_results"), g)
-                except Exception as _ae:
-                    print(f"[video_capture] annotate error: {_ae}")
-
+                # Push the CLEAN frame (2026-08-21): overlays used to be baked
+                # in here, and the object tracker locked onto the DRAWN hand
+                # dots / face mesh instead of the real object (chased the
+                # graphics into the ceiling, live, during Pyraminx play).
+                # Vision consumers (TrackerVit, OWL-ViT, sentry) must see
+                # reality only; the live-view endpoint annotates a COPY at
+                # serve time (operator_server.camera_live_frame).
                 try:
                     from brain.frame_store import push_frame as _push_frame
-                    _push_frame(annotated)
+                    _push_frame(frame)
                 except Exception:
                     pass
 
