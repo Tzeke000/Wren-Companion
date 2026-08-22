@@ -386,8 +386,16 @@ def _contact_health(bat: dict, nrv: dict) -> str | None:
     """CHARGE-CONTACT TRACKER (v0.3, 2026-07-20 incident): catches
     seated-but-not-charging, fossil feeds, and charging-lies — the three
     ways today's contact failure could have been caught early."""
+    # Full senses 'latest' snapshot rides along for fossil_check.classify
+    # (rule B below). Cheap: one json read per cycle.
+    try:
+        _sn = _read_json(SENSES)
+        _sn = _sn.get("latest") or {}
+    except Exception:
+        _sn = {}
     _hist.append({"volts": bat.get("volts"), "on_chg": nrv.get("on_charger"),
-                  "accel": tuple(nrv.get("accel") or [])})
+                  "accel": tuple(nrv.get("accel") or []),
+                  "sn": _sn, "bat": dict(bat) if bat else {}})
     del _hist[:-6]
     if len(_hist) < 3:
         return None
@@ -427,19 +435,27 @@ def _contact_health(bat: dict, nrv: dict) -> str | None:
         low = isinstance(volts, (int, float)) and volts < 3.7
         if low or not _stock_brain_owns_body():
             return "OFF CHARGER sustained 5+ min — seated-but-loose or wandered; needs re-seat"
-    # B: accel identical 3 cycles = sensor feed FOSSIL (fresh ts, dead values).
-    # 2026-07-28: only escalate when the robot is actually REACHABLE. A fossil
-    # while he's unreachable is EXPECTED and un-actionable — the daemon is
-    # already retrying every 15s and a bounce cannot conjure a dead robot back.
-    # Vector stranded flat at 15:24 and this fired every cycle afterwards; left
-    # alone it would nag for the ~month until Zeke is home and bury real signals.
-    # `bat["ok"]` is False exactly when the daemon can't read him at all.
-    # FAIL LOUD: only an explicit False suppresses; missing/None still escalates,
-    # because "I can't tell" must never silence a fossil on a LIVE robot (that
-    # case IS actionable — daemon holding a dead stream, the 15h outage of 07-27).
-    if len({h["accel"] for h in _hist[-3:]}) == 1 and _hist[-1]["accel"]:
-        if bat.get("ok") is not False:
-            return "SENSOR FEED FOSSIL — accel frozen 3 cycles; daemon needs a bounce; distrust all files"
+    # B: sensor-feed FOSSIL — DELEGATED to fossil_check.classify (2026-08-22).
+    # The old rule here ("accel identical 3 cycles = fossil") assumed real
+    # sensors always dither, but the daemon rounds accel to 0.1 — so a robot
+    # sitting motionless on the dock reads byte-identical accel behind a
+    # perfectly fresh feed. It cried the same wolf 19+ times over the night
+    # of 08-21→22. classify() keys on PHYSICAL CONTRADICTIONS only (feed
+    # clock frozen / wheels turning vs frozen pose / volts rising vs
+    # off-charger) — a still robot never trips one. Reachability suppression
+    # (the 07-28 stranded case, bat.ok is False) lives INSIDE classify(),
+    # same fail-loud convention as before.
+    try:
+        from fossil_check import classify as _fossil_classify
+        _sns = [h["sn"] for h in _hist[-4:] if h.get("sn", {}).get("t")]
+        _bts = [h["bat"] for h in _hist[-4:] if h.get("sn", {}).get("t")]
+        if len(_sns) >= 3:
+            _res = _fossil_classify(_sns, _bts)
+            if _res.get("fossil"):
+                return (f"SENSOR FEED FOSSIL ({_res['verdict']}) — "
+                        f"{_res['reason']}"[:300])
+    except Exception:
+        pass  # the detector must never crash the pilot loop
     # C: 'charging' but volts strictly falling 4 cycles = contact lie
     v = [h["volts"] for h in _hist[-4:] if h["volts"]]
     if (len(v) == 4 and all(a > b for a, b in zip(v, v[1:]))
