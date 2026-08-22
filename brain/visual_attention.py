@@ -324,6 +324,35 @@ class V4L2PtzActuator(Actuator):
                 "commanded": sets}
 
 
+def _ptz_audit(kind: str, ok: bool, **fields) -> None:
+    """Append every physical head command to state/attention/ptz_audit.jsonl
+    with WHO called it (2026-08-22: the head reached the ceiling twice with
+    zero servo writes and no log trail — movement must be attributable).
+    Audit must never break movement: swallow everything."""
+    try:
+        import json as _json
+        import time as _time
+        import traceback as _tb
+        from pathlib import Path as _Path
+        callers = []
+        for fr in reversed(_tb.extract_stack(limit=14)[:-2]):
+            fn = (fr.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+            if fn == "visual_attention.py":
+                continue
+            callers.append(f"{fn}:{fr.name}:{fr.lineno}")
+            if len(callers) >= 3:
+                break
+        rec = {"ts": _time.time(), "kind": kind, "ok": ok,
+               "callers": callers}
+        rec.update(fields)
+        p = _Path(__file__).resolve().parent.parent / "state" / "attention" / "ptz_audit.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec, default=str) + "\n")
+    except Exception:
+        pass
+
+
 class WinRtPtzActuator(Actuator):
     """EMEET PIXY via WinRT MediaCapture VideoDeviceController — the Windows
     interim home (camera on the tower until the server exists).
@@ -519,13 +548,18 @@ class WinRtPtzActuator(Actuator):
         try:
             results = self._with_controller_sync(act)
         except Exception as e:
+            _ptz_audit("look_at", False, pan=pan_deg, tilt=tilt_deg,
+                       error=repr(e)[:120])
             return {"ok": False, "moved": False, "reason": repr(e)}
         if not all(results.values()):
+            _ptz_audit("look_at", False, pan=pan_deg, tilt=tilt_deg,
+                       error=f"refused: {results}")
             return {"ok": False, "moved": False,
                     "reason": f"try_set_value refused: {results}"}
         self._last = {"pan_deg": pan_deg,
                       "tilt_deg": tilt_deg if tilt_deg is not None else self._last["tilt_deg"],
                       "zoom": zoom if zoom is not None else self._last["zoom"]}
+        _ptz_audit("look_at", True, pan=pan_deg, tilt=tilt_deg, zoom=zoom)
         return {"ok": True, "moved": True, "bearing": dict(self._last),
                 "commanded": results}
 
