@@ -68,6 +68,13 @@ class InsightFaceEngine:
     def __init__(self) -> None:
         self._app: Any = None
         self._known: dict[str, Any] = {}        # person_id -> avg embedding (np.ndarray)
+        # person_id -> list of PER-PHOTO embeddings (2026-08-22, Zeke:
+        # "recognizable at all angles"). A single averaged vector buries
+        # minority poses: 6 head-down shots averaged into 25 frontals moved
+        # the centroid ~nothing, and the head-down enrollment photo ITSELF
+        # matched unknown@0.25. Matching is max-similarity across these;
+        # the avg in _known stays as fallback/compat.
+        self._known_multi: dict[str, list] = {}
         self._known_counts: dict[str, int] = {}  # photos seen per person
         self._lock = threading.Lock()
         self._available = False
@@ -240,6 +247,7 @@ class InsightFaceEngine:
             if embs:
                 avg = np.mean(np.stack(embs, axis=0), axis=0)
                 self._known[pid] = avg
+                self._known_multi[pid] = [np.asarray(e) for e in embs]
                 self._known_counts[pid] = len(embs)
                 loaded += len(embs)
                 print(f"[insight_face]   {pid}: {len(embs)} photos")
@@ -295,11 +303,15 @@ class InsightFaceEngine:
         best_score = 0.0
         emb_norm = float(np.linalg.norm(emb)) or 1.0
         for pid, known in self._known.items():
-            kn = float(np.linalg.norm(known)) or 1.0
-            score = float(np.dot(emb, known) / (emb_norm * kn))
-            if score > best_score:
-                best_score = score
-                best_pid = pid
+            # Max similarity across per-photo embeddings (angle coverage);
+            # falls back to the averaged vector for entries loaded before
+            # _known_multi existed.
+            for kv in (self._known_multi.get(pid) or [known]):
+                kn = float(np.linalg.norm(kv)) or 1.0
+                score = float(np.dot(emb, kv) / (emb_norm * kn))
+                if score > best_score:
+                    best_score = score
+                    best_pid = pid
         if best_score >= _SIMILARITY_THRESHOLD:
             return best_pid, best_score
         return "unknown", best_score
@@ -322,6 +334,7 @@ class InsightFaceEngine:
                 else:
                     self._known[person_id] = emb
                     self._known_counts[person_id] = 1
+                self._known_multi.setdefault(person_id, []).append(np.asarray(emb))
             return True
         except Exception as e:
             print(f"[insight_face] add_face error: {e!r}")
@@ -347,6 +360,7 @@ class InsightFaceEngine:
             return len(self._known)
         with self._lock:
             self._known = {}
+            self._known_multi = {}
             self._known_counts = {}
         self._load_faces(target)
         return len(self._known)
