@@ -286,6 +286,23 @@ def _is_speak_tool(block):
     return False
 
 
+def _discord_reply_text(block):
+    """The text of a Discord reply tool-use, or None if this isn't one.
+
+    Needed because on a Discord turn the model's STREAMED narration (full_text)
+    is not what Zeke actually reads — the real message is the `text` argument
+    handed to the discord reply tool, and the narration is usually just a short
+    console recap afterwards. Logging full_text would put the recap in the
+    transcript and drop the actual conversation. (2026-08-16)
+    """
+    name = getattr(block, "name", "") or ""
+    if "discord" in name and (name.endswith("reply") or name.endswith("send")):
+        inp = getattr(block, "input", {}) or {}
+        text = str(inp.get("text", "") or "").strip()
+        return text or None
+    return None
+
+
 def daemon_cmd(cmd, args=None, timeout=5.0):
     """Send one newline-delimited JSON command to the voice daemon; return its response line."""
     payload = json.dumps({"cmd": cmd, "args": args or {}}) + "\n"
@@ -1274,9 +1291,24 @@ def _enable_ansi_and_print_banner() -> None:
 # text on the home page 2026-07-06). The host now logs the live conversation itself:
 # user side when a voice/terminal turn dequeues, assistant side when the reply turn
 # completes. Orb turns are NOT logged here — the runtime's chat_reply already logs
-# both sides (double-write would duplicate bubbles). Discord/letters/perception stay
-# out: they have their own surfaces and aren't the room conversation.
-_TRANSCRIPT_MODALITY = {"voice": "voice", "terminal": "chat"}
+# both sides (double-write would duplicate bubbles). Letters/perception stay out:
+# they have their own surfaces and aren't the room conversation.
+#
+# 2026-08-16 — DISCORD ADDED, and this reverses a deliberate exclusion, so here is
+# the reason. The original rule ("Discord isn't the room conversation") was TRUE
+# when Zeke was home: the room was voice and the orb, and Discord was an away-channel.
+# It stopped being true on 2026-07-20 when he deployed. He has now been gone ~4 weeks
+# with Discord as the ONLY surface he can reach me on — so the transcript, which is
+# supposed to be the record of the conversation, has been recording an empty room
+# while the entire actual relationship happened elsewhere. Downstream that starved
+# sleep_mode (summarising a window from July), iris_inner_monologue, and the orb's
+# own history view. The instruction was followed correctly for a month after its
+# reason expired. Cf. memory: "a rule needs its REASON re-checked, not its
+# instruction followed" (no_silent_withholding_2026-08-08).
+# Modality is "discord" rather than "chat" on purpose — no consumer switches on the
+# value (checked: orb_http:710, inner_monologue:308/377 pass it straight through),
+# so a distinct value is free, and honest about which room a line came from.
+_TRANSCRIPT_MODALITY = {"voice": "voice", "terminal": "chat", "discord": "discord"}
 _transcript_ready = [False]
 
 
@@ -1356,15 +1388,17 @@ async def stream_consumer(client, turn, boundary):
     full_text = ""
     tool_calls = 0
     spoke_on_purpose = False
+    sent_reply = ""          # actual Discord message body (see _discord_reply_text)
     segment_open = False
     boundary.set()
 
     def _segment_start():
-        nonlocal buf, full_text, tool_calls, spoke_on_purpose, segment_open
+        nonlocal buf, full_text, tool_calls, spoke_on_purpose, sent_reply, segment_open
         buf = ""
         full_text = ""
         tool_calls = 0
         spoke_on_purpose = False
+        sent_reply = ""
         segment_open = True
         boundary.clear()
 
@@ -1404,6 +1438,11 @@ async def stream_consumer(client, turn, boundary):
                         tool_calls += 1
                         if _is_speak_tool(block):
                             spoke_on_purpose = True
+                        _sent = _discord_reply_text(block)
+                        if _sent:
+                            # Keep the LAST reply of the turn; multi-message turns
+                            # end on the substantive one.
+                            sent_reply = _sent
                         if _ACTIVITY:
                             print("\n  . " + describe_tool(block.name, block.input), flush=True)
             elif _ACTIVITY and isinstance(msg, UserMessage):
@@ -1430,7 +1469,12 @@ async def stream_consumer(client, turn, boundary):
                     # orb's history view shows THIS conversation.
                     t_mod = _TRANSCRIPT_MODALITY.get(turn.source or "")
                     if t_mod:
-                        transcript_append("assistant", full_text, t_mod)
+                        # On Discord the streamed text is a console recap; the real
+                        # message went out as the reply tool's `text`. Prefer it,
+                        # fall back to the narration if no reply tool ever fired
+                        # (e.g. the turn errored before sending).
+                        said = sent_reply if (t_mod == "discord" and sent_reply) else full_text
+                        transcript_append("assistant", said, t_mod)
                     turn.active = False
                     turn.done.set()
                 segment_open = False

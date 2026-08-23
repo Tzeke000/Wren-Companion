@@ -1011,6 +1011,24 @@ def run_startup(g: dict[str, Any]) -> None:
 
     print("[startup] step: voice loop")
     try:
+        # 2026-08-21 gate: honor Zeke's standing voice-off directive (07-23).
+        # Without this check the loop starts whenever an STT-visible mic exists —
+        # which became true 08-19 when the EMEET PIXY (built-in mono mic) replaced
+        # the mic-less webcam, and Whisper then pegged the GPU transcribing room
+        # noise for hours (found 08-21, GPU 99% + garbage classify/chatlog turns).
+        # The flag gates the DAEMONS via voice_watchdog; this gates the IN-PROCESS loop.
+        from pathlib import Path as _VLPath
+        _voice_off_flag = _VLPath(__file__).resolve().parent.parent / "state" / "voice_deliberately_off.json"
+        _voice_off = False
+        try:
+            import json as _vljson
+            if _voice_off_flag.is_file():
+                _voice_off = bool(_vljson.loads(_voice_off_flag.read_text(encoding="utf-8")).get("off"))
+        except Exception:
+            _voice_off = False
+        if _voice_off:
+            print("[voice_loop] SKIPPED — state/voice_deliberately_off.json is set (Zeke 07-23 directive). Delete/flip the flag to re-enable.")
+            raise RuntimeError("voice_deliberately_off")
         from brain.voice_loop import start_voice_loop
         _vl_ok = start_voice_loop(g)
         if _vl_ok:
