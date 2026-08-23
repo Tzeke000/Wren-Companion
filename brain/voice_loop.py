@@ -198,6 +198,22 @@ class VoiceLoop:
     def _loop(self) -> None:
         while self._active:
             try:
+                # 2026-08-21 gate: honor Zeke's standing voice-off directive even
+                # if the loop was started (startup.py gate is also in place, but
+                # this makes the RUNNING loop killable/idle-able via the flag —
+                # needed because .tmp/body_pause.flag is shared with the VIDEO
+                # loop (eyes_reload sets/clears it), so it can't silence audio
+                # without blinding the eyes. This check idles ONLY audio.
+                try:
+                    from pathlib import Path as _VOPath
+                    import json as _vojson
+                    _vo_flag = _VOPath(__file__).resolve().parent.parent / "state" / "voice_deliberately_off.json"
+                    if _vo_flag.is_file() and bool(_vojson.loads(_vo_flag.read_text(encoding="utf-8")).get("off")):
+                        self._set_state("passive")
+                        time.sleep(5.0)
+                        continue
+                except Exception:
+                    pass
                 # ── Choose passive vs attentive ────────────────────────────
                 # Take the max of our own _last_speak_end_ts and the global —
                 # so question_engine / proactive_triggers / face_greeting

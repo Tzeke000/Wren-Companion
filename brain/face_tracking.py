@@ -97,10 +97,13 @@ def update(g: dict[str, Any], *, recognized_person_id: str | None,
         # Nobody in frame. Not an unknown person — an empty room. Clear any
         # in-flight candidacy so a person who leaves mid-jitter and a different
         # person who arrives later never merge into one 12-second candidate.
+        # ALSO clear the live promoted unknown (2026-08-14 fix): departure is
+        # what re-arms promotion. Without this, see the metronome bug below.
         with _TRACK_LOCK:
             st = _state(g)
             st["candidate_unknown"] = False
             st["candidate_unknown_since_ts"] = 0.0
+            st["promoted_unknown_id"] = None
         out["status"] = "no_face"
         return out
 
@@ -111,9 +114,11 @@ def update(g: dict[str, Any], *, recognized_person_id: str | None,
         st = _state(g)
 
         if recognized_person_id and recognized_person_id != "unknown":
-            # Known face. Reset unknown candidacy.
+            # Known face. Reset unknown candidacy AND the live promoted unknown —
+            # a recognized interlude means any later unknown is genuinely new.
             st["candidate_unknown"] = False
             st["candidate_unknown_since_ts"] = 0.0
+            st["promoted_unknown_id"] = None
             st["last_known_seen_ts"] = frame_ts
             if st["current_person_id"] == recognized_person_id:
                 st["consecutive_frames"] = int(st.get("consecutive_frames") or 0) + 1
@@ -128,6 +133,19 @@ def update(g: dict[str, Any], *, recognized_person_id: str | None,
 
         # Unknown face (or no face at all).
         if not recognized_person_id or recognized_person_id == "unknown":
+            # ★ 2026-08-14 METRONOME FIX. Old lifecycle: promote → reset candidacy
+            # → the STILL-PRESENT unknown re-candidates → cooldown (300s) expires →
+            # promote AGAIN with a fresh temp_id — one fake "new person" every 5
+            # minutes forever (a static scene feature insightface misreads as a
+            # face fed this for days; 288 promotions/day in iris_body_log). A
+            # continuously-present unknown is ONE person, already promoted. Only
+            # a real gap (no_face) or a recognized interlude re-arms promotion —
+            # both of those branches clear promoted_unknown_id.
+            if st.get("promoted_unknown_id"):
+                st["last_seen_ts"] = frame_ts
+                out["status"] = "promoted_unknown_persisting"
+                out["temp_id"] = st.get("promoted_unknown_id")
+                return out
             if not st.get("candidate_unknown"):
                 # First frame of unknown candidacy. Don't promote yet.
                 st["candidate_unknown"] = True
