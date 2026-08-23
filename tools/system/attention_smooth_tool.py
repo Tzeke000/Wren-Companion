@@ -120,6 +120,14 @@ _RESYNC_MIN_DEG = 4.0
 # odometry measures the real motion (double-count hazard).
 _STICTION_UNITS = 5.0       # |vector| below this doesn't overcome the motor
 _TRIM_MIN_S = 1.2           # min gap between trims (let vision catch up)
+# static-trim v2 pulse shape. MISSING since v2 was written 2026-08-21 23:2x —
+# both names were used in the trim branch and never defined, so every static
+# trim raised NameError("_TRIM_PULSE_UNITS") and the branch has NEVER once run.
+# Found 2026-08-22 19:5x from st["error"] after Zeke said my head "went a bit
+# wild" with two people in frame.
+_TRIM_PULSE_UNITS = 8.0     # above stiction (5.0), far below _MAX_UNITS (25)
+_TRIM_PULSE_MAX_S = 0.25    # cap one trim at ~8*0.85*0.25 = 1.7 deg; the next
+                            # trim (>=_TRIM_MIN_S later) takes the residual
 _HFOV_DEG = 68.0
 _VFOV_DEG = _HFOV_DEG * 3.0 / 4.0  # 4:3 sensor modes
 _TILT_MAX_UNITS = 12.0      # tilt arc is small; full-rate tilt overshoots hard
@@ -150,6 +158,25 @@ _OBSERVE_STATE_S = 0.5      # slow va.observe cadence while fast path is live
 # residual drift.
 _ODO_DEG_PER_PX = 68.0 / 160.0
 _ODO_MIN_RESP = 0.10
+# ── OBSERVABILITY (2026-08-22, Zeke: "make the logs tell you what happened").
+# The safety rails below are evaluated against `est`, not against measured
+# truth. On 08-22 est had wandered ~30-40 deg from the device's own bearing and
+# tilt consequently reached +89.5 with _EST_TILT_CEIL=60 nominally in force —
+# invisible in every log. Drift beyond this many degrees now writes an
+# `est_drift` record to ptz_audit.jsonl at resync time.
+_EST_DRIFT_WARN_DEG = 12.0
+# Settle time after an absolute resync move before re-reading the device to
+# re-anchor est. The move is small (it's correcting <= a few seconds of drift)
+# and the resync already costs a visible hitch; this just stops us adopting a
+# mid-flight reading as truth.
+_REANCHOR_SETTLE_S = 0.18
+# Drift beyond this forces a resync on the NEXT opportunity even if the head
+# has barely moved (_RESYNC_MIN_DEG gating normally skips it). A big drift on a
+# static target means odometry is being fed scene motion that isn't ours —
+# people walking through frame — which is exactly when est is least trustworthy
+# and exactly when the old code would coast on it. Found with two people in
+# frame on 2026-08-22.
+_EST_DRIFT_FORCE_DEG = 20.0
 
 
 def _vec_report(x: float, y: float, z: float = 0.0) -> bytes:
@@ -548,22 +575,124 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         if est_pan >= _EST_PAN_LIMIT and ux > 0:
                             ux = 0.0
                         uy = max(-_TILT_MAX_UNITS, min(_TILT_MAX_UNITS, uy))
-                        # ── hard resync (see _RESYNC_S): snap physical to est
-                        # on cadence so dead-reckoning error stays bounded.
-                        # Gated on ACTUAL jog effort since the last snap
-                        # (_RESYNC_MIN_DEG): no motion -> no drift -> no twitch.
+                        # ── hard resync (see _RESYNC_S): re-anchor est to the
+                        # device on cadence so dead-reckoning error stays
+                        # bounded. Gated on ACTUAL jog effort since the last
+                        # snap (_RESYNC_MIN_DEG): no motion -> no drift -> no
+                        # twitch. EXCEPT when the last measured drift was large
+                        # — then the effort gate is the wrong test, because the
+                        # drift came from scene motion (someone walking through
+                        # frame) rather than from our own jogging, and coasting
+                        # on that est is what put the head on the ceiling.
                         st["_jog_effort_deg"] = (
                             float(st.get("_jog_effort_deg") or 0.0)
                             + (abs(ux) + abs(uy)) * _UNIT_DEG_S * period)
+                        _ld = st.get("last_est_drift") or {}
+                        _drift_now = max(abs(float(_ld.get("pan") or 0.0)),
+                                         abs(float(_ld.get("tilt") or 0.0)))
+                        _forced = _drift_now >= _EST_DRIFT_FORCE_DEG
                         if (_act is not None
                                 and time.time() - last_resync_ts >= _RESYNC_S
-                                and st["_jog_effort_deg"] >= _RESYNC_MIN_DEG):
+                                and (st["_jog_effort_deg"] >= _RESYNC_MIN_DEG
+                                     or _forced)):
+                            if _forced:
+                                st["forced_resyncs"] = int(
+                                    st.get("forced_resyncs") or 0) + 1
                             jog.stop()
+                            # Read the device's own bearing BEFORE we overwrite
+                            # it. Readback is jog-blind, so this is the last
+                            # ABSOLUTE position the device was told about —
+                            # comparing it to est is how far dead-reckoning has
+                            # wandered since. 2026-08-22: est said pan -23/tilt
+                            # -37 while the head was really at pan 8/tilt 5, and
+                            # NOTHING logged it — the est-based safety rails
+                            # then let tilt reach +89.5 with a +60 ceiling set.
+                            _read = None
                             try:
-                                _act.look_at(est_pan, est_tilt)
+                                _b = _act.bearing() or {}
+                                _read = (float(_b.get("pan_deg")),
+                                         float(_b.get("tilt_deg")))
+                            except Exception:
+                                _read = None
+                            # ── RE-ANCHOR, not snap-to-estimate (2026-08-22,
+                            # Zeke out, explicit go-ahead). THE ROOT CAUSE: this
+                            # used to be look_at(est_pan, est_tilt) — driving the
+                            # PHYSICAL head to wherever dead-reckoning believed it
+                            # was. Sync ran the wrong way: a drifted est didn't get
+                            # corrected, it got OBEYED, and the head was dragged to
+                            # the drift. That is how tilt reached +89.5 with a +60
+                            # ceiling set — est floated up, and every 3s the resync
+                            # faithfully drove the head up to meet it.
+                            # Now: (1) clamp the commanded pose to the SOFT rails so
+                            # a bad est can never command an unsafe pose even once,
+                            # (2) after the absolute move, re-read the device and
+                            # ADOPT its value as est. Drift is now bounded by ONE
+                            # resync interval of odometry error instead of
+                            # accumulating without limit.
+                            #
+                            # MEASURED before trusting it (2026-08-22, empty room):
+                            # commanded +10.0 pan by the absolute path; phase-
+                            # correlating the before/after frames gave +9.9 deg
+                            # actual (scripts/measure_ptz_move.py, response 0.26);
+                            # live act.bearing() then read 10.0. Command, physical
+                            # world and readback agree to 0.1 deg, so adopting the
+                            # post-move readback really is re-anchoring to truth.
+                            # (Readback is blind to JOG only — that part stands.)
+                            # ⚠ attention_status serves a CACHED bearing and read
+                            # pan 0.0 confirmed=true during this same test, 6000s
+                            # stale. Use attention_report / act.bearing() live.
+                            _safe_pan = max(-_EST_PAN_LIMIT,
+                                            min(_EST_PAN_LIMIT, est_pan))
+                            _safe_tilt = max(_EST_TILT_FLOOR,
+                                             min(_EST_TILT_CEIL, est_tilt))
+                            if (_safe_pan != est_pan) or (_safe_tilt != est_tilt):
+                                st["rail_clamped_resyncs"] = int(
+                                    st.get("rail_clamped_resyncs") or 0) + 1
+                            try:
+                                _act.look_at(_safe_pan, _safe_tilt)
                                 st["resyncs"] = int(st.get("resyncs") or 0) + 1
+                                est_pan, est_tilt = _safe_pan, _safe_tilt
+                                stop.wait(_REANCHOR_SETTLE_S)   # let the motor land
+                                _after = _act.bearing() or {}
+                                if _after.get("confirmed"):
+                                    _ap = _after.get("pan_deg")
+                                    _at = _after.get("tilt_deg")
+                                    if _ap is not None and _at is not None:
+                                        _corr = max(abs(est_pan - float(_ap)),
+                                                    abs(est_tilt - float(_at)))
+                                        est_pan, est_tilt = float(_ap), float(_at)
+                                        st["reanchors"] = int(
+                                            st.get("reanchors") or 0) + 1
+                                        st["last_reanchor_deg"] = round(_corr, 1)
+                                        st["est_bearing"] = {
+                                            "pan_deg": round(est_pan, 1),
+                                            "tilt_deg": round(est_tilt, 1)}
                             except Exception:
                                 pass
+                            if _read is not None:
+                                _dp = est_pan - _read[0]
+                                _dt = est_tilt - _read[1]
+                                st["last_est_drift"] = {"pan": round(_dp, 1),
+                                                        "tilt": round(_dt, 1)}
+                                st["max_est_drift"] = max(
+                                    float(st.get("max_est_drift") or 0.0),
+                                    max(abs(_dp), abs(_dt)))
+                                # Only log the ones that matter: a drift bigger
+                                # than the deadband is a rail-correctness bug.
+                                if max(abs(_dp), abs(_dt)) >= _EST_DRIFT_WARN_DEG:
+                                    try:
+                                        from brain.visual_attention import _ptz_audit
+                                        _ptz_audit("est_drift", False,
+                                                   est_pan=round(est_pan, 1),
+                                                   est_tilt=round(est_tilt, 1),
+                                                   read_pan=round(_read[0], 1),
+                                                   read_tilt=round(_read[1], 1),
+                                                   drift_pan=round(_dp, 1),
+                                                   drift_tilt=round(_dt, 1),
+                                                   odo_updates=st.get("odo_updates"),
+                                                   resyncs=st.get("resyncs"))
+                                    except Exception:
+                                        pass
                             st["_jog_effort_deg"] = 0.0
                             last_resync_ts = time.time()
                         if jog.write_vector(ux, uy):
@@ -608,6 +737,35 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         homed_while_lost = True
             except Exception as e:  # noqa: BLE001 — servo survives anything
                 st["error"] = repr(e)
+                # 2026-08-22 (Zeke: "make the logs tell you what happened"):
+                # this handler used to be the END of the story — the servo ate
+                # the exception into st["error"], a field nothing reads, and
+                # kept driving the head. static-trim v2 raised NameError on
+                # EVERY trim for a full day and no log ever said so, while
+                # ptz_audit happily recorded 383/383 commands ok=true.
+                # Now: first sighting of each distinct error goes to the audit
+                # trail. Dedup on the message so a 12Hz loop can't spam it.
+                st["error_count"] = int(st.get("error_count") or 0) + 1
+                if st.get("_last_logged_error") != st["error"]:
+                    st["_last_logged_error"] = st["error"]
+                    try:
+                        import traceback as _tb2
+
+                        from brain.visual_attention import _ptz_audit
+                        _frames = _tb2.extract_tb(e.__traceback__)
+                        _site = ""
+                        if _frames:
+                            _f = _frames[-1]
+                            _fn = (_f.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+                            _site = f"{_fn}:{_f.name}:{_f.lineno}"
+                        _ptz_audit("servo_error", False,
+                                   error=st["error"],
+                                   raised_at=_site,
+                                   mode=st.get("mode"),
+                                   ticks=st.get("ticks"),
+                                   error_count=st.get("error_count"))
+                    except Exception:
+                        pass
                 jog.stop()
             # keep cadence (person 30Hz frame-matched, objects 20Hz)
             try:
