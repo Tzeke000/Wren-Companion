@@ -790,6 +790,7 @@ def set_target(g: dict[str, Any], spec: str, *, actuator: Actuator | None = None
         st = _state(g)
         now = time.time()
         if tid == "home":
+            _drop_object_lock_unless(None)  # 2026-08-24: home releases any lock
             r = act.home()
             st.update({"target": None, "target_label": None, "status": "idle",
                        "since_ts": now, "acquire_frames": 0, "miss_frames": 0,
@@ -809,6 +810,10 @@ def set_target(g: dict[str, Any], spec: str, *, actuator: Actuator | None = None
         # giraffe's distance — a confident wrong answer, which is the only kind
         # that actually costs anything. A reading belongs to the target it was
         # taken from; it does not survive the target.
+        # 2026-08-24: the object lock is per-target state too — it must not
+        # survive a target switch any more than the bbox does (see
+        # _drop_object_lock_unless). Kept only if re-setting the same object.
+        _drop_object_lock_unless(tid)
         st.update({"target": tid, "target_label": label, "status": "seeking",
                    "since_ts": now, "acquire_frames": 0, "miss_frames": 0,
                    "last_seen_ts": 0.0, "offset": None, "confidence": None,
@@ -825,6 +830,25 @@ def set_target(g: dict[str, Any], spec: str, *, actuator: Actuator | None = None
                 "state": dict(st)}
 
 
+def _drop_object_lock_unless(keep_tid: str | None) -> None:
+    """Release brain.object_lock unless it currently holds exactly `keep_tid`.
+
+    WHY (2026-08-24, per stale_object_lock_hijacks_person_target_2026-08-23):
+    a lock is a THIRD piece of state that outlives both the attention target
+    and the bearing. A 6-hour-old test lock on 'object:picture frame' survived
+    a switch to 'person:zeke' and aimed the head at the wall as Zeke walked in
+    — and `attention_look clear` did not drop it because nothing did. Every
+    target change or clear now releases the lock, keeping it only when the new
+    target IS the locked object (continuity of an intentional re-set).
+    """
+    try:
+        from brain import object_lock
+        if object_lock.status().get("target_id") != keep_tid:
+            object_lock.drop("attention target changed/cleared")
+    except Exception:
+        pass
+
+
 def clear_target(g: dict[str, Any]) -> dict:
     with _LOCK:
         st = _state(g)
@@ -833,6 +857,9 @@ def clear_target(g: dict[str, Any]) -> dict:
         # bbox and confidence. Lower stakes than the set_target case — probe_depth
         # refuses outright when target is None — but a state dict that reports a
         # bbox while claiming to track nothing is just untrue.
+        # 2026-08-24: clear means CLEAR — including the object lock, which
+        # `attention_look clear` famously did not drop (2026-08-23 hijack).
+        _drop_object_lock_unless(None)
         st.update({"target": None, "target_label": None, "status": "idle",
                    "acquire_frames": 0, "miss_frames": 0, "since_ts": time.time(),
                    "offset": None, "confidence": None, "last_bbox": None,
