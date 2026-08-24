@@ -340,6 +340,18 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
 
     const clock = new THREE.Clock();
     let fid = 0;
+    // Render-loop gate (2026-08-24 GPU discipline — see block after animate()).
+    let renderPaused = false;
+    const pauseLoop = () => {
+      if (renderPaused) return;
+      renderPaused = true;
+      cancelAnimationFrame(fid);
+    };
+    const resumeLoop = () => {
+      if (!renderPaused) return;
+      renderPaused = false;
+      fid = requestAnimationFrame(animate);
+    };
     // Recenter animation state — captured here so the animate loop can read
     // it without going through React. `lastSeenRecenterTrigger` is the
     // trigger value we last reacted to; `recenterStartT` is the clock time
@@ -556,6 +568,7 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     scene.add(wakeRing);
 
     function animate(){
+      if (renderPaused) return;
       fid=requestAnimationFrame(animate);
       const t=clock.getElapsedTime();
       const liveState = stateRef.current;
@@ -882,7 +895,34 @@ function OrbCanvasInner({ emotion, emotionColor, state, size = 320, shapeOverrid
     }
     animate();
 
+    // ── GPU discipline (2026-08-24): stop rendering when nobody can see us ──
+    // Found during Zeke's Half Sword session: the orb burned ~24% of the 3060
+    // even MINIMIZED — WebView2 keeps firing rAF for minimized Tauri windows,
+    // so document.hidden alone is not a reliable signal. Two hooks:
+    //   1. visibilitychange — catches hidden webview (covers most cases)
+    //   2. a 1s isMinimized() poll via the Tauri window API — catches minimize,
+    //      which WebView2 does not surface as visibility.
+    // Pause = stop requeueing rAF. Scene stays warm; resume picks up mid-breath
+    // (t derives from clock.getElapsedTime(), so no state is lost).
+    const onVisibility = () => { document.hidden ? pauseLoop() : resumeLoop(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    let minimizedPoll: ReturnType<typeof setInterval> | undefined;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        minimizedPoll = setInterval(async () => {
+          try {
+            if (await win.isMinimized()) pauseLoop();
+            else if (!document.hidden) resumeLoop();
+          } catch { /* window gone mid-poll — dispose will clear us */ }
+        }, 1000);
+      } catch { /* not running under Tauri (dev browser) — visibility hook still active */ }
+    })();
+
     disposeRef.current=()=>{
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (minimizedPoll !== undefined) clearInterval(minimizedPoll);
       cancelAnimationFrame(fid);
       renderer.dispose();
       [coreGeo,igGeo,shellGeo,pGeo].forEach(g=>g.dispose());
