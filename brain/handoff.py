@@ -89,6 +89,28 @@ def _path(base_dir: Path) -> Path:
     return p
 
 
+def _read_json(path: Path) -> dict:
+    """Best-effort raw JSON read. Returns {} on any failure.
+
+    WHY (2026-08-24, per shadow_avaagent_stack_in_iris_runtime_2026-08-22):
+    this module used to `import avaagent` to reach load_mood/load_goal_system/
+    load_session_state. Importing avaagent runs its module top-level, which
+    boots Ava's ENTIRE stack inside the importing process — a second camera
+    loop on the one webcam, second STT, second TTS. A handoff digest does not
+    need the live stack; it needs a few fields from state files. So we read
+    the files directly and never import avaagent here.
+    """
+    try:
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
 def _gather(g: dict[str, Any], base_dir: Path) -> dict[str, Any]:
     """Collect the handoff state from various subsystems. Best-effort —
     each subsystem read is in try/except so a single failure doesn't
@@ -98,10 +120,10 @@ def _gather(g: dict[str, Any], base_dir: Path) -> dict[str, Any]:
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
     }
 
-    # Mood
+    # Mood — raw file read; the enriched energy/intensity fields only exist
+    # after avaagent's load_mood() enrichment, so they default to 0.5 here.
     try:
-        import avaagent as _av
-        mood = _av.load_mood() or {}
+        mood = _read_json(base_dir / "ava_mood.json")
         out["mood"] = {
             "primary": str(mood.get("current_mood") or "neutral"),
             "energy": float(mood.get("energy") or 0.5),
@@ -125,8 +147,7 @@ def _gather(g: dict[str, Any], base_dir: Path) -> dict[str, Any]:
 
     # Active goal
     try:
-        import avaagent as _av
-        gs = _av.load_goal_system() or {}
+        gs = _read_json(base_dir / "state" / "goal_system.json")
         ag = gs.get("active_goal")
         if isinstance(ag, dict):
             out["active_goal"] = str(ag.get("name") or ag.get("title") or "")[:200]
@@ -209,8 +230,7 @@ def _gather(g: dict[str, Any], base_dir: Path) -> dict[str, Any]:
     # this is the highest-value freeform text. Pulled from session_state's
     # last_topic + most recent journal entry summary.
     try:
-        import avaagent as _av
-        sess = _av.load_session_state() or {}
+        sess = _read_json(base_dir / "state" / "session_state.json")
         out["session_summary"] = str(sess.get("last_topic") or "")[:300]
     except Exception:
         out["session_summary"] = ""
