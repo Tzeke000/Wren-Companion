@@ -48,6 +48,35 @@ function Write-Log([string]$msg) {
 }
 
 # ---------------------------------------------------------------------------
+# 0. DELIBERATE-OFF GATE (Zeke directive 2026-08-23).
+#    The auto-resurrection layer above was built FOR THE DEPLOYMENT, when nobody
+#    was at the keyboard for a month. Zeke is home now and can restart her by
+#    hand; the machinery moves to the server, where it is actually needed.
+#    If the flag exists, this script does NOTHING. Do not "heal" the watchdogs
+#    while it is present - delete the flag first, deliberately.
+# ---------------------------------------------------------------------------
+#    SEMANTICS (aligned 2026-08-25): the CONTENT decides, not mere presence.
+#    This used to be a bare Test-Path while the Python reader
+#    (iris_runtime_watchdog.deliberately_off) parsed the "off" field - so the
+#    same file could mean "off" to one half of the layer and "armed" to the
+#    other. Both now read the same field the same way and both FAIL CLOSED on a
+#    present-but-unparseable file. Move this switch with scripts\restart_switch.ps1,
+#    which sets flag + task + processes together so they cannot drift apart.
+$OFF_FLAG = Join-Path $ROOT 'state\watchdog_deliberately_off.json'
+if (Test-Path $OFF_FLAG) {
+    $isOff = $true
+    try {
+        $rec = Get-Content $OFF_FLAG -Raw | ConvertFrom-Json
+        if ($null -ne $rec.off) { $isOff = [bool]$rec.off }
+    } catch { $isOff = $true }   # present but unreadable = someone meant it
+    if ($isOff) {
+        Write-Log "watchdogs deliberately OFF (flag: $OFF_FLAG) - doing nothing"
+        exit 0
+    }
+    Write-Log "off-flag present but off=false - treating as ARMED, continuing"
+}
+
+# ---------------------------------------------------------------------------
 # 1. iris_watchdog.ps1 - polls for the restart_cc flag. No restart authority.
 # ---------------------------------------------------------------------------
 if (-not (Test-Path $WATCHDOG)) {

@@ -386,6 +386,49 @@ def _request_orphan_shutdown(pids: list[int]) -> None:
             _probe_log(f"kill PID {p.pid} failed: {e!r}")
 
 
+_CAMERA_SCAN_MAX_INDEX = 5
+
+
+def _scan_video_device_indices(max_index: int = _CAMERA_SCAN_MAX_INDEX) -> list[int]:
+    """Which DSHOW indices actually open? Only called on the failure path.
+
+    ★ WHY THIS EXISTS (2026-08-25). The probe only ever tried index 0, and when
+    that failed it reported "device busy or absent" and went hunting for orphan
+    iris_runtime processes to terminate. Those are three different worlds and
+    the message collapsed them into one:
+
+      * BUSY   — a camera exists and another process holds it. Orphan hunt sane.
+      * MOVED  — a camera exists at a DIFFERENT index. Orphan hunt useless.
+      * ABSENT — no camera at all; it is unplugged. Orphan hunt actively harmful.
+
+    Conflating them is what sent the runtime looking for a culprit that did not
+    exist — and the only iris_runtime it could find to blame was itself, which
+    it then killed (see _my_process_lineage_pids). Naming which world we are in
+    costs one short scan on a path that only runs when something is already
+    wrong.
+    """
+    found: list[int] = []
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return found
+    for idx in range(max_index + 1):
+        cap = None
+        try:
+            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            if cap is not None and cap.isOpened():
+                found.append(idx)
+        except Exception:
+            pass
+        finally:
+            try:
+                if cap is not None:
+                    cap.release()
+            except Exception:
+                pass
+    return found
+
+
 def _probe_camera_open() -> tuple[bool, str]:
     """Try to open the DSHOW camera briefly. Returns (ok, detail).
     Releases the handle immediately so the real capture thread can rebind."""
@@ -400,7 +443,29 @@ def _probe_camera_open() -> tuple[bool, str]:
             return False, "VideoCapture returned None"
         opened = bool(cap.isOpened())
         if not opened:
-            return False, "isOpened()==False (device busy or absent)"
+            # Say WHICH failure this is instead of "busy or absent". The
+            # difference decides whether hunting for a process to blame is
+            # even a coherent thing to do.
+            try:
+                cap.release()
+            except Exception:
+                pass
+            cap = None
+            others = _scan_video_device_indices()
+            if not others:
+                return False, (
+                    "ABSENT: no DirectShow video device opened at any index "
+                    f"0-{_CAMERA_SCAN_MAX_INDEX}. The camera is unplugged or "
+                    "powered off — it is NOT busy, and no software action here "
+                    "can bring it back. Check the physical connection."
+                )
+            return False, (
+                f"index 0 would not open, but index/indices {others} did — the "
+                "camera appears to have MOVED index rather than being busy. "
+                "Verify what that device actually IS before repointing at it: a "
+                "flat mid-grey frame means it is a VIRTUAL camera (Steam, "
+                "Voicemod, OBS, Virtual Desktop), not the real one."
+            )
         # Quick read to confirm the device actually streams (some drivers
         # report isOpened()==True but fail on first read when busy).
         ok_read, _frame = cap.read()
@@ -454,6 +519,15 @@ def _probe_device_with_retry(
     if ok:
         result["ok"] = True
         _probe_log(f"{name}: free (probe ok)")
+        return result
+
+    # An ABSENT device cannot be freed by killing anything — there is no holder.
+    # Hunting for one is how the 08-25 self-kill got triggered in the first
+    # place, so don't even start down that path.
+    if str(detail).startswith("ABSENT"):
+        _probe_log(f"{name}: ABSENT, not busy — {detail}")
+        _probe_log(f"{name}: skipping orphan scan (nothing is holding a device "
+                   f"that isn't there) and skipping retry.")
         return result
 
     _probe_log(f"{name}: BUSY on first probe ({detail}); scanning for orphan iris_runtime processes")
