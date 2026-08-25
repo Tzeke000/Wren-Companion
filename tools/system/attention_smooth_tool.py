@@ -187,6 +187,18 @@ _ODO_MIN_RESP = 0.10
 # Treat a skip as UNKNOWN motion and go read ground truth — enough skips force
 # an early resync against the device's own bearing.
 _ODO_SKIP_FORCE = 8          # skips since last resync that force an early one
+# ── STARVATION, the 08-22 mechanism (instrumented 2026-08-25). Distinct from
+# a skip: with no FRESH frame the correlate step is never reached at all, so
+# est simply FREEZES while the jog keeps driving the head. The soft rails are
+# evaluated against est, so a frozen est is an unguarded head — and if est is
+# frozen on the wrong side of _EST_TILT_FLOOR the rail permits only upward
+# vectors and RATCHETS the head to the ceiling. That is how tilt reached +89.5
+# with a +60 ceiling nominally in force. 08-22 also had the shadow-Ava stack
+# running a second camera loop on the same webcam inside this PID — exactly
+# the condition that starves the frame buffer. (Removed 2026-08-24.)
+# Measured in TIME, not in counts: this loop ticks faster than frames arrive,
+# so "no new frame this tick" is the normal case and a raw count means nothing.
+_ODO_STALE_FORCE_S = 1.0     # est frozen this long while jogging -> resync
 _ODO_SKIP_MIN_GAP_S = 1.5    # ...but never resync more often than this.
 # 0.75 -> 1.5 after FAULT-INJECTION TESTING (2026-08-25): forcing skips by
 # raising _ODO_MIN_RESP to 0.99 made the path fire for real (97 skips, 7
@@ -423,6 +435,11 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
     last_resync_ts = time.time()
     _odo_prev = None            # previous downscaled gray (visual odometry)
     _odo_prev_ts = 0.0
+    # Wall-clock of the last ACCEPTED odometry update. Starvation counts alone
+    # are not a fault signal — this loop ticks faster than frames arrive, so
+    # "no new frame this tick" is the normal case. What is dangerous is TIME
+    # spent with a frozen est while the jog keeps driving, so measure that.
+    _odo_good_ts = time.time()
     try:
         _act = va.build_actuator()
         if not _act.capabilities().get("can_pan"):
@@ -445,7 +462,26 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                     import numpy as _np
                     from brain import frame_store as _fs
                     _ro = _fs.get_buffered_frame(max_age_sec=1.0)
-                    if _ro.frame is not None and _ro.capture_ts > _odo_prev_ts:
+                    if _ro.frame is None or _ro.capture_ts <= _odo_prev_ts:
+                        # ── STARVED, NOT SKIPPED (instrumented 2026-08-25).
+                        # This branch was SILENT: no fresh frame means we never
+                        # reach the correlate step, so est simply FREEZES while
+                        # the jog keeps driving the head. The skip counters
+                        # above cannot see this — they live inside the branch
+                        # we just failed to enter. That matters because the
+                        # soft rails are evaluated against est: a frozen est on
+                        # a still-moving head is how tilt reached +89.5 deg on
+                        # 08-22 with a +60 ceiling nominally in force (est had
+                        # sunk below _EST_TILT_FLOOR, so the rail permitted
+                        # only upward vectors and RATCHETED the head up).
+                        # 08-22 also had the shadow-Ava stack running a SECOND
+                        # camera loop on the same webcam inside this PID, which
+                        # is exactly the condition that starves this buffer.
+                        st["odo_starved"] = int(
+                            st.get("odo_starved") or 0) + 1
+                        st["odo_starved_since_resync"] = int(
+                            st.get("odo_starved_since_resync") or 0) + 1
+                    else:
                         _small = _np.float32(_cv2.cvtColor(
                             _cv2.resize(_ro.frame, (160, 120)),
                             _cv2.COLOR_BGR2GRAY)) / 255.0
@@ -463,6 +499,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                     "tilt_deg": round(est_tilt, 1)}
                                 st["odo_updates"] = int(
                                     st.get("odo_updates") or 0) + 1
+                                _odo_good_ts = time.time()
                             else:
                                 # UNKNOWN motion, not zero motion. Count it so
                                 # the loss is visible and can force a resync.
@@ -643,9 +680,18 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         # the full _RESYNC_S while blind is how the -14/-18
                         # drifts accumulated, so enough skips buy an early
                         # trip to ground truth — floored so we can't thrash.
+                        # est is FROZEN if odometry hasn't accepted an update
+                        # for a while — the 08-22 ratchet mechanism. Rails run
+                        # on est, so a stale est is an unguarded head.
+                        _odo_stale_s = time.time() - _odo_good_ts
+                        st["odo_stale_s"] = round(_odo_stale_s, 2)
+                        st["max_odo_stale_s"] = max(
+                            float(st.get("max_odo_stale_s") or 0.0),
+                            _odo_stale_s)
                         _skip_forced = (
-                            int(st.get("odo_skips_since_resync") or 0)
-                            >= _ODO_SKIP_FORCE
+                            (int(st.get("odo_skips_since_resync") or 0)
+                             >= _ODO_SKIP_FORCE
+                             or _odo_stale_s >= _ODO_STALE_FORCE_S)
                             and time.time() - last_resync_ts
                             >= _ODO_SKIP_MIN_GAP_S)
                         if (_act is not None
@@ -756,6 +802,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                         pass
                             st["_jog_effort_deg"] = 0.0
                             st["odo_skips_since_resync"] = 0
+                            st["odo_starved_since_resync"] = 0
                             last_resync_ts = time.time()
                         if jog.write_vector(ux, uy):
                             st["writes"] += 1
