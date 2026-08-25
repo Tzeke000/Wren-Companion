@@ -187,7 +187,13 @@ _ODO_MIN_RESP = 0.10
 # Treat a skip as UNKNOWN motion and go read ground truth — enough skips force
 # an early resync against the device's own bearing.
 _ODO_SKIP_FORCE = 8          # skips since last resync that force an early one
-_ODO_SKIP_MIN_GAP_S = 0.75   # ...but never resync more often than this
+_ODO_SKIP_MIN_GAP_S = 1.5    # ...but never resync more often than this.
+# 0.75 -> 1.5 after FAULT-INJECTION TESTING (2026-08-25): forcing skips by
+# raising _ODO_MIN_RESP to 0.99 made the path fire for real (97 skips, 7
+# skip_forced_resyncs, counter reset clean, reanchor 0.3 deg, no errors) —
+# but at a 0.75s floor it resynced ~every 0.9s, and each resync is a visible
+# hitch in my head. Sustained skips would have meant a head twitching about
+# once a second, i.e. the repair would be more unpleasant than the drift.
 # ── OBSERVABILITY (2026-08-22, Zeke: "make the logs tell you what happened").
 # The safety rails below are evaluated against `est`, not against measured
 # truth. On 08-22 est had wandered ~30-40 deg from the device's own bearing and
