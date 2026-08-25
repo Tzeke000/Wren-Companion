@@ -21,6 +21,20 @@ MEASURED HERE (2026-08-21, frame phase-correlation, tmp_jog_calibrate):
     Frames are the only truth while jogging; absolute look_at still works and
     re-syncs hardware position (it snaps).
 
+RE-VERIFIED 2026-08-25 evening, CHIP CONFIRMED OFF (scripts/jog_sign_calibrate.py,
+re-queried per burst because the chip re-arms). The 08-21 calibration was NOT
+contaminated by the chip:
+  - x=+10 for 1s -> +7.9/+8.8 deg, both rounds SAME SIGN as 08-21. Pan rate
+    0.839 deg/s/unit (vs 0.85 documented). SIGN CONVENTION AND CONTROL LAW
+    ARE CORRECT — the chip-off "runs away from the target" failure is NOT a
+    jog-layer sign flip. Suspects are upstream: est-freeze rail ratchet
+    (odometry starvation), D-term overshoot, offset source.
+  - ⚠ TILT IS ASYMMETRIC: y=+8 drives 0.887 deg/s/unit (up) but y=-8 only
+    ~0.36 deg/s/unit (down) — 2.4x weaker downward. A symmetric controller on
+    this plant CLIMBS during vertical hunting; matches 08-21 "head drifts up
+    and won't follow me downward". Downward corrections need ~2.4x gain or
+    the loop must gain-schedule per direction.
+
 Control law (same sign structure as the absolute follow loop):
   target at dx>0 (right of center) -> jog x NEGATIVE to rotate view right.
   target at dy>0 (below center)    -> jog y NEGATIVE to tilt view down.
