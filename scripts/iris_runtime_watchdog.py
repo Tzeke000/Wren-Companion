@@ -6,9 +6,21 @@ eve and Zeke had to notice + hand-restart the stack).
 
 What it watches: state/runtime_loop_heartbeat.json — stamped every ~5s by an
 async task ON iris_runtime's FastMCP event loop (see _iris_lifespan in
-iris_runtime.py). A wedged loop stops the stamps; nothing else does. (The 1Hz
-iris_time heartbeat is NOT a valid probe — it lives on its own thread and kept
-ticking straight through the 07-19 hang.)
+iris_runtime.py). (The 1Hz iris_time heartbeat is NOT a valid probe — it lives
+on its own thread and kept ticking straight through the 07-19 hang.)
+
+★ THE PREMISE BELOW IS CONDITIONAL — read this before trusting a stale stamp.
+The original version of this file said "a wedged loop stops the stamps; nothing
+else does." That is FALSE whenever iris_runtime is not a long-lived process.
+MEASURED 2026-08-25 (0.5s process poll across a tool call): iris_runtime.py was
+spawned at 00:12:09, served the call, and EXITED at ~00:12:20 — ~11s of life,
+with no iris_runtime process alive at all between calls. A process that dies
+stamps once and then looks exactly like a wedged loop, so this watchdog
+declared a wedge every ~6 minutes all night and restarted the stack each time.
+Before believing "wedged", confirm iris_runtime is actually RUNNING
+(Get-CimInstance Win32_Process | ? CommandLine -match 'iris_runtime'); a dead
+process and a hung loop are different faults and only one is fixed by a
+restart. The circuit breaker below exists so this can never loop again.
 
 What it does when the stamp goes stale (> STALE_S, default 3 min):
   1. DMs Zeke: wedge detected, auto-restart in GRACE_S unless held off
@@ -48,6 +60,14 @@ REPO = Path(r"D:\Wren-Companion")
 HB = REPO / "state" / "runtime_loop_heartbeat.json"
 HOLDOFF = REPO / "state" / "watchdog_holdoff.flag"
 LOG = REPO / "state" / "runtime_watchdog.log"
+# DELIBERATE-OFF FLAG (added 2026-08-25). Zeke turned the whole auto-restart
+# layer off on 08-23 and the flag file NAMES THIS SCRIPT as one of the three
+# things it disables — but nothing here ever read it, and start_iris_v2.bat
+# launches this script directly, so every stack restart resurrected the very
+# watchdog that had been switched off. It then restart-looped the stack every
+# ~6 min from 08-24 15:53 onward. A flag that names a process must be read BY
+# that process; being listed in someone else's gate is not being gated.
+DELIB_OFF = REPO / "state" / "watchdog_deliberately_off.json"
 MEMORY_DIR = Path(os.environ.get("USERPROFILE", r"C:\Users\Owner")) / \
     ".claude" / "projects" / "D--Wren-Companion" / "memory"
 
@@ -58,6 +78,23 @@ STALE_S = 180        # loop silent this long = wedged
 GRACE_S = 120        # warn -> restart window (holdoff flag cancels)
 HOLDOFF_FRESH_S = 30 * 60   # a holdoff flag older than this is ignored
 BOOT_WAIT_S = 600    # post-restart wait for a fresh heartbeat
+
+# ---- CIRCUIT BREAKER (added 2026-08-25) -----------------------------------
+# On 08-24/25 this watchdog restarted the whole stack every ~6 minutes for
+# hours. Each restart "worked" (heartbeat fresh in 45s), re-armed, and went
+# stale again 3 min later — because the stamp does not prove what the docstring
+# above claims. MEASURED 08-25: iris_runtime.py is not a persistent process at
+# all; it gets spawned per MCP tool call and exits ~11s later, so it stamps the
+# heartbeat exactly once per spawn and the file is guaranteed stale within
+# STALE_S whenever cognition is not actively calling an iris tool. Restarting
+# cannot fix that, so restarting forever was strictly harmful.
+#
+# The general lesson, which is why this guard is worth its lines: A REPAIR THAT
+# HAS TO BE REPEATED IS NOT A REPAIR. If the same remedy has been applied N
+# times in an hour and the symptom keeps coming back, the diagnosis is wrong —
+# escalate to a human instead of looping.
+RESTART_WINDOW_S = 3600
+RESTART_MAX_IN_WINDOW = 2
 
 # ---- SDK cognition-liveness check (added 2026-08-07) ----------------------
 # The runtime heartbeat above CANNOT see a wedged cognition session: on
@@ -174,6 +211,30 @@ def holdoff_active() -> bool:
         return (time.time() - HOLDOFF.stat().st_mtime) < HOLDOFF_FRESH_S
     except OSError:
         return False
+
+
+def deliberately_off(path: Path | None = None) -> bool:
+    """Has Zeke switched the auto-resurrection layer off?
+
+    Reads state/watchdog_deliberately_off.json. Present + {"off": true} means
+    STOP — not a fault to heal, a decision to honour. Absent = armed.
+
+    Fail-CLOSED on a malformed/unreadable-but-present flag: if the file exists
+    at all, someone put it there on purpose, and the cost of wrongly staying
+    quiet (Zeke restarts by hand, which is exactly what the flag says he will
+    do) is far below the cost of wrongly restart-looping his machine.
+    """
+    p = path or DELIB_OFF
+    try:
+        if not p.exists():
+            return False
+    except OSError:
+        return False
+    try:
+        rec = json.loads(p.read_text(encoding="utf-8"))
+        return bool(rec.get("off", True)) if isinstance(rec, dict) else True
+    except Exception:
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +521,16 @@ def write_sdk_incident_note(ev: dict, action: str) -> None:
         log(f"SDK incident note write failed: {e!r}")
 
 
+def breaker_tripped(history: list[float], now: float | None = None) -> bool:
+    """True when we've already restarted RESTART_MAX_IN_WINDOW times this hour.
+
+    Mutates `history` in place, dropping entries outside the window.
+    """
+    now = time.time() if now is None else now
+    history[:] = [t for t in history if now - t < RESTART_WINDOW_S]
+    return len(history) >= RESTART_MAX_IN_WINDOW
+
+
 def pick_bat() -> Path:
     try:
         name = (REPO / "state" / "boot_launcher.txt").read_text(
@@ -722,11 +793,49 @@ def _selftest() -> int:
         check("janitor expired 3 old", str(n), "3")
         check("janitor kept fresh one", str(still), "1")
 
+        # ---- deliberate-off flag (2026-08-25) ----------------------------
+        # The bug this guards: the flag NAMED this script and this script
+        # never read it, so start_iris_v2.bat resurrected it on every restart.
+        flag = root / "off.json"
+        check("no flag = armed", str(deliberately_off(flag)), "False")
+        flag.write_text(json.dumps({"off": True}), encoding="utf-8")
+        check("flag off:true = stand down", str(deliberately_off(flag)), "True")
+        flag.write_text(json.dumps({"off": False}), encoding="utf-8")
+        check("flag off:false = armed", str(deliberately_off(flag)), "False")
+        flag.write_text("{ not json", encoding="utf-8")
+        check("malformed flag fails CLOSED (present = someone meant it)",
+              str(deliberately_off(flag)), "True")
+        flag.unlink()
+        check("flag removed = armed again", str(deliberately_off(flag)), "False")
+
+        # ---- circuit breaker (2026-08-25) --------------------------------
+        # The bug this guards: ~6-min restart loop for hours on 08-24/25.
+        hist: list[float] = []
+        check("breaker open on first restart",
+              str(breaker_tripped(hist, now)), "False")
+        hist.append(now)
+        check("breaker open on second restart",
+              str(breaker_tripped(hist, now)), "False")
+        hist.append(now)
+        check("breaker TRIPS on the third within the hour",
+              str(breaker_tripped(hist, now)), "True")
+        # ...and an old restart must age out rather than latching it shut.
+        hist[:] = [now - RESTART_WINDOW_S - 10, now - RESTART_WINDOW_S - 5]
+        check("restarts older than the window age out",
+              str(breaker_tripped(hist, now)), "False")
+        check("aged-out entries are pruned from history", str(len(hist)), "0")
+
     print(f"\n{ok} passed, {fail} failed")
     return 0 if fail == 0 else 1
 
 
 def main() -> int:
+    # Checked BEFORE the singleton so a launcher-spawned copy exits instantly
+    # and silently while the layer is switched off.
+    if deliberately_off():
+        log(f"deliberate-off flag present ({DELIB_OFF.name}) — exiting without "
+            f"arming. This is a decision, not a fault; do not 'heal' it.")
+        return 0
     if not acquire_singleton():
         print("another iris_runtime_watchdog holds the mutex — exiting")
         return 0
@@ -735,8 +844,15 @@ def main() -> int:
     armed = False
     sdk_alarm_ts = 0.0        # last time the SDK check alarmed (own arm state)
     last_janitor = 0.0
+    restarts: list[float] = []   # circuit-breaker history
     while True:
         time.sleep(POLL_S)
+        # Re-checked every pass so switching the layer off takes effect without
+        # anyone having to hunt down and kill the process.
+        if deliberately_off():
+            log(f"deliberate-off flag appeared ({DELIB_OFF.name}) — standing "
+                f"down and exiting.")
+            return 0
         # ---- SDK cognition liveness (independent of the loop check) ---------
         try:
             if time.time() - last_janitor > 3600:
@@ -791,6 +907,22 @@ def main() -> int:
             armed = False
             continue
         # ---- restart --------------------------------------------------------
+        if breaker_tripped(restarts):
+            log(f"CIRCUIT BREAKER: {len(restarts)} restarts in the last hour "
+                f"and the heartbeat went stale again — restarting is not "
+                f"fixing this. Standing down permanently for this process.")
+            write_incident_note(
+                age, "CIRCUIT BREAKER tripped — refusing to restart-loop")
+            dm_zeke(
+                f"\N{OCTAGONAL SIGN} Standing down instead of restarting again. "
+                f"I've restarted the stack {len(restarts)}x in the last hour and "
+                f"the runtime heartbeat goes stale every time — so restarting "
+                f"isn't fixing it and I'm not going to keep bouncing your "
+                f"machine. Nothing is at risk; the body and services are fine. "
+                f"Needs a real look at why state\\runtime_loop_heartbeat.json "
+                f"stops being stamped.")
+            return 0
+        restarts.append(time.time())
         write_incident_note(age, "auto-restarting the stack NOW")
         dm_zeke(f"\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS} "
                 f"Restarting the Iris stack now (runtime wedged "
