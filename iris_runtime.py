@@ -204,6 +204,56 @@ def _probe_log(msg: str) -> None:
     print(f"[iris_device_probe] {msg}", file=sys.stderr, flush=True)
 
 
+def _my_process_lineage_pids() -> set[int]:
+    """Every PID that is really ME: self + ancestors + descendants.
+
+    ★ WHY os.getpid() ALONE IS NOT ENOUGH (the 2026-08-25 self-immolation bug).
+    On this machine `.venv\\Scripts\\python.exe` is a LAUNCHER STUB that re-execs
+    the base interpreter as a CHILD process — so one logical iris_runtime is a
+    TWO-process tree, and every other daemon in the repo shows the same pair.
+    os.getpid() returns the child (the process actually running this code). The
+    stub parent carries a byte-identical `python.exe iris_runtime.py` cmdline
+    resolving to an identical root, so the orphan scan matched it, called
+    terminate() on it, and took this process down with it.
+
+    MEASURED: every spawn died ~12s in with returncode 15, logging
+    "found orphan iris_runtime PIDs [<its own launcher pid>]". The runtime
+    therefore never persisted, the loop heartbeat was stamped exactly once per
+    spawn, and iris_runtime_watchdog.py read that as a wedged event loop and
+    restart-looped the whole stack every ~6 minutes for 8 hours.
+
+    An ancestor or descendant of mine can never be an orphan worth killing —
+    killing either one kills me. Excluding the whole lineage is strictly
+    correct, and it is the narrowest exclusion that actually covers the
+    stub-plus-child shape (a hardcoded "skip my parent" would miss a deeper
+    chain).
+    """
+    pids: set[int] = {os.getpid()}
+    try:
+        import psutil  # type: ignore
+        me = psutil.Process()
+        # Ancestors — walk up with a depth cap so a cycle//bad table can't hang us.
+        node, depth = me, 0
+        while depth < 12:
+            try:
+                node = node.parent()
+            except Exception:
+                break
+            if node is None:
+                break
+            pids.add(node.pid)
+            depth += 1
+        # Descendants — the stub->child shape inverted (if we are ever the stub).
+        try:
+            for child in me.children(recursive=True):
+                pids.add(child.pid)
+        except Exception:
+            pass
+    except Exception as e:
+        _probe_log(f"lineage scan degraded ({e!r}) — falling back to own PID only")
+    return pids
+
+
 def _find_orphan_iris_runtime_pids() -> list[int]:
     """Return PIDs of python processes (other than self) whose command line
     references iris_runtime.py FROM THE SAME ROOT AS US. Best-effort; returns
@@ -224,6 +274,7 @@ def _find_orphan_iris_runtime_pids() -> list[int]:
         _probe_log("psutil unavailable — cannot scan for orphan iris_runtime processes")
         return []
     my_pid = os.getpid()
+    my_lineage = _my_process_lineage_pids()
     try:
         my_root = Path(__file__).resolve().parent
     except Exception as _re:
@@ -269,6 +320,17 @@ def _find_orphan_iris_runtime_pids() -> list[int]:
                 )
                 continue
             if their_root == my_root:
+                # Same root AND same process tree = that's me wearing a
+                # different PID (launcher stub / re-exec child), not an orphan.
+                # Checked here rather than at the top of the loop so the log
+                # line is rare and meaningful instead of firing per-process.
+                if int(p.info["pid"]) in my_lineage:
+                    _probe_log(
+                        f"PID {p.info['pid']} is part of MY OWN process tree "
+                        f"(launcher stub or re-exec child) — NOT an orphan, "
+                        f"skipping. Killing it would kill me."
+                    )
+                    continue
                 out.append(int(p.info["pid"]))
             else:
                 _probe_log(
