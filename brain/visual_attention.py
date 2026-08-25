@@ -775,6 +775,112 @@ def _bbox_offset(face: dict, frame_w: int, frame_h: int) -> tuple[float, float]:
             (cy - frame_h / 2.0) / (frame_h / 2.0))
 
 
+# ── HEADROOM (2026-08-25, Zeke's ask: "a way to know if the object you're
+# tracking is in [frame] and by how much, and know when you lose sight of it
+# and whether to look for it or choose a new object").
+#
+# The gap this fills: `offset` (dx/dy) says WHERE the target is. It does not
+# say how much room is left. A face at dx +0.9 and a face at dx +0.4 are both
+# "right of centre", but one is about to walk out of my view and the other is
+# not, and only the first is a reason to hurry. Off-centre and about-to-vanish
+# are different questions and I only had an answer to the first.
+#
+# Reported in DEGREES of head rotation, not pixels or normalised units,
+# because degrees are the unit the decision is actually made in: "I have 6
+# degrees before I lose him" is directly comparable to how fast the head can
+# turn (~21 deg/s jog, ~1 deg/step absolute).
+#
+# HFOV: 68 nominal, matching the actuator's own capability note. NOTE (08-25):
+# measuring known pan steps against the room put the true horizontal field
+# nearer 70.5 deg. Deliberately NOT changed here — a headroom number that is
+# ~4% conservative errs toward acting early, which is the safe direction, and
+# one constant differing from the rest of the codebase would cost more
+# confusion than it buys accuracy. See the-instrument-lies note.
+_HEADROOM_HFOV_DEG = 68.0
+
+
+def attention_headroom(g: dict[str, Any] | None = None) -> dict:
+    """How many degrees before the tracked target leaves my field of view.
+
+    Returns per-side margins in degrees, the nearest edge, and a plain
+    sentence. Refuses honestly when there is no target, no box, or no fresh
+    frame — a made-up headroom is worse than none, because it would be acted
+    on as if it were slack.
+    """
+    st = _state(g)
+    tid = st.get("target")
+    if not tid:
+        return {"ok": False, "reason": "not tracking anything",
+                "summary": "no target, so nothing to lose sight of."}
+    bbox = st.get("last_bbox")
+    if not bbox or len(bbox) < 4:
+        return {"ok": False, "reason": "no box for the target",
+                "summary": f"tracking {st.get('target_label') or tid} but I "
+                           f"have no box for it — can't say how much room "
+                           f"it has."}
+    # ★ A FRESH FRAME DOES NOT MEAN A FRESH BOX (caught 2026-08-25, ten minutes
+    # after writing this function). The first version checked only the frame,
+    # then happily reported "comfortable — 16.4 deg of room" for a target that
+    # `attention_now` knew had been LOST FOR 247 SECONDS. The box lives in
+    # st['last_bbox'] and is only refreshed by observe(); the smooth-pursuit
+    # fast path keeps its own tracker and never writes it. So the two staleness
+    # clocks are independent and BOTH have to be checked.
+    # This is the exact failure my own docstring warns about — a made-up
+    # headroom is worse than none, because slack gets ACTED on.
+    box_age = time.time() - float(st.get("last_seen_ts") or 0.0)
+    if box_age > _STALE_S:
+        return {"ok": False, "reason": f"box is {box_age:.0f}s stale",
+                "box_age_s": round(box_age, 1),
+                "summary": f"my last box for "
+                           f"{st.get('target_label') or tid} is {box_age:.0f}s "
+                           f"old — that is not where it is now, so I won't "
+                           f"pretend to know how much room it has."}
+    try:
+        from brain import frame_store
+        res = frame_store.get_buffered_frame(max_age_sec=_STALE_S)
+        if res.frame is None:
+            return {"ok": False, "reason": "no fresh frame",
+                    "summary": "no fresh frame — I won't estimate headroom "
+                               "from a stale view."}
+        fh, fw = int(res.frame.shape[0]), int(res.frame.shape[1])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"frame unavailable: {e!r}",
+                "summary": "can't reach a frame to measure against."}
+
+    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    deg_per_px_x = _HEADROOM_HFOV_DEG / float(max(1, fw))
+    # Square pixels + same optical axis => the per-pixel angular scale is the
+    # same vertically at frame centre; the 4:3 crop does not change it.
+    deg_per_px_y = deg_per_px_x
+
+    margins = {
+        "left":   round(x1 * deg_per_px_x, 1),
+        "right":  round((fw - x2) * deg_per_px_x, 1),
+        "top":    round(y1 * deg_per_px_y, 1),
+        "bottom": round((fh - y2) * deg_per_px_y, 1),
+    }
+    in_frame = x2 > 0 and x1 < fw and y2 > 0 and y1 < fh
+    nearest = min(margins, key=lambda k: margins[k])
+    worst = margins[nearest]
+
+    if not in_frame:
+        summary = "the target's box is outside the frame — I have lost it."
+    elif worst <= 0:
+        summary = (f"the target is already clipped at the {nearest} edge — "
+                   f"part of it is out of view.")
+    elif worst < 3.0:
+        summary = (f"about to lose it: only {worst:.1f} deg of room at the "
+                   f"{nearest} edge.")
+    elif worst < 8.0:
+        summary = (f"tight — {worst:.1f} deg of room at the {nearest} edge.")
+    else:
+        summary = (f"comfortable — {worst:.1f} deg of room at the tightest "
+                   f"edge ({nearest}).")
+    return {"ok": True, "in_frame": in_frame, "margin_deg": margins,
+            "nearest_edge": nearest, "worst_margin_deg": worst,
+            "frame": [fw, fh], "summary": summary}
+
+
 def set_target(g: dict[str, Any], spec: str, *, actuator: Actuator | None = None) -> dict:
     """Point attention at something. Returns the new state, honestly.
 
@@ -1188,6 +1294,14 @@ def attention_now(g: dict[str, Any] | None = None) -> str:
         if s == "locked":
             off = st.get("offset") or {}
             bits.append(f"locked on {label} (dx {off.get('dx', 0):+.2f})")
+            # Off-centre and about-to-leave-view are different questions.
+            try:
+                hr = attention_headroom(g)
+                if hr.get("ok"):
+                    bits.append(f"{hr['worst_margin_deg']:.0f} deg of room at "
+                                f"the {hr['nearest_edge']} edge")
+            except Exception:
+                pass
         elif s == "seeking":
             bits.append(f"looking for {label}")
         elif s == "lost":

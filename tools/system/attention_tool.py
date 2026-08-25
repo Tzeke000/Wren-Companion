@@ -84,6 +84,20 @@ def _attention_observe_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str
         return {"ok": False, "error": str(e)[:300]}
 
 
+def _attention_headroom_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """How much room is left before the target leaves frame, in degrees.
+
+    Built 2026-08-25 to Zeke's spec. dx says where the target IS; this says
+    how much slack remains, which is the number that decides between keep
+    pursuing / hurry / start searching / pick something else.
+    """
+    try:
+        from brain import visual_attention as va
+        return va.attention_headroom(g)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
 def _attention_cost_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     """What am I NOT seeing because of where I'm pointed?
 
@@ -189,6 +203,13 @@ try:
                   "What I'm giving up by looking where I'm looking. A head "
                   "that turns can only watch one thing.",
                   1, _attention_cost_fn)
+    register_tool("attention_headroom",
+                  "How many DEGREES before what I'm tracking leaves my view. "
+                  "Off-centre (dx) and about-to-vanish are different "
+                  "questions — this answers the second: per-edge margins, the "
+                  "tightest edge, and whether to hurry. Refuses honestly with "
+                  "no target / no box / no fresh frame.",
+                  1, _attention_headroom_fn)
     register_tool("attention_objects",
                   "Open-vocabulary object detection on the LIVE webcam: give it "
                   "prompts ('mug, keyboard, dog') and it reports what it finds, "
