@@ -1050,7 +1050,8 @@ def observe(g: dict[str, Any], *, frame_shape: tuple[int, int] | None = None) ->
                 if res.frame is not None:
                     face = yolox_person.bridge(
                         res.frame,
-                        last_face_seen_ts=float(st.get("last_seen_ts") or 0.0))
+                        last_face_seen_ts=float(st.get("last_seen_ts") or 0.0),
+                        last_face_bbox=st.get("last_bbox"))
             except Exception as e:  # noqa: BLE001 — a miss, never a crash
                 _log(f"body bridge unavailable for {tid!r}: {e!r}")
         st["resolved_by"] = (face or {}).get("resolver", "face" if face else None)
