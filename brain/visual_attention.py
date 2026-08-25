@@ -1034,6 +1034,25 @@ def observe(g: dict[str, Any], *, frame_shape: tuple[int, int] | None = None) ->
         # `attention_look 'object:mug'` could only ever reach `lost`.
         if face is None and tid.startswith("object:"):
             face = _match_object(tid)
+        # ── BODY BRIDGE (2026-08-25) — the head-down case. Zeke: "you can't
+        # look through my forehead and hair when my face is down." With no
+        # face there was no resolver at all for a person target, so bending
+        # over read as `lost` and my head stopped following someone plainly
+        # still in the room. YOLOX supplies a body box to coast on.
+        # It may only CONTINUE an identity, never create one — see
+        # brain/yolox_person.bridge(), which refuses without a recent face
+        # match and refuses when two people are in frame. Person-shaped is not
+        # somebody, and somebody is not Zeke.
+        elif face is None and not tid.startswith("object:"):
+            try:
+                from brain import frame_store, yolox_person
+                res = frame_store.get_buffered_frame(max_age_sec=2.0)
+                if res.frame is not None:
+                    face = yolox_person.bridge(
+                        res.frame,
+                        last_face_seen_ts=float(st.get("last_seen_ts") or 0.0))
+            except Exception as e:  # noqa: BLE001 — a miss, never a crash
+                _log(f"body bridge unavailable for {tid!r}: {e!r}")
         st["resolved_by"] = (face or {}).get("resolver", "face" if face else None)
 
         if frame_shape is None:
