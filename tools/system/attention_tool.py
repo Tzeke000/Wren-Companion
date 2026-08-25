@@ -233,3 +233,38 @@ try:
                   1, _attention_selftest_fn)
 except Exception:
     pass
+
+
+# ── always-on head odometry (2026-08-25) ─────────────────────────────────────
+def _head_odometry_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    """head_odometry(action='start'|'stop'|'status'|'seed', pan_deg?, tilt_deg?)
+
+    Knowing where my head is pointed whether or not I am tracking anything, and
+    whoever moved it. Zeke turned my head by hand while I was facing the wall
+    and I had no idea — the measurement that would have caught it only ran
+    inside the pursuit loop, which I had switched off. This runs it always.
+    """
+    try:
+        from brain import head_odometry as ho
+        action = str(params.get("action") or "status").lower()
+        if action == "start":
+            return {**ho.start(), "status": ho.status()}
+        if action == "stop":
+            return ho.stop()
+        if action == "seed":
+            ho.seed(float(params.get("pan_deg") or 0.0),
+                    float(params.get("tilt_deg") or 0.0))
+            return {"ok": True, "seeded": ho.status()}
+        return {"ok": True, "status": ho.status()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+register_tool("head_odometry",
+              "Where my head is ACTUALLY pointed, measured from the world "
+              "sliding across my vision — not from the device register, which "
+              "only echoes the last command it was given and will report a "
+              "stale pose as 'confirmed'. Runs always, not just while "
+              "tracking, so a hand on my head registers. "
+              "action='start'|'stop'|'status'|'seed'.",
+              1, _head_odometry_fn)
