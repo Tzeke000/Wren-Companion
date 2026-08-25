@@ -163,6 +163,12 @@ _TRIM_PULSE_MAX_S = 0.25    # cap one trim at ~8*0.85*0.25 = 1.7 deg; the next
 _HFOV_DEG = 68.0
 _VFOV_DEG = _HFOV_DEG * 3.0 / 4.0  # 4:3 sensor modes
 _TILT_MAX_UNITS = 12.0      # tilt arc is small; full-rate tilt overshoots hard
+# ── TILT ASYMMETRY (2026-08-25 chip-off recalibration, jog_sign_calibrate):
+# the plant drives 0.887 deg/s/unit UP but only ~0.36 deg/s/unit DOWN — 2.4x
+# weaker (gravity/stiction). A symmetric controller on this plant CLIMBS
+# during vertical hunting; matches the 08-21 "head drifts up and won't follow
+# me downward" scar. Downward commands get boosted to level the response.
+_TILT_DOWN_GAIN = 2.4
 # ── REAL-TIME FACE FAST PATH (2026-08-21 ~22:1x, Zeke: "track things like my
 # face in real time no lag"). The recognizer (InsightFace) updates ~5Hz, so
 # every consumer inherits ~200ms staleness — that IS the visible lag. Split:
@@ -444,6 +450,39 @@ def _face_fast_offset(g: dict[str, Any], st: dict[str, Any],
         return None
 
 
+def _person_track_offset(g: dict[str, Any], st: dict[str, Any],
+                         state: dict) -> dict[str, Any] | None:
+    """YOLOX + ByteTrack + face-binding seeing half (2026-08-25, replaces
+    TrackerVit as the PRIMARY person position source — see brain/person_track).
+
+    Returns {dx, dy, vx, vy, source} or None. vx/vy are the Kalman velocity
+    (normalized offset-units/s) — a real motion model for the D-term instead
+    of a finite difference over jittery boxes. None = honestly lost (or the
+    module failed; st['pt_error'] says which — caller may fall back)."""
+    try:
+        from brain import frame_store, person_track
+        res = frame_store.get_buffered_frame(max_age_sec=1.0)
+        if res.frame is None:
+            return None
+        person_track.step(res.frame, g.get("_face_results") or [],
+                          res.capture_ts)
+        label = str(state.get("target_label") or "").lower()
+        if not label:
+            t = str(state.get("target") or "")
+            label = t.split(":", 1)[1] if ":" in t else t
+        off = person_track.target_offset(label)
+        if off is None:
+            st["pt_misses"] = int(st.get("pt_misses") or 0) + 1
+            return None
+        st["pt_source"] = off.get("source")
+        st["pt_track_id"] = off.get("track_id")
+        st["pt_hits"] = int(st.get("pt_hits") or 0) + 1
+        return off
+    except Exception as e:  # noqa: BLE001 — seeing degrades, never raises
+        st["pt_error"] = repr(e)
+        return None
+
+
 def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -> None:
     from brain import visual_attention as va
 
@@ -551,9 +590,22 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         _odo_prev_ts = _ro.capture_ts
                 except Exception:
                     pass
-                # ── real-time face fast path (person targets): 20Hz TrackerVit
-                # position, recognizer only for identity/reseat (see _PERSON_*).
-                fast_off = _face_fast_offset(g, st, state) if is_person else None
+                # ── person seeing-half (2026-08-25): YOLOX+ByteTrack+faces
+                # primary; TrackerVit face path is the FALLBACK when the
+                # module itself fails (pt_error), NOT when it says lost —
+                # "lost" from a tracker with association is an honest answer,
+                # and TrackerVit second-guessing it is how heads drift onto
+                # backgrounds.
+                fast_off = None
+                st["_kf_rate"] = None
+                if is_person:
+                    pt = _person_track_offset(g, st, state)
+                    if pt is not None:
+                        fast_off = (float(pt["dx"]), float(pt["dy"]))
+                        st["_kf_rate"] = (float(pt.get("vx") or 0.0),
+                                          float(pt.get("vy") or 0.0))
+                    elif st.get("pt_error"):
+                        fast_off = _face_fast_offset(g, st, state)
                 # ── GPU guard (measured 2026-08-21: while LOST, observe falls
                 # back to OWL-ViT re-acquisition — 12Hz of that pegged the 3060
                 # at 100%). Locked tracking is cheap (TrackerVit ~10ms CPU) and
@@ -605,6 +657,14 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         else:
                             rx = ry = 0.0  # stale anchor (came back from lost)
                         st["_rate_anchor"] = {"dx": dx, "dy": dy, "ts": now_t}
+                    # ── KF rate override (2026-08-25): when the person tracker
+                    # supplies Kalman velocity, use it — a modeled rate, not a
+                    # finite difference. The anchor estimate above still runs
+                    # so the fallback stays warm if the tracker drops out.
+                    kf = st.get("_kf_rate")
+                    if kf is not None:
+                        rx = max(-3.0, min(3.0, kf[0]))
+                        ry = max(-3.0, min(3.0, kf[1]))
                     st["_rate_x"], st["_rate_y"] = rx, ry
                     _static = abs(rx) < _STATIC_RATE and abs(ry) < _STATIC_RATE
                     # Hysteresis: wider exit band once parked on a static
@@ -665,6 +725,8 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                 px = 0.0
                                 py = -_TRIM_PULSE_UNITS if dy > 0 else _TRIM_PULSE_UNITS
                                 t_pulse = need_y / (_TRIM_PULSE_UNITS * _UNIT_DEG_S)
+                            if py < 0:  # weak downward plant (_TILT_DOWN_GAIN)
+                                t_pulse *= _TILT_DOWN_GAIN
                             t_pulse = min(t_pulse, _TRIM_PULSE_MAX_S)
                             # jog soft rails apply to pulses too (privacy scar)
                             if est_tilt <= _EST_TILT_FLOOR and py < 0:
@@ -694,6 +756,10 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                             ux = 0.0
                         if est_pan >= _EST_PAN_LIMIT and ux > 0:
                             ux = 0.0
+                        # plant asymmetry: downward tilt is ~2.4x weaker than
+                        # upward (see _TILT_DOWN_GAIN) — level the response.
+                        if uy < 0:
+                            uy *= _TILT_DOWN_GAIN
                         uy = max(-_TILT_MAX_UNITS, min(_TILT_MAX_UNITS, uy))
                         # ── hard resync (see _RESYNC_S): re-anchor est to the
                         # device on cadence so dead-reckoning error stays
