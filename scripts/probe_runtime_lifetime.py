@@ -30,6 +30,38 @@ def drain(stream, tag):
         out_lines.append(f"[{tag}] " + raw.decode("utf-8", "replace").rstrip())
 
 
+def live_runtime_pids() -> list[int]:
+    """iris_runtime.py processes already running, from THIS repo."""
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return []
+    out = []
+    for proc in psutil.process_iter(attrs=["pid", "cmdline"]):
+        try:
+            cmd = proc.info.get("cmdline") or []
+            for arg in cmd:
+                if isinstance(arg, str) and arg.replace("\\", "/").endswith("/iris_runtime.py"):
+                    out.append(int(proc.info["pid"]))
+                    break
+        except Exception:
+            continue
+    return out
+
+
+# ★ SAFETY GUARD (added right after this script found the 08-25 self-kill).
+# This probe starts a SECOND iris_runtime. If one is already live, the new
+# one's camera-probe orphan hunt will find the LIVE one, call it an orphan,
+# and terminate it — i.e. running this diagnostic against a healthy stack
+# would kill the very runtime serving my tools. The tool that diagnoses an
+# outage must not be able to cause one.
+_live = live_runtime_pids()
+if _live and "--force" not in sys.argv:
+    print(f"REFUSING: {len(_live)} iris_runtime process(es) already live {_live}.")
+    print("This probe spawns a second runtime, whose orphan hunt would TERMINATE")
+    print("the live one. Stop the stack first, or pass --force if you mean it.")
+    raise SystemExit(2)
+
 p = subprocess.Popen(
     [str(PY), str(REPO / "iris_runtime.py")],
     cwd=str(REPO),

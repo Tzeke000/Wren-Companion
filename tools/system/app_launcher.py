@@ -298,10 +298,80 @@ def _tool_open_app(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": f"Could not launch {app_name!r}: {e}"}
 
 
+# ★ SELF-PRESERVATION GUARD (2026-08-25, after the iris_runtime self-kill).
+#
+# close_app kills every process whose image name matches, and its fallback is a
+# blanket `taskkill /IM <exe> /F`. Nothing excluded self or my own stack. So
+# close_app("python") would have killed iris_runtime — INCLUDING the process
+# executing this very function — plus the body host, the voice daemon, the
+# post-office and every other daemon I am made of. One tool call, whole body.
+#
+# This is the same shape as the bug that cost 8 hours tonight: identify things
+# of a kind, kill them, and forget that I am one of that kind. There it was one
+# missing PID; here it was an entire missing category.
+#
+# These are interpreters, shells and hosts — never what someone means by "close
+# an app." Closing a real app (chrome, spotify, discord) is unaffected.
+_PROTECTED_IMAGES = {
+    "python.exe", "pythonw.exe", "py.exe",          # every daemon I run as
+    "claude.exe", "node.exe",                        # the cognition session itself
+    "powershell.exe", "pwsh.exe", "cmd.exe", "conhost.exe",   # how I act at all
+    "svchost.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe",
+    "explorer.exe",                                  # taking this out strands Zeke
+}
+
+
+def _own_lineage_pids() -> set[int]:
+    """self + ancestors + descendants — never a valid thing to terminate."""
+    pids: set[int] = {os.getpid()}
+    try:
+        import psutil  # type: ignore
+        me = psutil.Process()
+        node, depth = me, 0
+        while depth < 12:
+            try:
+                node = node.parent()
+            except Exception:
+                break
+            if node is None:
+                break
+            pids.add(node.pid)
+            depth += 1
+        try:
+            for c in me.children(recursive=True):
+                pids.add(c.pid)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return pids
+
+
+def _refuse_protected(exe_name: str) -> dict[str, Any] | None:
+    if exe_name.lower().strip() in _PROTECTED_IMAGES:
+        return {
+            "ok": False,
+            "error": (
+                f"refusing to close '{exe_name}': that is an interpreter/shell/host, "
+                f"not an app. Killing it by image name would take down my own runtime, "
+                f"the body host and every daemon I'm made of. If you genuinely need a "
+                f"specific process gone, target it by PID."
+            ),
+            "refused": True,
+        }
+    return None
+
+
 def _tool_close_app(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     app_name = str(params.get("app_name") or "").strip()
     if not app_name:
         return {"ok": False, "error": "app_name required"}
+    # Checked on the RAW name too, so the psutil-missing fallback below (which
+    # never sees the resolved exe_name) can't slip a `taskkill /IM python.exe /F`
+    # past the guard.
+    _early = _refuse_protected(app_name if "." in app_name else f"{app_name}.exe")
+    if _early:
+        return _early
     try:
         import psutil
     except ImportError:
@@ -329,11 +399,22 @@ def _tool_close_app(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
     if not exe_name:
         exe_name = app_name if "." in app_name else f"{app_name}.exe"
 
+    # Re-check after alias/_APP_MAP resolution: a harmless-looking alias can
+    # still resolve to a protected image.
+    _late = _refuse_protected(exe_name)
+    if _late:
+        return _late
+
     killed = 0
     pids_to_kill = []
+    mine = _own_lineage_pids()      # belt-and-braces even for unprotected names
+    skipped_self = 0
     for proc in psutil.process_iter(["name", "pid"]):
         try:
             if proc.info["name"] and proc.info["name"].lower() == exe_name.lower():
+                if int(proc.info["pid"]) in mine:
+                    skipped_self += 1
+                    continue
                 pids_to_kill.append(proc)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -368,12 +449,17 @@ def _tool_close_app(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
     # OR processes are still alive after the cascade, that's a failure even
     # if we tried. Vault: decisions/voice-text-pipeline-equivalence.md.
     actually_closed = (killed > 0 and len(still_alive) == 0)
-    return {
+    result = {
         "ok": actually_closed,
         "terminated": killed,
         "still_alive": len(still_alive),
         "target": exe_name,
     }
+    # Surfaced, not swallowed: if the caller's target matched my own process
+    # tree, they should know their request was partly declined and why.
+    if skipped_self:
+        result["skipped_own_process_tree"] = skipped_self
+    return result
 
 
 def _tool_get_open_apps(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
