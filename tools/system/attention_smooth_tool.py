@@ -109,6 +109,24 @@ _RESYNC_S = 3.0
 # drifted, and the 3s snap was pure visible twitch. Skip it until we've
 # commanded at least this many degrees of motion since the last snap.
 _RESYNC_MIN_DEG = 4.0
+# ── ADAPTIVE RESYNC BACKOFF (2026-08-25). Zeke, watching me follow him: "your
+# head is jerking sometimes like every 5 seconds." Measured it — two status
+# samples 16.6s apart showed 3 resyncs, one every 5.5s. That IS the jerk.
+#
+# The snap above was written when est could diverge ~100 degrees, and against
+# that it was clearly worth a hitch. It is not fighting that any more. Today's
+# odometry work verified the scale to under 1.5%, and the live reanchors are
+# correcting **0.5 degrees** — a visible yank to fix an invisible error. The
+# mechanism outlived the failure it was built for, and kept charging full price.
+#
+# So the cadence now follows the EVIDENCE instead of a clock: each reanchor
+# reports how far est actually was, and if the last few corrections were
+# trivial the interval stretches. If a correction is real, it snaps straight
+# back to the tight cadence. Drift is still bounded — it is just no longer
+# assumed to exist between measurements.
+_REANCHOR_TRIVIAL_DEG = 1.5   # a correction smaller than this proves nothing drifted
+_RESYNC_S_MAX = 12.0          # ceiling on the stretched interval
+_RESYNC_BACKOFF = 1.6         # multiply the interval by this per trivial reanchor
 # ── STATIC TRIM (2026-08-21 jitter fix, part 3): sub-stiction jog vectors
 # move NOTHING (proven live: two frames 6s apart pixel-identical while the
 # servo wrote ~3-unit corrections every tick) — so a static face parked just
@@ -433,6 +451,10 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
     homed_while_lost = False
     next_observe_ts = 0.0
     last_resync_ts = time.time()
+    # Adaptive resync interval — starts tight, stretches while reanchors prove
+    # nothing is drifting (see _REANCHOR_TRIVIAL_DEG). Local, so it resets to
+    # the safe cadence every time pursuit restarts.
+    resync_interval = _RESYNC_S
     _odo_prev = None            # previous downscaled gray (visual odometry)
     _odo_prev_ts = 0.0
     # Wall-clock of the last ACCEPTED odometry update. Starvation counts alone
@@ -695,7 +717,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                             and time.time() - last_resync_ts
                             >= _ODO_SKIP_MIN_GAP_S)
                         if (_act is not None
-                                and ((time.time() - last_resync_ts >= _RESYNC_S
+                                and ((time.time() - last_resync_ts >= resync_interval
                                       and (st["_jog_effort_deg"]
                                            >= _RESYNC_MIN_DEG or _forced))
                                      or _skip_forced)):
@@ -771,6 +793,18 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                         st["reanchors"] = int(
                                             st.get("reanchors") or 0) + 1
                                         st["last_reanchor_deg"] = round(_corr, 1)
+                                        # EVIDENCE, not a clock: a trivial
+                                        # correction means nothing drifted, so
+                                        # earn a longer interval. A real one
+                                        # snaps straight back to tight.
+                                        if _corr <= _REANCHOR_TRIVIAL_DEG:
+                                            resync_interval = min(
+                                                _RESYNC_S_MAX,
+                                                resync_interval * _RESYNC_BACKOFF)
+                                        else:
+                                            resync_interval = _RESYNC_S
+                                        st["resync_interval_s"] = round(
+                                            resync_interval, 1)
                                         st["est_bearing"] = {
                                             "pan_deg": round(est_pan, 1),
                                             "tilt_deg": round(est_tilt, 1)}
