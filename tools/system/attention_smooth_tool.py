@@ -158,6 +158,36 @@ _OBSERVE_STATE_S = 0.5      # slow va.observe cadence while fast path is live
 # residual drift.
 _ODO_DEG_PER_PX = 68.0 / 160.0
 _ODO_MIN_RESP = 0.10
+# ── LOSS-ON-SKIP (2026-08-25). ⚠ MECHANISM NOT CONFIRMED — READ THIS BEFORE
+# CREDITING THE BUG AS FIXED.
+# Reasoning that led here: a rejected correlation contributes nothing to est,
+# but the head does not stop moving during that interval, so the motion is
+# dropped permanently. Every skip would then be a one-way under-count in the
+# direction of travel — a bias, not a random walk, which would explain logged
+# drifts of -14, -18, -18 (same sign every time), especially since the skip
+# trigger is motion blur and so concentrates during fast jogs.
+#   What IS verified: the SCALE is innocent. Replaying known-angle frame pairs
+#   through this same math gave +10 -> +9.93, +20 -> +19.73, -20 -> -19.74
+#   (<1.5% error). _ODO_DEG_PER_PX is correct; recalibrating it fixes nothing.
+#   What the LIVE TEST said (08-25, ~4min pursuit + forced head sweeps):
+#   204 odometry updates and ZERO skips, while est_drift still reported up to
+#   32 deg. So skipping was not happening at all, and cannot be the cause of
+#   the drift that was actually observed. This code is therefore INERT on the
+#   evidence so far — kept because the counters make the loss visible if it
+#   ever does occur, and because treating unknown motion as zero motion is
+#   wrong regardless. It is NOT a demonstrated fix for the -14/-18 drift.
+#   The stronger lead is that est_drift is computed against a JOG-BLIND
+#   readback (see the resync block), so it partly measures legitimate jog
+#   motion rather than odometry error. Ground truth on 08-25 after pursuit:
+#   measured pan +5.9 / est 5.7 / device 6.0  -- pan agrees within 0.3 deg,
+#   measured tilt +8.8 / est 18.3 / device 21.0 -- TILT is the real open
+#   discrepancy and needs a physical reference to settle.
+# Fix shape if skips ever do appear: do NOT dead-reckon the gap from commanded
+# velocity (that is the wrong-rate-constant disease this odometry cured).
+# Treat a skip as UNKNOWN motion and go read ground truth — enough skips force
+# an early resync against the device's own bearing.
+_ODO_SKIP_FORCE = 8          # skips since last resync that force an early one
+_ODO_SKIP_MIN_GAP_S = 0.75   # ...but never resync more often than this
 # ── OBSERVABILITY (2026-08-22, Zeke: "make the logs tell you what happened").
 # The safety rails below are evaluated against `est`, not against measured
 # truth. On 08-22 est had wandered ~30-40 deg from the device's own bearing and
@@ -427,6 +457,17 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                     "tilt_deg": round(est_tilt, 1)}
                                 st["odo_updates"] = int(
                                     st.get("odo_updates") or 0) + 1
+                            else:
+                                # UNKNOWN motion, not zero motion. Count it so
+                                # the loss is visible and can force a resync.
+                                st["odo_skips"] = int(
+                                    st.get("odo_skips") or 0) + 1
+                                st["odo_skips_since_resync"] = int(
+                                    st.get("odo_skips_since_resync") or 0) + 1
+                                st["last_odo_skip"] = {
+                                    "resp": round(float(_resp), 3),
+                                    "sx": round(float(_sx), 1),
+                                    "sy": round(float(_sy), 1)}
                         _odo_prev = _small
                         _odo_prev_ts = _ro.capture_ts
                 except Exception:
@@ -591,13 +632,27 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         _drift_now = max(abs(float(_ld.get("pan") or 0.0)),
                                          abs(float(_ld.get("tilt") or 0.0)))
                         _forced = _drift_now >= _EST_DRIFT_FORCE_DEG
+                        # Skipped odometry updates mean est is missing real
+                        # motion RIGHT NOW (see _ODO_SKIP_FORCE). Waiting out
+                        # the full _RESYNC_S while blind is how the -14/-18
+                        # drifts accumulated, so enough skips buy an early
+                        # trip to ground truth — floored so we can't thrash.
+                        _skip_forced = (
+                            int(st.get("odo_skips_since_resync") or 0)
+                            >= _ODO_SKIP_FORCE
+                            and time.time() - last_resync_ts
+                            >= _ODO_SKIP_MIN_GAP_S)
                         if (_act is not None
-                                and time.time() - last_resync_ts >= _RESYNC_S
-                                and (st["_jog_effort_deg"] >= _RESYNC_MIN_DEG
-                                     or _forced)):
+                                and ((time.time() - last_resync_ts >= _RESYNC_S
+                                      and (st["_jog_effort_deg"]
+                                           >= _RESYNC_MIN_DEG or _forced))
+                                     or _skip_forced)):
                             if _forced:
                                 st["forced_resyncs"] = int(
                                     st.get("forced_resyncs") or 0) + 1
+                            if _skip_forced:
+                                st["skip_forced_resyncs"] = int(
+                                    st.get("skip_forced_resyncs") or 0) + 1
                             jog.stop()
                             # Read the device's own bearing BEFORE we overwrite
                             # it. Readback is jog-blind, so this is the last
@@ -694,6 +749,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                     except Exception:
                                         pass
                             st["_jog_effort_deg"] = 0.0
+                            st["odo_skips_since_resync"] = 0
                             last_resync_ts = time.time()
                         if jog.write_vector(ux, uy):
                             st["writes"] += 1
