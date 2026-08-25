@@ -212,8 +212,15 @@ def main() -> int:
                     if was is False:   # real transition, not first startup read
                         notify_iris(
                             "Zeke's phone just JOINED the wifi — he is back in "
-                            "the barracks. If he's been away a while, a warm "
-                            "hello on Discord or voice is probably right.")
+                            "the barracks. CHECK BEFORE GREETING: the camera "
+                            "usually sees him first (2026-08-25: eyes had him "
+                            "recognised and greeted ~10 min before this fired), "
+                            "so this is often the SLOWER, second signal. If you "
+                            "have already seen or greeted him since he got "
+                            "back, say nothing — a duplicate hello is worse "
+                            "than none. Only if he has genuinely been away and "
+                            "you have NOT already greeted him is a warm hello "
+                            "on Discord or voice right.")
             else:
                 misses += 1
                 if present is not False and misses >= MISS_N:
