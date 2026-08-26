@@ -86,17 +86,22 @@ def _ensure_model():
                 _load_error = f"weights missing at {_WEIGHTS}"
                 _log(_load_error)
                 return None
-            m = YOLOX(YOLOPAFPN(0.33, 0.50), YOLOXHead(80, 0.50))   # -s config
-            ck = torch.load(_WEIGHTS, map_location="cpu", weights_only=False)
-            missing, unexpected = m.load_state_dict(ck["model"], strict=False)
-            if missing or unexpected:
-                # A partially-loaded detector produces confident nonsense.
-                _load_error = (f"weight mismatch ({len(missing)} missing, "
-                               f"{len(unexpected)} unexpected)")
-                _log(_load_error)
-                return None
+            try:
+                from brain.gpu_load_log import logged_load as _logged_load
+            except Exception:
+                from contextlib import nullcontext as _logged_load  # fail-open
             _device = "cuda" if torch.cuda.is_available() else "cpu"
-            _model = m.eval().to(_device)
+            with _logged_load(f"yolox-s:{_device}"):
+                m = YOLOX(YOLOPAFPN(0.33, 0.50), YOLOXHead(80, 0.50))   # -s config
+                ck = torch.load(_WEIGHTS, map_location="cpu", weights_only=False)
+                missing, unexpected = m.load_state_dict(ck["model"], strict=False)
+                if missing or unexpected:
+                    # A partially-loaded detector produces confident nonsense.
+                    _load_error = (f"weight mismatch ({len(missing)} missing, "
+                                   f"{len(unexpected)} unexpected)")
+                    _log(_load_error)
+                    return None
+                _model = m.eval().to(_device)
             _log(f"loaded YOLOX-s on {_device}")
         except Exception as e:  # noqa: BLE001
             _load_error = repr(e)

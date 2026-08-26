@@ -84,8 +84,13 @@ def _ensure_model():
                     f"resident — usually ollama serving the little brain, which "
                     f"releases when its keep-alive expires. Retry in a minute, or "
                     f"free it deliberately; do NOT read this as 'nothing in view'.")
-        proc = OwlViTProcessor.from_pretrained(_MODEL_ID)
-        model = OwlViTForObjectDetection.from_pretrained(_MODEL_ID).to(dev).eval()
+        try:
+            from brain.gpu_load_log import logged_load as _logged_load
+        except Exception:
+            from contextlib import nullcontext as _logged_load  # fail-open
+        with _logged_load(f"owlvit:{_MODEL_ID}:{dev}"):
+            proc = OwlViTProcessor.from_pretrained(_MODEL_ID)
+            model = OwlViTForObjectDetection.from_pretrained(_MODEL_ID).to(dev).eval()
         _state.update(model=model, proc=proc, device=dev)
 
 

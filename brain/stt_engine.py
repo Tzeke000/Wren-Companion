@@ -71,10 +71,15 @@ class STTEngine:
             model_chain = _full_chain
         device_chain = [("cuda", "float16"), ("cpu", "int8")]
 
+        try:
+            from brain.gpu_load_log import logged_load as _logged_load
+        except Exception:
+            from contextlib import nullcontext as _logged_load  # fail-open
         for model_id, model_label in model_chain:
             for device, compute in device_chain:
                 try:
-                    self._model = WhisperModel(model_id, device=device, compute_type=compute)
+                    with _logged_load(f"whisper:{model_id}:{device}:{compute}"):
+                        self._model = WhisperModel(model_id, device=device, compute_type=compute)
                     self._available = True
                     self._device = device
                     self._backend = f"faster-whisper:{model_id}:{device}:{compute}"

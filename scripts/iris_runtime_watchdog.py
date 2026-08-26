@@ -398,6 +398,43 @@ def claude_processes() -> int:
         return -1        # unknown, not zero — never claim "absent" on an error
 
 
+def runtime_processes() -> int:
+    """Count live iris_runtime.py processes (stub + child both match; any >0
+    means the runtime exists). -1 = unknown (query failed) — never claim
+    "absent" on an error. Only called on the rare stale path.
+    """
+    ps = ("(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+          "Where-Object { $_.CommandLine -match 'iris_runtime\\.py' } | "
+          "Measure-Object).Count")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=30).stdout
+        return int(out.strip() or 0)
+    except Exception as e:
+        log(f"runtime process count failed: {e!r}")
+        return -1
+
+
+def classify_stale(procs: int) -> tuple[str, str]:
+    """(kind, human) for a stale heartbeat, given a live runtime-process count.
+
+    THE POINT (owed since the 08-25 22:28 incident): a dead process and a hung
+    loop produce the identical stale stamp, but they are different faults —
+    22:28 was a CRASH (likely CUDA OOM, pids gone) and the watchdog DM'd Zeke
+    the same "unresponsive event loop" line it uses for a wedge. Both still
+    warrant the restart; the REPORT must say which, because the crash points at
+    VRAM/allocation and the wedge points at a blocking call on the loop.
+    """
+    if procs == 0:
+        return ("CRASHED", "the runtime process is GONE — it died outright "
+                "(crash, e.g. CUDA OOM), this was NOT a hung event loop")
+    if procs > 0:
+        return ("WEDGED", f"{procs} iris_runtime process(es) still alive but "
+                f"the loop has stopped stamping — a genuinely hung event loop")
+    return ("STALE", "couldn't count runtime processes — stale heartbeat of "
+            "unknown kind")
+
+
 def sdk_probe(now: float | None = None, sessions_dir: Path | None = None,
               llm_dir: Path | None = None, hb_age: float | None = -1.0,
               procs: int | None = None) -> dict:
@@ -543,18 +580,20 @@ def pick_bat() -> Path:
     return REPO / "start_iris_v2.bat"  # Opus fallback (flipped 08-22)
 
 
-def write_incident_note(age: float, action: str) -> None:
+def write_incident_note(age: float, action: str,
+                        shape: str | None = None) -> None:
     """Auto-handoff: post-restart cognition wakes on this note (mtime-newest)."""
     stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     p = MEMORY_DIR / f"handoff_auto_watchdog_{_dt.date.today().isoformat()}.md"
+    shape = shape or ("wedged event loop — same failure shape as the "
+                      "2026-07-19 body_dock hang")
     try:
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
             f.write(
                 f"\n## {stamp} — runtime watchdog fired\n"
                 f"- runtime loop heartbeat was silent for {age:.0f}s "
-                f"(wedged event loop — same failure shape as the 2026-07-19 "
-                f"body_dock hang)\n"
+                f"({shape})\n"
                 f"- action: {action}\n"
                 f"- If you are post-restart cognition reading this: the stack "
                 f"was auto-restarted by scripts/iris_runtime_watchdog.py. "
@@ -808,6 +847,14 @@ def _selftest() -> int:
         flag.unlink()
         check("flag removed = armed again", str(deliberately_off(flag)), "False")
 
+        # ---- crashed vs wedged (2026-08-26) ------------------------------
+        # The bug this guards: 08-25 22:28 the runtime DIED (pids gone, likely
+        # CUDA OOM) and the DM still said "unresponsive event loop".
+        check("0 procs = CRASHED", classify_stale(0)[0], "CRASHED")
+        check("2 procs = WEDGED", classify_stale(2)[0], "WEDGED")
+        check("count error (-1) = STALE/unknown, never a confident claim",
+              classify_stale(-1)[0], "STALE")
+
         # ---- circuit breaker (2026-08-25) --------------------------------
         # The bug this guards: ~6-min restart loop for hours on 08-24/25.
         hist: list[float] = []
@@ -871,16 +918,22 @@ def main() -> int:
             continue
         if not armed:
             continue                      # stale leftover from before boot — ignore
-        # ---- wedge detected -------------------------------------------------
-        log(f"WEDGE: loop heartbeat silent {age:.0f}s")
+        # ---- stale heartbeat detected: say WHICH fault ----------------------
+        # (crashed-vs-wedged discrimination added 2026-08-26 — owed since the
+        # 08-25 22:28 crash, when the pids were GONE and the DM still said
+        # "unresponsive event loop".)
+        kind, why = classify_stale(runtime_processes())
+        log(f"{kind}: loop heartbeat silent {age:.0f}s — {why}")
         dm_zeke(
-            f"\N{WARNING SIGN} Iris runtime watchdog: the runtime's event loop "
-            f"has been unresponsive for {age / 60:.1f} min (same failure shape "
-            f"as the 07-19 dock hang). Auto-restarting the stack in "
-            f"{GRACE_S // 60} min unless someone touches "
-            f"state\\watchdog_holdoff.flag. The robot's inhabit daemon is a "
-            f"separate process and keeps the body safe meanwhile.")
-        write_incident_note(age, f"warned; restarting in {GRACE_S}s unless held off")
+            f"\N{WARNING SIGN} Iris runtime watchdog: heartbeat silent "
+            f"{age / 60:.1f} min — verdict {kind}: {why}. Auto-restarting the "
+            f"stack in {GRACE_S // 60} min unless someone touches "
+            f"state\\watchdog_holdoff.flag (NOTE: holdoff on a CRASHED runtime "
+            f"cancels rescue entirely — it can never stamp a fresh heartbeat). "
+            f"The robot's inhabit daemon is a separate process and keeps the "
+            f"body safe meanwhile.")
+        write_incident_note(age, f"warned; restarting in {GRACE_S}s unless held off",
+                            shape=f"{kind} — {why}")
         deadline = time.time() + GRACE_S
         cancelled = False
         while time.time() < deadline:
@@ -923,7 +976,8 @@ def main() -> int:
                 f"stops being stamped.")
             return 0
         restarts.append(time.time())
-        write_incident_note(age, "auto-restarting the stack NOW")
+        write_incident_note(age, "auto-restarting the stack NOW",
+                            shape=f"{kind} — {why}")
         dm_zeke(f"\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS} "
                 f"Restarting the Iris stack now (runtime wedged "
                 f"{(hb_age_s() or age) / 60:.0f}+ min). Next message when "

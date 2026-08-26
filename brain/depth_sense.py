@@ -105,10 +105,15 @@ def _ensure_model() -> Any:
             return None
         try:
             from transformers import AutoModelForDepthEstimation
+            try:
+                from brain.gpu_load_log import logged_load as _logged_load
+            except Exception:
+                from contextlib import nullcontext as _logged_load  # fail-open
             t0 = time.time()
-            m = AutoModelForDepthEstimation.from_pretrained(MODEL_ID)
             _DEV = "cuda" if torch.cuda.is_available() else "cpu"
-            _MODEL = m.to(_DEV).eval()
+            with _logged_load(f"depth:{MODEL_ID}:{_DEV}"):
+                m = AutoModelForDepthEstimation.from_pretrained(MODEL_ID)
+                _MODEL = m.to(_DEV).eval()
             _log(f"loaded {MODEL_ID} on {_DEV} in {time.time() - t0:.1f}s")
         except Exception as e:
             _LOAD_ERR = repr(e)
