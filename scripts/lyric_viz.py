@@ -1034,6 +1034,91 @@ class Renderer:
 
 
 # ---------------------------------------------------------------------------
+# 4b. Loop color-matching + procedural loop generation (Zeke 08-26: "the
+#     colors don't really match" / "make some that will match style")
+# ---------------------------------------------------------------------------
+
+def duotone(clip: np.ndarray, style: Style) -> np.ndarray:
+    """Re-color a loop through the style's palette: the loop becomes pure
+    light/shadow, the COLORS come from the style — so any loop matches any
+    song. Tritone: shadows→deep 3rd color, mids→2nd, highs→1st."""
+    lum = clip.astype(np.float32).mean(axis=-1, keepdims=True) / 255.0
+    c_hi = np.array(style.palette[0], np.float32)
+    c_mid = np.array(style.palette[1], np.float32) * 0.55
+    c_lo = np.array(style.palette[2 % len(style.palette)], np.float32) * 0.12
+    lo_w = np.clip(1.0 - lum * 2.0, 0, 1)
+    hi_w = np.clip(lum * 2.0 - 1.0, 0, 1)
+    mid_w = 1.0 - lo_w - hi_w
+    out = lo_w * c_lo + mid_w * c_mid + hi_w * c_hi
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def gen_loops(w: int, h: int, fps: int, bpm: float) -> list[np.ndarray]:
+    """Procedural VJ loops, grayscale (duotone gives them the style's colors).
+    Beat-locked: loop length = 4 beats so cuts always land clean."""
+    T = max(int(fps * 4 * 60.0 / max(60.0, bpm or 120.0)), fps)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cx, cy = w / 2, h / 2
+    dx, dy = xx - cx, yy - cy
+    r = np.sqrt(dx ** 2 + dy ** 2) / (h / 2)
+    th = np.arctan2(dy, dx)
+    loops = []
+
+    # 1. laser tunnel: rotating spokes + rings expanding once per beat
+    frames = []
+    for t in range(T):
+        ph = t / T * 2 * np.pi
+        spokes = (np.sin(th * 12 + ph * 2) > 0.86).astype(np.float32)
+        rings = np.clip(np.sin(r * 10 - ph * 4), 0, 1) ** 6
+        g = np.clip((spokes * (1 - r * 0.7) + rings * 0.8), 0, 1)
+        frames.append((g * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    # 2. starburst streaks: particles streaming outward, respawn each loop
+    rng = np.random.default_rng(11)
+    n = 90
+    ang = rng.uniform(0, 2 * np.pi, n)
+    spd = rng.uniform(0.3, 1.0, n)
+    frames = []
+    for t in range(T):
+        img = np.zeros((h, w), np.float32)
+        prog = ((t / T) + spd) % 1.0
+        rad = prog * (h * 0.75)
+        xs = (cx + np.cos(ang) * rad).astype(int)
+        ys = (cy + np.sin(ang) * rad).astype(int)
+        ok = (xs > 1) & (xs < w - 2) & (ys > 1) & (ys < h - 2)
+        img[ys[ok], xs[ok]] = 1.0
+        img = cv2.GaussianBlur(img, (0, 0), 1.2) * 3.0
+        img += np.clip(1 - r * 2.2, 0, 1) * 0.35          # core glow
+        frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    # 3. grid pulse: dot lattice, brightness waves sweep through per beat
+    gx, gy = np.meshgrid(np.arange(8, w, 24), np.arange(8, h, 24))
+    frames = []
+    for t in range(T):
+        ph = t / T * 2 * np.pi
+        img = np.zeros((h, w), np.float32)
+        b = 0.4 + 0.6 * np.sin(ph * 4 + (gx / w) * 6 + (gy / h) * 3) ** 2
+        for X, Y, B in zip(gx.ravel(), gy.ravel(), b.ravel()):
+            img[int(Y) - 1:int(Y) + 2, int(X) - 1:int(X) + 2] = B
+        img = cv2.GaussianBlur(img, (0, 0), 1.0) * 2.2
+        frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    # 4. warp rings: breathing concentric waves (melodic/deep sections)
+    frames = []
+    for t in range(T):
+        ph = t / T * 2 * np.pi
+        g = np.clip(np.sin(r * 6 - ph * 2 + np.sin(th * 3 + ph) * 0.5), 0, 1) ** 3
+        g *= np.clip(1.1 - r, 0, 1)
+        frames.append((g * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    return loops
+
+
+# ---------------------------------------------------------------------------
 # 5. Encode (PyAV) — proven in v0
 # ---------------------------------------------------------------------------
 
@@ -1102,7 +1187,11 @@ def main() -> int:
                          "flips on the beat")
     ap.add_argument("--bgvideo", default="",
                     help="dir or comma-list of VJ loop videos — reactive "
-                         "background (replaces starfield/plasma)")
+                         "background (replaces starfield/plasma). 'gen' = "
+                         "procedural loops made in the style's own palette")
+    ap.add_argument("--no-tint", action="store_true",
+                    help="keep loop videos' original colors (default: duotone "
+                         "through the style palette so colors always match)")
     ap.add_argument("--shape", default="none",
                     choices=["none", "cube", "pyramid", "cylinder", "orb",
                              "logo3d"],
@@ -1190,30 +1279,40 @@ def main() -> int:
     bgclips = None
     bgclip_idx = None
     if args.bgvideo:
-        import av as _av
-        p = Path(args.bgvideo)
-        vpaths = (sorted([q for q in p.iterdir()
-                          if q.suffix.lower() in (".mp4", ".mov", ".m4v",
-                                                  ".webm", ".avi")])
-                  if p.is_dir() else [Path(s) for s in args.bgvideo.split(",")])
-        bgclips = []
-        for q in vpaths:
-            if not q.is_file():
-                continue
-            try:
-                cont = _av.open(str(q))
-                frames = []
-                for fr in cont.decode(video=0):
-                    frames.append(cv2.resize(
-                        fr.to_ndarray(format="rgb24"),
-                        (max(2, W // 4), max(2, H // 4)),
-                        interpolation=cv2.INTER_AREA))
-                    if len(frames) >= args.fps * 8:
-                        break
-                if len(frames) >= args.fps:      # at least 1s of loop
-                    bgclips.append(np.stack(frames))
-            except Exception as e:
-                print(f"[lyric_viz] bgvideo {q.name} skipped: {e!r}")
+        bw, bh = max(2, W // 4), max(2, H // 4)
+        if args.bgvideo.strip().lower() == "gen":
+            bgclips = gen_loops(bw, bh, args.fps, analysis.bpm)
+            print(f"[lyric_viz] generated {len(bgclips)} procedural loops "
+                  f"(beat-locked to bpm~{analysis.bpm or 120})")
+        else:
+            import av as _av
+            p = Path(args.bgvideo)
+            vpaths = (sorted([q for q in p.iterdir()
+                              if q.suffix.lower() in (".mp4", ".mov", ".m4v",
+                                                      ".webm", ".avi")])
+                      if p.is_dir() else [Path(s) for s in args.bgvideo.split(",")])
+            bgclips = []
+            for q in vpaths:
+                if not q.is_file():
+                    continue
+                try:
+                    cont = _av.open(str(q))
+                    frames = []
+                    for fr in cont.decode(video=0):
+                        frames.append(cv2.resize(
+                            fr.to_ndarray(format="rgb24"), (bw, bh),
+                            interpolation=cv2.INTER_AREA))
+                        if len(frames) >= args.fps * 8:
+                            break
+                    if len(frames) >= args.fps:      # at least 1s of loop
+                        bgclips.append(np.stack(frames))
+                except Exception as e:
+                    print(f"[lyric_viz] bgvideo {q.name} skipped: {e!r}")
+        if bgclips and not args.no_tint:
+            # colors always match: loops become light/shadow in the style's
+            # own palette (Zeke 08-26: "the colors don't really match")
+            bgclips = [duotone(c, style) for c in bgclips]
+            print("[lyric_viz] loops duotoned to style palette")
         if bgclips:
             kicks = np.cumsum(analysis.kick.astype(int))
             bgclip_idx = (kicks // 16).astype(int)   # new loop every ~4 bars
