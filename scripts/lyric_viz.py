@@ -96,8 +96,12 @@ def _norm(s: str) -> str:
 
 
 def align_to_lyrics(heard: list[Word], lyrics_text: str) -> list[list[Word]]:
-    """Written lyrics = ground truth TEXT (and line breaks); whisper = TIME."""
-    lines_raw = [ln.strip() for ln in lyrics_text.splitlines() if ln.strip()]
+    """Written lyrics = ground truth TEXT (and line breaks); whisper = TIME.
+
+    Section tags like [Verse] / [Hook] / [Chorus 2] are structure, not lyrics —
+    dropped before alignment (Zeke's lyric PDFs use them)."""
+    lines_raw = [ln.strip() for ln in lyrics_text.splitlines()
+                 if ln.strip() and not re.fullmatch(r"\[[^\]]+\]", ln.strip())]
     written: list[tuple[int, str]] = []
     for i, ln in enumerate(lines_raw):
         for w in ln.split():
@@ -459,6 +463,7 @@ class Renderer:
     _zoom: float = 0.0                      # decaying zoom punch
     _pal_i: int = 0
     _parts: np.ndarray | None = None        # particles [n,5]: x y vx vy life
+    _logo_rgb: np.ndarray | None = None     # logo colors, when a real image
 
     # -- setup ------------------------------------------------------------
     def __post_init__(self):
@@ -490,7 +495,15 @@ class Renderer:
             lw = int(self.W * (0.22 if self.style.viz == "radial" else 0.30))
             lh = max(1, int(lw * self.logo.height / max(1, self.logo.width)))
             logo = self.logo.resize((lw, lh))
-            return np.asarray(logo.split()[-1], np.float32) / 255.0
+            rgb = np.asarray(logo.convert("RGB"), np.float32)
+            alpha = np.asarray(logo.split()[-1], np.float32) / 255.0
+            if alpha.std() < 0.02:
+                # No real alpha (white background baked in — Zeke's
+                # 'Tzeke000 symble.PNG'): mask = distance from white.
+                whiteness = rgb.min(axis=2) / 255.0
+                alpha = np.clip((0.92 - whiteness) * 4.0, 0.0, 1.0)
+            self._logo_rgb = rgb
+            return alpha
         if not self.title:
             return None
         text = self.title.upper() if self.style.caps else self.title
@@ -690,15 +703,23 @@ class Renderer:
             return
         sub = m[ya - y0:yb - y0, xa - x0:xb - x0]
         # glowing OUTLINE (the Greyland treatment): edge of the mask, blurred,
-        # in palette color scaled by bass; plus a dim solid fill.
+        # in palette color scaled by bass; fill = the logo's REAL colors when
+        # we have an image, else a dim flat fill for text titles.
         edge = cv2.morphologyEx(sub, cv2.MORPH_GRADIENT,
                                 np.ones((3, 3), np.uint8))
         glow = cv2.GaussianBlur(edge, (0, 0), 3 + 6 * a.bass[i])
         col = np.array(self.style.palette[self._pal_i % len(self.style.palette)],
                        np.float32)
         region = img[ya:yb, xa:xb]
+        if self._logo_rgb is not None:
+            lrgb = cv2.resize(self._logo_rgb, (sw, sh),
+                              interpolation=cv2.INTER_LINEAR)[
+                ya - y0:yb - y0, xa - x0:xb - x0]
+            m3 = sub[..., None]
+            region[:] = region * (1 - m3) + lrgb * m3 * (0.75 + 0.25 * a.rms[i])
+        else:
+            region += sub[..., None] * np.array((70, 70, 78), np.float32)
         region += glow[..., None] * col * (0.9 + 1.3 * a.bass[i])
-        region += sub[..., None] * np.array((70, 70, 78), np.float32)
         region += edge[..., None] * col * 0.8
 
     def _current_line(self, t: float) -> tuple[list[Word] | None, int]:
@@ -902,6 +923,15 @@ def main() -> int:
             lines = lines_from_transcript(heard)
 
     analysis, pcm, sr = analyze(args.audio, args.fps)
+    if sr > 48000:
+        # hi-res masters (Zeke's love the mirror.wav is 192kHz float) break the
+        # AAC encoder (avcodec_open2 err 22, caps at 96k) — resample to 48k.
+        from scipy.signal import resample_poly
+        import math
+        g = math.gcd(48000, sr)
+        pcm = resample_poly(pcm, 48000 // g, sr // g, axis=0).astype(np.float32)
+        print(f"[lyric_viz] resampled {sr} -> 48000 Hz for AAC")
+        sr = 48000
     duration = len(pcm) / sr
     n_frames = int(np.ceil(duration * args.fps))
 
