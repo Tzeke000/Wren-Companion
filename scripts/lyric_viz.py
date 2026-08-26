@@ -406,6 +406,21 @@ STYLES: dict[str, Style] = {
                          shake=13.0, zoom_punch=0.04, scramble=True,
                          breakdown_desat=True, flicker=0.10,
                          text_col=(200, 190, 190)),
+    # future bass (Zeke's correction 08-26: "She broke it all" is future bass,
+    # NOT dubstep — lyric-heavy + melodic = this lane; dubstep barely has
+    # words). Bright pastel neon, bouncy zoom on chord stabs, soft glow,
+    # NO scramble/glitch violence — Illenium/Flume language.
+    "futurebass": Style("futurebass",
+                        palette=[(255, 120, 200), (120, 220, 255),
+                                 (190, 140, 255), (255, 235, 160)],
+                        bg="plasma", viz="radial", particles=True,
+                        font_title="Poppins-Bold.ttf",
+                        font_lyrics="Poppins-Bold.ttf", caps=True,
+                        tracking=0.10, logo_pos="center",
+                        strobe=False, glitch=False, rgb_split=False,
+                        shake=0.0, zoom_punch=0.05, scramble=False,
+                        breakdown_desat=False, flicker=0.0,
+                        text_col=(250, 245, 250)),
     # deep house — soft horizontal WAVEFORM, thin minimal letterspaced
     # lowercase (Poppins Light), dark neon plasma, NO strobes.
     "deephouse": Style("deephouse",
