@@ -333,11 +333,26 @@ def analyze(audio: Path, fps: int) -> tuple[Analysis, np.ndarray, int]:
 # 3. Styles — the genre presets from the research
 # ---------------------------------------------------------------------------
 
+FONTS_DIR = REPO / "assets" / "fonts"
+
+
 @dataclass
 class Style:
+    """A genre FORMAT, not a recolor (Zeke directive 2026-08-26): the viz
+    geometry, the letterforms, and the layout differ per genre — per the
+    tapedit genre guide (four families: bars / waveform / radial / particle)
+    and the typography research (festival = bold condensed caps; dubstep =
+    heavy + procedurally glitched; deep house = thin minimal letterspaced)."""
     name: str
     palette: list[tuple[int, int, int]]     # RGB accents, rotated per flash
     bg: str                                 # starfield | plasma | flat
+    viz: str                                # radial | bars_center | bars | wave
+    particles: bool                         # kick-burst particles (radial EDM)
+    font_title: str                         # ttf in assets/fonts (or "")
+    font_lyrics: str
+    caps: bool                              # uppercase lyrics
+    tracking: float                         # title letterspacing, em fraction
+    logo_pos: str                           # center (inside ring) | top
     strobe: bool                            # hard white flash on kick in drop
     glitch: bool                            # slice-tear on drop
     rgb_split: bool                         # chromatic split on drop
@@ -350,25 +365,40 @@ class Style:
 
 
 STYLES: dict[str, Style] = {
-    # festival EDM: saturated palette, strobe + zoom punch on the drop
+    # festival EDM — the Trap Nation family: RADIAL ring around a centered
+    # logo, particle bursts on the kick, bold condensed caps (Anton).
     "edm": Style("edm",
                  palette=[(255, 70, 130), (70, 170, 255), (170, 90, 255),
                           (255, 210, 70)],
-                 bg="starfield", strobe=True, glitch=False, rgb_split=True,
+                 bg="starfield", viz="radial", particles=True,
+                 font_title="Anton-Regular.ttf",
+                 font_lyrics="BebasNeue-Regular.ttf", caps=True,
+                 tracking=0.06, logo_pos="center",
+                 strobe=True, glitch=False, rgb_split=True,
                  shake=6.0, zoom_punch=0.035, scramble=True,
                  breakdown_desat=True, flicker=0.04),
-    # dubstep/riddim: acid palette, glitch slices + shake, half-time weight
+    # dubstep/riddim — bold CENTERED MIRRORED bars, heavy glitched type
+    # (ArchivoBlack + procedural tearing), acid palette, half-time weight.
     "dubstep": Style("dubstep",
                      palette=[(150, 255, 60), (190, 70, 255), (255, 50, 90),
                               (60, 255, 220)],
-                     bg="starfield", strobe=True, glitch=True, rgb_split=True,
+                     bg="starfield", viz="bars_center", particles=False,
+                     font_title="RubikGlitch-Regular.ttf",
+                     font_lyrics="ArchivoBlack-Regular.ttf", caps=True,
+                     tracking=0.02, logo_pos="top",
+                     strobe=True, glitch=True, rgb_split=True,
                      shake=10.0, zoom_punch=0.03, scramble=True,
                      breakdown_desat=True, flicker=0.07),
-    # deep house: dark neon, hypnotic, smooth — NO hard strobes
+    # deep house — soft horizontal WAVEFORM, thin minimal letterspaced
+    # lowercase (Poppins Light), dark neon plasma, NO strobes.
     "deephouse": Style("deephouse",
                        palette=[(255, 90, 190), (90, 255, 235), (150, 100, 255),
                                 (255, 160, 90)],
-                       bg="plasma", strobe=False, glitch=False, rgb_split=False,
+                       bg="plasma", viz="wave", particles=False,
+                       font_title="Poppins-Light.ttf",
+                       font_lyrics="Poppins-Light.ttf", caps=False,
+                       tracking=0.32, logo_pos="top",
+                       strobe=False, glitch=False, rgb_split=False,
                        shake=0.0, zoom_punch=0.015, scramble=False,
                        breakdown_desat=False, flicker=0.0),
 }
@@ -378,14 +408,33 @@ STYLES: dict[str, Style] = {
 # 4. Renderer
 # ---------------------------------------------------------------------------
 
-def _font(size: int):
+def _font(size: int, name: str = ""):
     from PIL import ImageFont
-    for name in ("impact.ttf", "arialbd.ttf", "arial.ttf"):
+    if name:
         try:
-            return ImageFont.truetype(rf"C:\Windows\Fonts\{name}", size)
+            return ImageFont.truetype(str(FONTS_DIR / name), size)
+        except Exception:
+            pass
+    for fallback in ("impact.ttf", "arialbd.ttf", "arial.ttf"):
+        try:
+            return ImageFont.truetype(rf"C:\Windows\Fonts\{fallback}", size)
         except Exception:
             continue
     return ImageFont.load_default()
+
+
+def _draw_tracked(draw, xy, text: str, font, fill, tracking_px: float) -> float:
+    """Char-by-char draw with letterspacing; returns total width."""
+    x, y = xy
+    for ch in text:
+        draw.text((x, y), ch, font=font, fill=fill)
+        x += draw.textlength(ch, font=font) + tracking_px
+    return x - xy[0] - tracking_px
+
+
+def _tracked_width(draw, text: str, font, tracking_px: float) -> float:
+    return (sum(draw.textlength(c, font=font) for c in text)
+            + tracking_px * max(0, len(text) - 1))
 
 
 _SCRAMBLE_SET = "!<>-_\\/[]{}=+*^?#$%&0123456789"
@@ -400,6 +449,7 @@ class Renderer:
     fps: int
     logo: "object | None" = None            # PIL RGBA or None
     title: str = ""
+    wave_env: np.ndarray | None = None      # |pcm| envelope @ WAVE_HZ, for viz=wave
     _fonts: dict = field(default_factory=dict)
     _stars: np.ndarray | None = None
     _plasma_xy: tuple | None = None
@@ -408,6 +458,7 @@ class Renderer:
     _flash: float = 0.0                     # decaying kick flash
     _zoom: float = 0.0                      # decaying zoom punch
     _pal_i: int = 0
+    _parts: np.ndarray | None = None        # particles [n,5]: x y vx vy life
 
     # -- setup ------------------------------------------------------------
     def __post_init__(self):
@@ -426,31 +477,39 @@ class Renderer:
                                  0, 1).astype(np.float32)[..., None]
         self._logo_mask = self._make_logo_mask()
 
-    def font(self, size: int):
-        if size not in self._fonts:
-            self._fonts[size] = _font(size)
-        return self._fonts[size]
+    def font(self, size: int, name: str = ""):
+        key = (size, name)
+        if key not in self._fonts:
+            self._fonts[key] = _font(size, name)
+        return self._fonts[key]
 
     def _make_logo_mask(self) -> np.ndarray | None:
         """Alpha mask (H',W') float 0..1 of the logo image or title text."""
         from PIL import Image, ImageDraw
         if self.logo is not None:
-            lw = int(self.W * 0.30)
+            lw = int(self.W * (0.22 if self.style.viz == "radial" else 0.30))
             lh = max(1, int(lw * self.logo.height / max(1, self.logo.width)))
             logo = self.logo.resize((lw, lh))
             return np.asarray(logo.split()[-1], np.float32) / 255.0
         if not self.title:
             return None
-        fs = int(self.H * 0.11)
-        f = self.font(fs)
+        text = self.title.upper() if self.style.caps else self.title
+        fs = int(self.H * (0.085 if self.style.viz == "radial" else 0.11))
+        f = self.font(fs, self.style.font_title)
+        track = self.style.tracking * fs
         probe = Image.new("L", (4, 4))
         dr = ImageDraw.Draw(probe)
-        box = dr.textbbox((0, 0), self.title, font=f)
-        wpx, hpx = box[2] - box[0] + 8, box[3] - box[1] + 8
+        box = dr.textbbox((0, 0), text, font=f)
+        wpx = int(_tracked_width(dr, text, f, track)) + 12
+        hpx = box[3] - box[1] + 12
         img = Image.new("L", (wpx, hpx), 0)
-        ImageDraw.Draw(img).text((4 - box[0], 4 - box[1]), self.title,
-                                 font=f, fill=255)
+        _draw_tracked(ImageDraw.Draw(img), (6, 6 - box[1]), text, f, 255, track)
         return np.asarray(img, np.float32) / 255.0
+
+    def _logo_center(self) -> tuple[int, int]:
+        if self.style.logo_pos == "center":
+            return self.W // 2, int(self.H * 0.42)
+        return self.W // 2, int(self.H * 0.30)
 
     # -- pieces -----------------------------------------------------------
     def _bg(self, i: int, t: float, a: Analysis) -> np.ndarray:
@@ -484,9 +543,25 @@ class Renderer:
                               interpolation=cv2.INTER_LINEAR)
         return img
 
-    def _bars(self, img: np.ndarray, i: int, a: Analysis) -> None:
-        col = np.array(self.style.palette[self._pal_i % len(self.style.palette)],
-                       np.float32)
+    def _viz(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        v = self.style.viz
+        if v == "radial":
+            self._viz_radial(img, i, a)
+        elif v == "bars_center":
+            self._viz_bars_center(img, i, a)
+        elif v == "wave":
+            self._viz_wave(img, i, a)
+        else:
+            self._viz_bars_bottom(img, i, a)
+        if self.style.particles:
+            self._viz_particles(img, i, a)
+
+    def _pal(self, off: int = 0) -> np.ndarray:
+        p = self.style.palette
+        return np.array(p[(self._pal_i + off) % len(p)], np.float32)
+
+    def _viz_bars_bottom(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        col = self._pal()
         bw = self.W / NBARS
         base = self.H - 6
         maxh = self.H * 0.16
@@ -497,6 +572,107 @@ class Renderer:
             x0, x1 = int(k * bw + 2), int((k + 1) * bw - 2)
             img[base - h:base, x0:x1] += col * (0.20 + 0.5 * a.bars[i, k])
 
+    def _viz_bars_center(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """Dubstep format: bold bars mirrored about a center line — 'the bass
+        and 808s deserve bars that punch' (genre guide)."""
+        col = self._pal()
+        bw = self.W / NBARS
+        cy = int(self.H * 0.55)
+        maxh = self.H * 0.16 * (1.0 + 0.5 * a.bass[i])
+        for k in range(NBARS):
+            h = int(a.bars[i, k] * maxh)
+            if h <= 0:
+                continue
+            x0, x1 = int(k * bw + 3), int((k + 1) * bw - 3)
+            img[cy - h:cy + h, x0:x1] += col * (0.25 + 0.55 * a.bars[i, k])
+
+    def _viz_radial(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """EDM format — the Trap Nation family: spectrum spokes around a
+        centered logo, ring radius breathing with the bass."""
+        cx, cy = self._logo_center()
+        r0 = self.H * 0.155 * (1.0 + 0.12 * a.bass[i])
+        maxlen = self.H * 0.13
+        col = self._pal()
+        col2 = self._pal(1)
+        n = NBARS
+        for k in range(n):
+            mag = a.bars[i, k]
+            if mag <= 0.02:
+                continue
+            # mirrored: same band on both sides, bass at the bottom
+            for sign in (1, -1):
+                th = np.pi / 2 + sign * np.pi * (k + 0.5) / n
+                c0 = (int(cx + r0 * np.cos(th)), int(cy + r0 * np.sin(th)))
+                c1 = (int(cx + (r0 + mag * maxlen) * np.cos(th)),
+                      int(cy + (r0 + mag * maxlen) * np.sin(th)))
+                cv2.line(img, c0, c1,
+                         tuple(float(x) for x in (col if k % 2 else col2)
+                               * (0.35 + 0.65 * mag)),
+                         thickness=3, lineType=cv2.LINE_AA)
+        # thin base ring
+        cv2.circle(img, (cx, cy), int(r0),
+                   tuple(float(x) for x in col * (0.25 + 0.5 * a.rms[i])),
+                   thickness=2, lineType=cv2.LINE_AA)
+
+    WAVE_HZ = 100
+
+    def _viz_wave(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """Deep house format: a soft horizontal waveform tracing amplitude —
+        'the visualizer should breathe, not compete' (genre guide)."""
+        env = self.wave_env
+        if env is None:
+            return self._viz_bars_bottom(img, i, a)
+        cy = int(self.H * 0.80)
+        span = int(2.0 * self.WAVE_HZ)               # 2s window
+        c = int(i / self.fps * self.WAVE_HZ)
+        a0 = max(0, c - span // 2)
+        seg = env[a0:a0 + span]
+        if len(seg) < 8:
+            return
+        xs = np.linspace(0, self.W - 1, len(seg)).astype(np.int32)
+        amp = self.H * 0.075 * (0.4 + 0.6 * a.rms[i])
+        mod = np.sin(np.linspace(0, 6.28, len(seg)) + i * 0.06)
+        ys = (cy - seg / max(1e-6, env.max()) * amp
+              * (0.75 + 0.25 * mod)).astype(np.int32)
+        pts = np.stack([xs, ys], axis=1).reshape(-1, 1, 2)
+        col = self._pal()
+        cv2.polylines(img, [pts], False,
+                      tuple(float(x) for x in col * 0.85),
+                      thickness=2, lineType=cv2.LINE_AA)
+        # mirrored faint reflection
+        pts2 = np.stack([xs, (2 * cy - ys).astype(np.int32)], axis=1).reshape(-1, 1, 2)
+        cv2.polylines(img, [pts2], False,
+                      tuple(float(x) for x in col * 0.25),
+                      thickness=1, lineType=cv2.LINE_AA)
+
+    def _viz_particles(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """Kick bursts from the ring edge — 'radial with particles' (EDM)."""
+        if self._parts is None:
+            self._parts = np.zeros((0, 5), np.float32)
+        if a.kick[i]:
+            rng = np.random.default_rng(i)
+            n = 26 if a.drop[i] else 12
+            th = rng.uniform(0, 2 * np.pi, n)
+            cx, cy = self._logo_center()
+            r0 = self.H * 0.16
+            speed = rng.uniform(2.0, 6.0, n) * (1.0 + 1.2 * a.bass[i])
+            new = np.stack([cx + r0 * np.cos(th), cy + r0 * np.sin(th),
+                            speed * np.cos(th), speed * np.sin(th),
+                            np.full(n, 1.0)], axis=1).astype(np.float32)
+            self._parts = np.concatenate([self._parts, new])
+        if not len(self._parts):
+            return
+        p = self._parts
+        p[:, 0] += p[:, 2]
+        p[:, 1] += p[:, 3]
+        p[:, 4] -= 1.0 / (self.fps * 1.2)
+        self._parts = p = p[p[:, 4] > 0]
+        col = self._pal()
+        for x, y, _, _, life in p:
+            xi, yi = int(x), int(y)
+            if 1 <= xi < self.W - 1 and 1 <= yi < self.H - 1:
+                img[yi - 1:yi + 2, xi - 1:xi + 2] += col * life * 0.8
+
     def _logo(self, img: np.ndarray, i: int, a: Analysis) -> None:
         mask = self._logo_mask
         if mask is None:
@@ -506,7 +682,7 @@ class Renderer:
         mh, mw = mask.shape
         sw, sh = max(2, int(mw * scale)), max(2, int(mh * scale))
         m = cv2.resize(mask, (sw, sh), interpolation=cv2.INTER_LINEAR)
-        cx, cy = self.W // 2, int(self.H * 0.30)
+        cx, cy = self._logo_center()
         x0, y0 = cx - sw // 2, cy - sh // 2
         xa, ya = max(0, x0), max(0, y0)
         xb, yb = min(self.W, x0 + sw), min(self.H, y0 + sh)
@@ -544,14 +720,14 @@ class Renderer:
         drop = bool(a.drop[i])
         words = []
         for k, w in enumerate(ln):
-            txt = w.text
+            txt = w.text.upper() if self.style.caps else w.text
             if drop and self.style.scramble and k != active:
                 rng = random.Random(hash((i // 3, k, len(txt))))
                 txt = "".join(c if c == " " or rng.random() < 0.35
                               else rng.choice(_SCRAMBLE_SET) for c in txt)
             words.append(txt)
-        fs = int(self.H * 0.075)
-        f = self.font(fs)
+        fs = int(self.H * (0.062 if self.style.viz == "radial" else 0.075))
+        f = self.font(fs, self.style.font_lyrics)
         layer = Image.new("RGB", (self.W, self.H), (0, 0, 0))
         draw = ImageDraw.Draw(layer)
         space = draw.textlength(" ", font=f)
@@ -559,12 +735,12 @@ class Renderer:
         total = sum(widths) + space * (len(words) - 1)
         while total > self.W * 0.92 and fs > 18:
             fs = int(fs * 0.9)
-            f = self.font(fs)
+            f = self.font(fs, self.style.font_lyrics)
             space = draw.textlength(" ", font=f)
             widths = [draw.textlength(w, font=f) for w in words]
             total = sum(widths) + space * (len(words) - 1)
         x = (self.W - total) / 2
-        y = int(self.H * 0.66)
+        y = int(self.H * (0.78 if self.style.viz == "radial" else 0.66))
         accent = self.style.palette[self._pal_i % len(self.style.palette)]
         xx = x
         for k, (w, wd) in enumerate(zip(words, widths)):
@@ -627,7 +803,7 @@ class Renderer:
     # -- one frame --------------------------------------------------------
     def frame(self, i: int, t: float, a: Analysis) -> np.ndarray:
         img = self._bg(i, t, a)
-        self._bars(img, i, a)
+        self._viz(img, i, a)
         self._logo(img, i, a)
         self._lyrics(img, i, t, a)
         img = self._fx(img, i, a)
@@ -734,7 +910,16 @@ def main() -> int:
         from PIL import Image
         logo = Image.open(args.logo).convert("RGBA")
 
-    r = Renderer(W, H, style, lines, args.fps, logo=logo, title=args.title)
+    # |pcm| envelope for the wave viz (deep house)
+    mono_abs = np.abs(pcm.mean(axis=1))
+    step = max(1, sr // Renderer.WAVE_HZ)
+    n_env = len(mono_abs) // step
+    wave_env = mono_abs[:n_env * step].reshape(n_env, step).mean(axis=1)
+    k = max(1, Renderer.WAVE_HZ // 8)
+    wave_env = np.convolve(wave_env, np.ones(k) / k, mode="same")
+
+    r = Renderer(W, H, style, lines, args.fps, logo=logo, title=args.title,
+                 wave_env=wave_env.astype(np.float32))
 
     def frames():
         for i in range(n_frames):
