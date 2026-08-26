@@ -128,10 +128,49 @@ def test_lost_goes_none():
     print("PASS lost target goes honestly None")
 
 
+def test_arms_up_does_not_move_aim():
+    """Referee test 2026-08-25 ('hands up and your head went WILD'): raising
+    arms grows the box UPWARD — top leaps, bottom (feet) stays planted. The
+    aim point must ride the remembered head height above the BOTTOM edge, and
+    the fed-forward vy must be the bottom-edge rate (~0), not the box-center
+    rate (which climbs at vh/2 during the gesture)."""
+    person_track.reset()
+    ts = 6000.0
+    # establish identity + face-height memory: box 140..340, face at y=170
+    for i in range(6):
+        ts += 1 / 30
+        run_step([det(320, 240, w=80, h=200)], [face_at(320, 170)], ts)
+    base = person_track.target_offset("zeke")
+    # face gone: stand still long enough for the face to go stale (>0.7s)
+    for i in range(21):
+        ts += 1 / 30
+        run_step([det(320, 240, w=80, h=200)], [], ts)
+    # then arms go up FAST: bottom pinned at 340, height 200 -> 320
+    off = None
+    for i in range(12):
+        ts += 1 / 30
+        hh = 200 + 10 * (i + 1)
+        run_step([det(320, 340 - hh / 2.0, w=80, h=hh)], [], ts)
+        off = person_track.target_offset("zeke")
+    assert off is not None and off["source"] == "body", off
+    drift = abs(off["dy"] - base["dy"])
+    assert drift < 0.08, f"aim chased the growing box: dy drift {drift:.3f}"
+    assert abs(off["vy"]) < 0.15, \
+        f"shape morph leaked into velocity: vy={off['vy']:+.3f}/s"
+    # sanity: old top-anchored math WOULD have moved (proves the test bites)
+    hh = 320.0
+    old_ay = (340 - hh) + hh * 0.18
+    old_dy = (old_ay - H / 2.0) / (H / 2.0)
+    assert abs(old_dy - base["dy"]) > 0.15, "test would not catch a regression"
+    print(f"PASS arms-up: aim dy drift {drift:.3f}, vy={off['vy']:+.3f}/s "
+          f"(old aim would have drifted {abs(old_dy - base['dy']):.2f})")
+
+
 if __name__ == "__main__":
     test_face_binds_and_body_continues()
     test_kf_velocity_sign_and_size()
     test_unknown_face_binds_nothing()
     test_rebind_follows_face()
     test_lost_goes_none()
+    test_arms_up_does_not_move_aim()
     print("ALL PASS")

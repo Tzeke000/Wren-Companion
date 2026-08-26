@@ -154,6 +154,12 @@ def step(frame, faces: list[dict], capture_ts: float) -> dict[str, Any]:
                  # KF state: [cx, cy, a, h, vcx, vcy, va, vh] per UPDATE
                  "vel": ([float(t.mean[4]), float(t.mean[5])]
                          if t.mean is not None else [0.0, 0.0]),
+                 # height-rate: how fast the BOX is changing shape. Arms going
+                 # up grow the box upward — that is shape morph, not motion
+                 # (referee test 2026-08-25: "hands up and your head went
+                 # WILD"). Kept so target_offset can report subject velocity
+                 # instead of box-center velocity.
+                 "vh": (float(t.mean[7]) if t.mean is not None else 0.0),
                  "ts": capture_ts}
                 for t in stracks]
             _state["frame_shape"] = (h, w)
@@ -161,8 +167,29 @@ def step(frame, faces: list[dict], capture_ts: float) -> dict[str, Any]:
             # identity: face matches bind labels to track ids (face outranks
             # any previous binding — rebind moves the label, never copies it)
             for label, tid in bind_faces(_state["tracks"], faces).items():
+                prev = _state["bindings"].get(label) or {}
                 _state["bindings"][label] = {"track_id": tid, "bound_ts": now,
-                                             "via": "face_in_box"}
+                                             "via": "face_in_box",
+                                             "face_up_px": prev.get("face_up_px")}
+                # BOTTOM-ANCHORED HEAD MEMORY (2026-08-25 referee fix): while
+                # the face is visible, remember how far the head sits above
+                # the track box's BOTTOM edge. Feet stay planted when arms go
+                # up — the bottom edge is the only stable reference on a box
+                # whose top morphs with gesture. When the face later goes
+                # stale, we aim at bottom-minus-this instead of a top-anchored
+                # fraction (top-anchored is what chased raised hands).
+                f = next((f for f in faces or []
+                          if str(f.get("person_id") or "").lower() == label), None)
+                trk_box = next((t for t in _state["tracks"] if t["id"] == tid),
+                               None)
+                if f is not None and trk_box is not None:
+                    bb = f.get("bbox") or f.get("box")
+                    if bb and len(bb) >= 4:
+                        fy = (float(bb[1]) + float(bb[3])) / 2.0
+                        x, y, w2, h2 = trk_box["tlwh"]
+                        up = (y + h2) - fy
+                        if up > 0:
+                            _state["bindings"][label]["face_up_px"] = up
             for f in faces or []:
                 label = str(f.get("person_id") or "").lower()
                 bb = f.get("bbox") or f.get("box")
@@ -207,7 +234,20 @@ def target_offset(label: str) -> dict[str, Any] | None:
             ay = (float(bb[1]) + float(bb[3])) / 2.0
             source = "face"
         elif track is not None:
-            ax, ay = aim_point(track["tlwh"])
+            # BOTTOM-ANCHORED aim (2026-08-25 referee fix): the old aim point
+            # hung a fixed fraction below the box TOP — and the top is exactly
+            # the edge that leaps upward when arms go up, so the head chased
+            # gestures. The bottom edge (feet) stays planted through arm
+            # raises and bends. Aim at bottom minus the remembered face
+            # height; fall back to the top-fraction only when no face was
+            # ever measured for this binding.
+            x, y, bw, bh = track["tlwh"]
+            up = (binding or {}).get("face_up_px")
+            if up and 0 < float(up) <= bh * 1.2:
+                ax = x + bw / 2.0
+                ay = (y + bh) - float(up)
+            else:
+                ax, ay = aim_point(track["tlwh"])
             source = "body"
         else:
             return None  # no fresh face, no live bound track — honestly lost
@@ -217,14 +257,33 @@ def target_offset(label: str) -> dict[str, Any] | None:
         if track is not None:
             # KF velocity is px per tracker-update; updates happen per fresh
             # frame, so px/s = v * fps. Normalize like the offsets.
+            # SHAPE-MORPH COMPENSATION (2026-08-25 referee fix): vcy is the
+            # BOX CENTER's velocity. When the box grows upward (arms up), the
+            # center rises at vh/2 with the subject standing still — that
+            # phantom rate is what the D-term amplified into the wild swing.
+            # The BOTTOM edge's velocity is vcy + vh/2; with feet planted it
+            # is ~0 during a gesture and tracks real body motion otherwise.
+            # Our aim point rides the bottom edge, so its velocity is the
+            # honest vertical rate to feed forward.
             vx = float(track["vel"][0]) * fps / (w / 2.0)
-            vy = float(track["vel"][1]) * fps / (h / 2.0)
+            vy = ((float(track["vel"][1]) + float(track.get("vh") or 0.0) / 2.0)
+                  * fps / (h / 2.0))
         return {"dx": (ax - w / 2.0) / (w / 2.0),
                 "dy": (ay - h / 2.0) / (h / 2.0),
                 "vx": vx, "vy": vy,
                 "source": source,
                 "track_id": track["id"] if track else None,
                 "age_s": round(max(0.0, now_ts - (float(face["ts"]) if source == "face" else float(track["ts"]))), 3)}
+
+
+def track_boxes() -> tuple[list[list[float]], tuple[int, int] | None]:
+    """All live track boxes (tlwh, original frame px) + the frame shape they
+    were measured on. For the servo's background-only odometry (2026-08-25,
+    modeled on BoT-SORT gmc.py): every person box gets masked OUT of the
+    camera-motion estimate, so people moving can't read as my head moving."""
+    with _LOCK:
+        return ([list(t["tlwh"]) for t in _state["tracks"]],
+                _state.get("frame_shape"))
 
 
 def status() -> dict[str, Any]:
