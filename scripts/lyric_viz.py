@@ -974,11 +974,36 @@ class Renderer:
         x = (self.W - total) / 2
         y = int(self.H * (0.78 if self.style.viz == "radial" else 0.66))
         accent = self.style.palette[self._pal_i % len(self.style.palette)]
+        # REACTIVE LYRICS (Zeke 08-26: "the words also have audio
+        # visualization on them"): every LETTER rides its own frequency band
+        # (bounces with the spectrum), the active word swells with the bass.
         xx = x
+        letter_j = 0
         for k, (w, wd) in enumerate(zip(words, widths)):
-            draw.text((xx, y), w, font=f,
-                      fill=accent if k == active else
-                      ((120, 120, 130) if not drop else accent))
+            col = (accent if k == active else
+                   ((120, 120, 130) if not drop else accent))
+            if k == active and a.bass[i] > 0.05:
+                # bass-swollen active word (quantized size → font cache safe)
+                fs_a = int(fs * (1.0 + round(0.30 * a.bass[i] * 6) / 6))
+                fa = self.font(fs_a, self.style.font_lyrics)
+                wa = draw.textlength(w, font=fa)
+                cxw = xx + wd / 2
+                xa = cxw - wa / 2
+                for ch in w:
+                    band = a.bars[i, (letter_j * 3) % NBARS]
+                    dy = -band * fs * 0.35
+                    draw.text((xa, y + dy - (fs_a - fs) / 2), ch,
+                              font=fa, fill=col)
+                    xa += draw.textlength(ch, font=fa)
+                    letter_j += 1
+            else:
+                xc = xx
+                for ch in w:
+                    band = a.bars[i, (letter_j * 3) % NBARS]
+                    dy = -band * fs * (0.35 if k == active or drop else 0.20)
+                    draw.text((xc, y + dy), ch, font=f, fill=col)
+                    xc += draw.textlength(ch, font=f)
+                    letter_j += 1
             xx += wd + space
         lyr = np.asarray(layer, np.float32)
         glow = cv2.GaussianBlur(lyr, (0, 0), 4 + 8 * a.rms[i])
