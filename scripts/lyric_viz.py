@@ -481,6 +481,7 @@ class Renderer:
     deck_idx: np.ndarray | None = None      # per-frame index into deck
     bgclips: "list | None" = None           # [T x h x w x 3 uint8] VJ loops (1/4 res)
     bgclip_idx: np.ndarray | None = None    # per-frame clip index
+    _center_pocket: np.ndarray | None = None  # darkening behind centerpiece
     corner_logo: "tuple | None" = None      # (rgb, mask) small watermark
     shape: str = "none"                     # cube|pyramid|cylinder|orb|logo3d|none
     _rot: float = 0.0                       # accumulated 3D rotation
@@ -551,15 +552,28 @@ class Renderer:
         if self.bgclips:
             # music-reactive VJ loop background (Beeple CC loops etc):
             # brightness rides the energy, kick flashes push it, loops cut on
-            # phrase boundaries via bgclip_idx.
+            # phrase boundaries via bgclip_idx. Per-clip normalization keeps
+            # bright loops from washing out the centerpiece (caught by eye
+            # 08-26: an orbital clip at full gain drowned the helmet).
             ci = (int(self.bgclip_idx[i]) % len(self.bgclips)
                   if self.bgclip_idx is not None else 0)
             clip = self.bgclips[ci]
             frame = clip[i % len(clip)].astype(np.float32)
+            norm = 70.0 / max(25.0, float(frame.mean()))
             up = cv2.resize(frame, (self.W, self.H),
                             interpolation=cv2.INTER_LINEAR)
-            gain = 0.28 + 0.62 * a.rms[i] + (0.25 if a.kick[i] else 0.0)
-            img += up * gain
+            gain = min(0.95, (0.30 + 0.55 * a.rms[i]
+                              + (0.20 if a.kick[i] else 0.0)) * norm)
+            up *= gain
+            # darken a pocket behind the centerpiece so it always pops
+            if self._center_pocket is None:
+                cx, cy = self._logo_center()
+                Y, X = np.ogrid[0:self.H, 0:self.W]
+                d2 = ((X - cx) / (self.H * 0.36)) ** 2 + \
+                     ((Y - cy) / (self.H * 0.36)) ** 2
+                self._center_pocket = (1.0 - 0.45 * np.exp(-d2)) \
+                    .astype(np.float32)[..., None]
+            img += up * self._center_pocket
             return img
         if self.style.bg == "starfield":
             drop = bool(a.drop[i])
