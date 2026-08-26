@@ -61,7 +61,12 @@ _VID, _PID = 0x328F, 0x00C0
 _REPORT = 32
 
 _UNIT_DEG_S = 0.85          # measured deg/s per vector unit
-_MAX_UNITS = 25.0           # app used ~±30; leave margin
+# 25 -> 30 (2026-08-25 referee test, Zeke: "really easy for me to move out of
+# screen... you moved a little faster than normal but didn't try to match me").
+# The official app drives the full ±30; the 5-unit margin bought nothing and
+# cost 4 deg/s of top speed. Even at 25.5 deg/s a close-range walker can beat
+# the pan — that residual is attention_search's job, not more gain.
+_MAX_UNITS = 30.0
 _DEADBAND = 0.05            # normalized offset that counts as centered
 # ── HYSTERESIS (2026-08-21 late, Zeke: "your head jitters a bit even when I'm
 # staying still"): detector/tracker noise hovers right AT the deadband edge,
@@ -194,8 +199,20 @@ _OBSERVE_STATE_S = 0.5      # slow va.observe cadence while fast path is live
 # = pan increased, +y = tilt increased (both verified 2026-08-21). Response
 # below _ODO_MIN_RESP (blur/motion) skips the update; the 3s resync mops up
 # residual drift.
-_ODO_DEG_PER_PX = 68.0 / 160.0
-_ODO_MIN_RESP = 0.10
+# v2 (2026-08-25 late, modeled on BoT-SORT tracker/gmc.py — Zeke: "go research
+# how to do it or find something to model after"): whole-frame phaseCorrelate
+# measured the DOMINANT scene shift, and at close range the tracked PERSON is
+# the dominant content — gestures integrated as head motion, est drifted 45
+# deg in one round, and every resync obeyed the corruption. Now: mask all
+# person boxes out, goodFeaturesToTrack on the BACKGROUND, pyramidal LK flow,
+# estimateAffinePartial2D+RANSAC, camera motion = the translation term. Same
+# sign convention as before (scene shift +x = pan increased, verified
+# 2026-08-21; re-verified live post-surgery).
+_ODO_W, _ODO_H = 320, 240
+_ODO_DEG_PER_PX = 68.0 / float(_ODO_W)
+_ODO_MAX_FEATURES = 200
+_ODO_MIN_INLIERS = 6
+_ODO_MIN_RESP = 0.10   # retired with phaseCorrelate; kept for old comments
 # ── LOSS-ON-SKIP (2026-08-25). ⚠ MECHANISM NOT CONFIRMED — READ THIS BEFORE
 # CREDITING THE BUG AS FIXED.
 # Reasoning that led here: a rejected correlation contributes nothing to est,
@@ -265,6 +282,36 @@ _REANCHOR_SETTLE_S = 0.18
 _EST_DRIFT_FORCE_DEG = 20.0
 
 
+def _bg_camera_shift(prev_gray, cur_gray, mask):
+    """Camera translation (px) between two gray frames, measured from the
+    BACKGROUND only (mask=0 over every tracked person + borders). Modeled on
+    BoT-SORT tracker/gmc.py sparse-feature CMC: goodFeaturesToTrack on the
+    masked prev frame, pyramidal LK into cur, estimateAffinePartial2D+RANSAC,
+    camera motion = the affine's translation term. Returns (sx, sy, inliers,
+    features) with sx=None when there's no honest answer (too little clean
+    background — exactly when whole-frame correlation used to lie)."""
+    import cv2 as _cv2
+    pts = _cv2.goodFeaturesToTrack(
+        prev_gray, maxCorners=_ODO_MAX_FEATURES,
+        qualityLevel=0.01, minDistance=7, mask=mask)
+    if pts is None or len(pts) < _ODO_MIN_INLIERS:
+        return None, None, 0, (0 if pts is None else len(pts))
+    feat = len(pts)
+    nxt, stt, _err = _cv2.calcOpticalFlowPyrLK(prev_gray, cur_gray, pts, None)
+    if nxt is None or stt is None:
+        return None, None, 0, feat
+    ok = stt.reshape(-1) == 1
+    p0 = pts.reshape(-1, 2)[ok]
+    p1 = nxt.reshape(-1, 2)[ok]
+    if len(p0) < _ODO_MIN_INLIERS:
+        return None, None, 0, feat
+    H, inl = _cv2.estimateAffinePartial2D(
+        p0, p1, method=_cv2.RANSAC, ransacReprojThreshold=3.0)
+    if H is None or inl is None or int(inl.sum()) < _ODO_MIN_INLIERS:
+        return None, None, 0, feat
+    return float(H[0, 2]), float(H[1, 2]), int(inl.sum()), feat
+
+
 def _vec_report(x: float, y: float, z: float = 0.0) -> bytes:
     payload = [0x09, 0x63, 0x01, 0x20, 0x00, 0x0C, 0x00, 0x0C,
                *struct.pack("<fff", x, y, z)]
@@ -280,6 +327,7 @@ class _PixyJog:
         self._dev = None
         self._lock = threading.Lock()
         self._burst_active = False  # for the PTZ audit: log burst edges, not 30Hz
+        self.last_motion_ts = 0.0   # last nonzero vector write (odometry gate)
 
     def _open(self):
         import hid
@@ -297,6 +345,8 @@ class _PixyJog:
                 # rule): a jog stream is 12-30Hz — log the transition into
                 # motion (with the opening vector) and back to zero.
                 moving = bool(x or y)
+                if moving:
+                    self.last_motion_ts = time.time()
                 if moving != self._burst_active:
                     self._burst_active = moving
                     try:
@@ -557,14 +607,53 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         st["odo_starved_since_resync"] = int(
                             st.get("odo_starved_since_resync") or 0) + 1
                     else:
-                        _small = _np.float32(_cv2.cvtColor(
-                            _cv2.resize(_ro.frame, (160, 120)),
-                            _cv2.COLOR_BGR2GRAY)) / 255.0
+                        _small = _cv2.cvtColor(
+                            _cv2.resize(_ro.frame, (_ODO_W, _ODO_H)),
+                            _cv2.COLOR_BGR2GRAY)
                         if _odo_prev is not None:
-                            (_sx, _sy), _resp = _cv2.phaseCorrelate(
-                                _odo_prev, _small)
-                            if (_resp >= _ODO_MIN_RESP
-                                    and abs(_sx) < 60 and abs(_sy) < 60):
+                            # ── BACKGROUND-ONLY camera motion (2026-08-25,
+                            # modeled on BoT-SORT gmc.py). The referee test
+                            # proved whole-frame correlation is unusable here:
+                            # at close range Zeke IS the dominant content, his
+                            # gestures were integrated as my head motion (est
+                            # drifted 45 deg tilt in one round), and each
+                            # resync obeyed the corruption — the "after-image"
+                            # chase. Mask every tracked person out, measure
+                            # the BACKGROUND's flow, RANSAC the fit. Honest
+                            # while jogging, while parked, and while Zeke
+                            # physically steers my head — his hand is real
+                            # motion now (the 0.6s quiet-gate that ignored it
+                            # is deleted: one round proved it made his
+                            # calm-down grip invisible, so the head "looked
+                            # away" the moment he let go).
+                            _mask = _np.full((_ODO_H, _ODO_W), 255, _np.uint8)
+                            _b = max(1, int(0.02 * _ODO_H))
+                            _mask[:_b, :] = 0
+                            _mask[-_b:, :] = 0
+                            _mask[:, :max(1, int(0.02 * _ODO_W))] = 0
+                            _mask[:, -max(1, int(0.02 * _ODO_W)):] = 0
+                            try:
+                                from brain import person_track as _pt
+                                _boxes, _bshape = _pt.track_boxes()
+                                if _bshape:
+                                    _scx = _ODO_W / float(_bshape[1])
+                                    _scy = _ODO_H / float(_bshape[0])
+                                    for _bx in _boxes:
+                                        _bxx, _byy, _bw, _bh = _bx
+                                        _padx, _pady = 0.10 * _bw, 0.10 * _bh
+                                        _x1 = max(0, int((_bxx - _padx) * _scx))
+                                        _y1 = max(0, int((_byy - _pady) * _scy))
+                                        _x2 = min(_ODO_W, int(
+                                            (_bxx + _bw + _padx) * _scx) + 1)
+                                        _y2 = min(_ODO_H, int(
+                                            (_byy + _bh + _pady) * _scy) + 1)
+                                        _mask[_y1:_y2, _x1:_x2] = 0
+                            except Exception:
+                                pass
+                            _sx, _sy, _npts, _feat = _bg_camera_shift(
+                                _odo_prev, _small, _mask)
+                            if (_sx is not None
+                                    and abs(_sx) < 120 and abs(_sy) < 120):
                                 est_pan += _sx * _ODO_DEG_PER_PX
                                 est_tilt += _sy * _ODO_DEG_PER_PX
                                 est_pan = max(-150.0, min(150.0, est_pan))
@@ -574,18 +663,20 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                     "tilt_deg": round(est_tilt, 1)}
                                 st["odo_updates"] = int(
                                     st.get("odo_updates") or 0) + 1
+                                st["odo_inliers"] = _npts
                                 _odo_good_ts = time.time()
                             else:
-                                # UNKNOWN motion, not zero motion. Count it so
-                                # the loss is visible and can force a resync.
+                                # UNKNOWN motion, not zero motion — usually the
+                                # target fills the frame and no clean
+                                # background remains. Count it; enough of it
+                                # forces a resync (exactly the moments the old
+                                # whole-frame estimate lied hardest).
                                 st["odo_skips"] = int(
                                     st.get("odo_skips") or 0) + 1
                                 st["odo_skips_since_resync"] = int(
                                     st.get("odo_skips_since_resync") or 0) + 1
                                 st["last_odo_skip"] = {
-                                    "resp": round(float(_resp), 3),
-                                    "sx": round(float(_sx), 1),
-                                    "sy": round(float(_sy), 1)}
+                                    "features": _feat, "inliers": _npts}
                         _odo_prev = _small
                         _odo_prev_ts = _ro.capture_ts
                 except Exception:
