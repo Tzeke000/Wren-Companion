@@ -863,11 +863,18 @@ class Renderer:
                 cv2.polylines(layer, [pts], True,
                               tuple(float(x) for x in col * 0.8), 2, cv2.LINE_AA)
         elif self.shape == "logo3d" and self._logo_rgb is not None:
-            # pseudo-3D spin: perspective-warp the logo about its vertical axis
+            # TRUE continuous 360 spin (Zeke 08-26 "do a 360 on a loop"):
+            # width follows cos(ang); when the back faces us the logo is
+            # MIRRORED (like a card turning), slightly dimmed — so it reads
+            # as one full rotation instead of a fold-and-return.
             mask = self._logo_mask
             lh, lw = mask.shape
-            ang = self._rot
-            fold = abs(np.cos(ang))
+            ang = self._rot % (2 * np.pi)
+            c = np.cos(ang)
+            back = c < 0
+            fold = max(0.06, abs(c))
+            src_rgb = self._logo_rgb[:, ::-1] if back else self._logo_rgb
+            src_m = mask[:, ::-1] if back else mask
             wq = max(8, int(lw * fold * (size * 2 / lh)))
             hq = int(size * 2)
             sk = 0.18 * np.sin(ang)          # slight perspective skew
@@ -877,9 +884,12 @@ class Renderer:
                                [cx - wq / 2, cy + hq / 2 - sk * wq]])
             srcq = np.float32([[0, 0], [lw, 0], [lw, lh], [0, lh]])
             M = cv2.getPerspectiveTransform(srcq, dstq)
-            wrgb = cv2.warpPerspective(self._logo_rgb, M, (self.W, self.H))
-            wm = cv2.warpPerspective(mask, M, (self.W, self.H))[..., None]
-            img[:] = img * (1 - wm) + wrgb * wm * (0.75 + 0.25 * a.rms[i])
+            wrgb = cv2.warpPerspective(np.ascontiguousarray(src_rgb), M,
+                                       (self.W, self.H))
+            wm = cv2.warpPerspective(np.ascontiguousarray(src_m), M,
+                                     (self.W, self.H))[..., None]
+            shade = (0.55 if back else 0.75) + 0.25 * a.rms[i]
+            img[:] = img * (1 - wm) + wrgb * wm * shade
             edge = cv2.morphologyEx(wm[..., 0], cv2.MORPH_GRADIENT,
                                     np.ones((3, 3), np.uint8))
             layer += cv2.GaussianBlur(edge, (0, 0), 3)[..., None] * col
@@ -1113,6 +1123,106 @@ def gen_loops(w: int, h: int, fps: int, bpm: float) -> list[np.ndarray]:
         g = np.clip(np.sin(r * 6 - ph * 2 + np.sin(th * 3 + ph) * 0.5), 0, 1) ** 3
         g *= np.clip(1.1 - r, 0, 1)
         frames.append((g * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    # 5. oscilloscope wave: stacked traveling sine traces (Greyland scope look)
+    frames = []
+    for t in range(T):
+        ph = t / T * 2 * np.pi
+        img = np.zeros((h, w), np.float32)
+        xs = np.arange(w)
+        for k, (amp, fr_, off) in enumerate(((0.24, 2, 0.0), (0.14, 3, 2.1),
+                                             (0.08, 5, 4.2))):
+            ys = (h / 2 + np.sin(xs / w * fr_ * 2 * np.pi + ph * (k + 1))
+                  * h * amp * (0.6 + 0.4 * np.sin(ph + off))).astype(int)
+            ok = (ys > 0) & (ys < h - 1)
+            img[ys[ok], xs[ok]] = 1.0
+        img = cv2.GaussianBlur(img, (0, 0), 1.4) * 3.2
+        frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    # 6. spectrum wall: full-frame bar field sweeping like an analyzer
+    rng2 = np.random.default_rng(23)
+    heights = rng2.uniform(0.15, 1.0, 48)
+    frames = []
+    for t in range(T):
+        ph = t / T * 2 * np.pi
+        img = np.zeros((h, w), np.float32)
+        bw_ = w / 48
+        for k in range(48):
+            hk = heights[k] * (0.45 + 0.55 * np.sin(ph * 2 + k * 0.7) ** 2)
+            y0 = int(h * (1 - hk))
+            img[y0:, int(k * bw_) + 1:int((k + 1) * bw_) - 1] = \
+                0.45 + 0.55 * hk
+        frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    # 7. circular scope: polar waveform ring, wobbling
+    frames = []
+    for t in range(T):
+        ph = t / T * 2 * np.pi
+        img = np.zeros((h, w), np.float32)
+        ths = np.linspace(0, 2 * np.pi, 240)
+        rad = h * 0.30 * (1 + 0.18 * np.sin(ths * 6 + ph * 2)
+                          + 0.08 * np.sin(ths * 13 - ph * 3))
+        xs = (cx + np.cos(ths) * rad).astype(int)
+        ys = (cy + np.sin(ths) * rad).astype(int)
+        ok = (xs > 0) & (xs < w - 1) & (ys > 0) & (ys < h - 1)
+        img[ys[ok], xs[ok]] = 1.0
+        img = cv2.GaussianBlur(img, (0, 0), 1.4) * 3.0
+        frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    # 8. particle vortex: spiral swarm orbiting the center
+    rng3 = np.random.default_rng(31)
+    n2 = 140
+    baser = rng3.uniform(0.15, 1.0, n2)
+    basea = rng3.uniform(0, 2 * np.pi, n2)
+    frames = []
+    for t in range(T):
+        ph = t / T * 2 * np.pi
+        img = np.zeros((h, w), np.float32)
+        aa = basea + ph * (1.5 - baser)          # inner orbits faster
+        rr2 = baser * h * 0.55 * (1 + 0.06 * np.sin(ph * 2))
+        xs = (cx + np.cos(aa) * rr2).astype(int)
+        ys = (cy + np.sin(aa) * rr2 * 0.6).astype(int)
+        ok = (xs > 0) & (xs < w - 1) & (ys > 0) & (ys < h - 1)
+        img[ys[ok], xs[ok]] = 0.5 + 0.5 * (1 - baser[ok])
+        img = cv2.GaussianBlur(img, (0, 0), 1.1) * 2.6
+        frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    # 9. lissajous: classic scope figures morphing through ratios
+    frames = []
+    for t in range(T):
+        ph = t / T * 2 * np.pi
+        img = np.zeros((h, w), np.float32)
+        s = np.linspace(0, 2 * np.pi, 400)
+        xs = (cx + np.sin(s * 3 + ph) * w * 0.32).astype(int)
+        ys = (cy + np.sin(s * 2) * h * 0.32).astype(int)
+        ok = (xs > 0) & (xs < w - 1) & (ys > 0) & (ys < h - 1)
+        img[ys[ok], xs[ok]] = 1.0
+        img = cv2.GaussianBlur(img, (0, 0), 1.3) * 3.0
+        frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
+    loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
+
+    # 10. glyph rain: falling character columns (the Code look, abstracted)
+    rng4 = np.random.default_rng(41)
+    ncol = w // 10
+    speeds = rng4.uniform(0.4, 1.0, ncol)
+    offs = rng4.uniform(0, 1, ncol)
+    frames = []
+    for t in range(T):
+        img = np.zeros((h, w), np.float32)
+        prog = t / T
+        for k in range(ncol):
+            head = ((prog * speeds[k] + offs[k]) % 1.0) * h
+            trail = np.arange(0, h * 0.35, 6)
+            ys = (head - trail).astype(int) % h
+            fade = np.linspace(1.0, 0.1, len(ys))
+            img[ys, k * 10 + 2:k * 10 + 7] = fade[:, None] * \
+                (rng4.random(len(ys))[:, None] > 0.35)
+        frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
     loops.append(np.stack([cv2.merge([f, f, f]) for f in frames]))
 
     return loops
