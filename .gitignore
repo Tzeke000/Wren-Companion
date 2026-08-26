@@ -93,3 +93,4 @@ nul
 # (github.com/Megvii-BaseDetection/YOLOX releases, 0.1.1rc0/yolox_s.pth).
 # Vendored CODE is committed; the blob is not.
 models/yolox/*.pth
+assets/vjloops/
