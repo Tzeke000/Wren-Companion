@@ -109,8 +109,13 @@ class InsightFaceEngine:
         ordered.append("CPUExecutionProvider")
 
         try:
-            app = FaceAnalysis(name="buffalo_l", providers=ordered)
-            app.prepare(ctx_id=0, det_size=(640, 640))
+            from brain.gpu_load_log import logged_load as _logged_load
+        except Exception:
+            from contextlib import nullcontext as _logged_load  # fail-open
+        try:
+            with _logged_load(f"insightface:buffalo_l:{ordered[0]}"):
+                app = FaceAnalysis(name="buffalo_l", providers=ordered)
+                app.prepare(ctx_id=0, det_size=(640, 640))
         except Exception as e:
             self._init_error = f"prepare: {e!r}"
             print(f"[insight_face] FaceAnalysis prepare failed: {e!r}")
@@ -189,9 +194,14 @@ class InsightFaceEngine:
         try:
             from insightface.app import FaceAnalysis  # type: ignore
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if self._provider == "CUDAExecutionProvider" else ["CPUExecutionProvider"]
-            small = FaceAnalysis(name="buffalo_l", providers=providers)
-            ctx = 0 if self._provider == "CUDAExecutionProvider" else -1
-            small.prepare(ctx_id=ctx, det_size=(320, 320))
+            try:
+                from brain.gpu_load_log import logged_load as _logged_load
+            except Exception:
+                from contextlib import nullcontext as _logged_load  # fail-open
+            with _logged_load(f"insightface:buffalo_l:small320:{providers[0]}"):
+                small = FaceAnalysis(name="buffalo_l", providers=providers)
+                ctx = 0 if self._provider == "CUDAExecutionProvider" else -1
+                small.prepare(ctx_id=ctx, det_size=(320, 320))
             load_app = small
             _temp_app_used = True
             print("[insight_face] using small-det loader for reference photos (det_size=320)")
