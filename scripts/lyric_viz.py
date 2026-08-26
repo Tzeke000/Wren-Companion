@@ -1397,10 +1397,18 @@ def main() -> int:
         else:
             import av as _av
             p = Path(args.bgvideo)
-            vpaths = (sorted([q for q in p.iterdir()
+            vpaths = (sorted([q for q in p.rglob("*")
                               if q.suffix.lower() in (".mp4", ".mov", ".m4v",
                                                       ".webm", ".avi")])
                       if p.is_dir() else [Path(s) for s in args.bgvideo.split(",")])
+            if len(vpaths) > 14:
+                # 209-clip library would pre-decode to ~8.6GB RAM — sample a
+                # song-seeded subset instead (same song = same picks, rerunnable)
+                seed = sum(args.audio.name.encode())
+                idx = np.random.default_rng(seed).permutation(len(vpaths))[:14]
+                vpaths = [vpaths[k] for k in sorted(idx)]
+                print(f"[lyric_viz] sampled 14 of the library's clips "
+                      f"(seed from song name)")
             bgclips = []
             for q in vpaths:
                 if not q.is_file():
