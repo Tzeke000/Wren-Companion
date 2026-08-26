@@ -1,44 +1,52 @@
-"""lyric_viz — prototype v0 of the lyric/logo audio-visualizer.
+"""lyric_viz v1 — the lyric/logo audio-visualizer for Zeke's music videos.
 
-THE PROMISE (Zeke, 2026-08-25 bedtime, Discord): an auto pipeline for his music
-videos — song + written lyrics + logo in, finished video out. Word-synced
-lyrics (karaoke-accurate, via Whisper word timestamps + alignment to the
-WRITTEN lyrics), audio-reactive visuals (FFT energy drives glow/scale),
-zero-spend. Style reference: Greyland Audio's Visual Lab Pro — but ours renders
-finished videos and does word-sync, which theirs doesn't.
+THE PROMISE (Zeke, 2026-08-25 bedtime; "do the whole thing" 2026-08-26): song +
+written lyrics + logo in → finished music video out. Word-synced lyrics
+(Whisper word timestamps aligned to the WRITTEN lyrics — text is ground truth,
+audio supplies time), audio-reactive visuals in the EDM visual language,
+zero-spend, renders locally.
 
-This v0 proves the whole chain end-to-end on the tower:
-  audio → faster-whisper word timestamps → (optional) align to written lyrics
-        → FFT energy envelope → PIL-rendered frames → PyAV h264+aac mp4.
+STYLE RESEARCH (2026-08-26, memory/edm_visualizer_style_research_2026-08-26.md):
+Greyland Audio Visual Lab + EDM/dubstep/deep-house conventions. The grammar:
+  * lows → big heavy motion; highs → shimmer; logo gets a GLOWING OUTLINE
+  * follow the song's energy curve: calm intro → building tension → DROP
+    (detonate: strobe, glitch slices, RGB split, shake, zoom punch, text
+    scramble) → breakdown (breathe, desaturate)
+  * kick is the pulse (low-band onsets), cuts land on the beat
+  * drop detector = fast bass average vs slow baseline + running peak,
+    engages only on SUSTAINED low end, warmup guard, hysteresis release
+  * genre presets: dubstep (half-time, aggressive glitch, acid palette),
+    deephouse (dark neon, smooth, no strobes), edm (festival saturated)
 
-No ffmpeg.exe on this machine — PyAV (bundled FFmpeg libs) does the encode and
-the audio mux, so the only inputs are files and the only output is an .mp4.
+⚠ PHOTOSENSITIVITY: edm/dubstep styles strobe on the drop BY DESIGN. Renders
+need a flash warning when published. deephouse style does not strobe.
 
 Usage:
   .venv/Scripts/python.exe scripts/lyric_viz.py --audio song.wav
       [--lyrics lyrics.txt] [--logo logo.png] [--title "ARTIST"]
-      [--out out.mp4] [--size 1280x720] [--fps 30] [--device cuda|cpu]
+      [--style edm|dubstep|deephouse] [--out out.mp4] [--size 1280x720]
+      [--fps 30] [--device cuda|cpu] [--no-vocals]
 
-Prototype limits (v0, deliberate): single centered lyric line + active-word
-highlight, one logo/title pulsing on bass, flat dark background. The Visual
-Lab-style mode library comes later, on the server.
+Encoding is PyAV (bundled FFmpeg libs) — no ffmpeg.exe needed on this machine.
 """
 from __future__ import annotations
 
 import argparse
 import difflib
+import random
 import re
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
-# 1. Words with timestamps
+# 1. Words with timestamps (unchanged from v0 — proven)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -49,8 +57,6 @@ class Word:
 
 
 def transcribe_words(audio: Path, device: str = "cuda") -> list[Word]:
-    """faster-whisper word timestamps. GPU (~1.5GB, logged by gpu_load_log via
-    stt_engine only in-runtime; this standalone load logs itself below)."""
     try:
         sys.path.insert(0, str(REPO))
         from brain.gpu_load_log import logged_load
@@ -90,20 +96,14 @@ def _norm(s: str) -> str:
 
 
 def align_to_lyrics(heard: list[Word], lyrics_text: str) -> list[list[Word]]:
-    """Return LINES of written-lyric words with timing borrowed from whisper.
-
-    The written lyrics are ground truth for TEXT (and line breaks); whisper is
-    ground truth for TIME. difflib matches the two word sequences; unmatched
-    written words get times interpolated between their matched neighbours.
-    """
+    """Written lyrics = ground truth TEXT (and line breaks); whisper = TIME."""
     lines_raw = [ln.strip() for ln in lyrics_text.splitlines() if ln.strip()]
-    written: list[tuple[int, str]] = []          # (line_idx, word)
+    written: list[tuple[int, str]] = []
     for i, ln in enumerate(lines_raw):
         for w in ln.split():
             written.append((i, w))
     if not written or not heard:
         return [[w] for w in heard] if heard else []
-
     sm = difflib.SequenceMatcher(a=[_norm(w) for _, w in written],
                                  b=[_norm(w.text) for w in heard],
                                  autojunk=False)
@@ -113,7 +113,6 @@ def align_to_lyrics(heard: list[Word], lyrics_text: str) -> list[list[Word]]:
         for k in range(blk.size):
             starts[blk.a + k] = heard[blk.b + k].start
             ends[blk.a + k] = heard[blk.b + k].end
-    # interpolate the gaps so every written word has a time
     n = len(written)
     known = [i for i in range(n) if starts[i] is not None]
     if not known:
@@ -137,15 +136,13 @@ def align_to_lyrics(heard: list[Word], lyrics_text: str) -> list[list[Word]]:
     out: list[list[Word]] = [[] for _ in lines_raw]
     for (li, wtext), s, e in zip(written, starts, ends):
         out[li].append(Word(float(s), float(e), wtext))
-    matched = sum(1 for i in range(n) if i in set(known))
-    print(f"[lyric_viz] aligned {matched}/{n} written words to audio "
+    print(f"[lyric_viz] aligned {len(known)}/{n} written words "
           f"({len(out)} lines)")
     return [ln for ln in out if ln]
 
 
 def lines_from_transcript(heard: list[Word], max_words: int = 6,
                           gap_s: float = 0.8) -> list[list[Word]]:
-    """No written lyrics: group whisper words into display lines."""
     lines: list[list[Word]] = []
     cur: list[Word] = []
     for w in heard:
@@ -159,57 +156,227 @@ def lines_from_transcript(heard: list[Word], max_words: int = 6,
 
 
 # ---------------------------------------------------------------------------
-# 2. Audio energy (the reactive part)
+# 2. Audio analysis — the EDM grammar lives here
 # ---------------------------------------------------------------------------
 
 @dataclass
-class Energy:
-    rms: np.ndarray      # per video frame, 0..1
-    bass: np.ndarray     # per video frame, 0..1
+class Analysis:
+    rms: np.ndarray        # 0..1 smoothed, per video frame
+    bass: np.ndarray       # 0..1 smoothed
+    high: np.ndarray       # 0..1 smoothed
+    kick: np.ndarray       # bool — low-band onset (the pulse)
+    snare: np.ndarray      # bool — mid-band onset
+    drop: np.ndarray       # bool — sustained-bass drop mode engaged
+    build: np.ndarray      # 0..1 — rising-energy tension proxy
+    bars: np.ndarray       # (n_frames, NBARS) 0..1 — spectrum for bar display
+    bpm: float
 
 
-def energy_envelope(audio: Path, fps: int) -> tuple[Energy, np.ndarray, int]:
+NBARS = 40
+
+
+def _ema(x: np.ndarray, tau_s: float, fps: int) -> np.ndarray:
+    a = 1.0 - np.exp(-1.0 / max(1e-6, tau_s * fps))
+    out = np.empty_like(x)
+    acc = x[0]
+    for i, v in enumerate(x):
+        acc += a * (v - acc)
+        out[i] = acc
+    return out
+
+
+def _norm95(v: np.ndarray) -> np.ndarray:
+    pos = v[v > 0]
+    hi = np.percentile(pos, 95) if len(pos) else 1.0
+    return np.clip(v / max(hi, 1e-9), 0.0, 1.5)
+
+
+def _onsets(env: np.ndarray, fps: int, refractory_s: float = 0.12,
+            k: float = 1.4) -> np.ndarray:
+    """Adaptive-threshold flux onsets on a band envelope."""
+    flux = np.maximum(0.0, np.diff(env, prepend=env[0]))
+    n = len(flux)
+    win = max(3, fps)                       # ±1s adaptive window
+    on = np.zeros(n, dtype=bool)
+    last = -10 ** 9
+    for i in range(n):
+        a, b = max(0, i - win), min(n, i + win)
+        seg = flux[a:b]
+        thr = seg.mean() + k * seg.std()
+        if flux[i] > thr and flux[i] > 0.02 and (i - last) >= refractory_s * fps:
+            on[i] = True
+            last = i
+    return on
+
+
+def _estimate_bpm(onset_strength: np.ndarray, fps: int) -> float:
+    """Autocorrelation of onset strength, 60–180 BPM; 0.0 if unclear."""
+    x = onset_strength - onset_strength.mean()
+    if not x.any():
+        return 0.0
+    ac = np.correlate(x, x, mode="full")[len(x) - 1:]
+    lo, hi = int(fps * 60 / 180), int(fps * 60 / 60)
+    if hi >= len(ac):
+        return 0.0
+    lag = lo + int(np.argmax(ac[lo:hi]))
+    return round(60.0 * fps / lag, 1) if ac[lag] > 0 else 0.0
+
+
+def _detect_drop(bass_raw: np.ndarray, fps: int) -> np.ndarray:
+    """Fast bass average vs slow baseline + running peak; sustained engage,
+    hysteresis release, warmup guard. Straight from the research notes."""
+    fast = _ema(bass_raw, 0.25, fps)
+    slow = _ema(bass_raw, 4.0, fps)
+    n = len(bass_raw)
+    drop = np.zeros(n, dtype=bool)
+    peak = 1e-9
+    engaged = False
+    candidate = 0
+    warmup = int(2.5 * fps)
+    need = int(0.4 * fps)                  # sustained, not a single transient
+    for i in range(n):
+        peak = max(peak, fast[i])
+        hot = fast[i] > (1.30 * slow[i] + 0.04) and fast[i] > 0.45 * peak
+        if i < warmup:
+            candidate = 0
+            continue
+        if not engaged:
+            candidate = candidate + 1 if hot else 0
+            if candidate >= need:
+                engaged = True
+        else:
+            if fast[i] < (1.05 * slow[i]) and fast[i] < 0.35 * peak:
+                engaged = False
+                candidate = 0
+        drop[i] = engaged
+    return drop
+
+
+def analyze(audio: Path, fps: int) -> tuple[Analysis, np.ndarray, int]:
     import soundfile as sf
     y, sr = sf.read(str(audio), dtype="float32", always_2d=True)
     mono = y.mean(axis=1)
     hop = int(round(sr / fps))
-    n_frames = max(1, int(np.ceil(len(mono) / hop)))
-    rms = np.zeros(n_frames, dtype=np.float32)
-    bass = np.zeros(n_frames, dtype=np.float32)
+    n = max(1, int(np.ceil(len(mono) / hop)))
     win = 2048
+    hann = np.hanning(win).astype(np.float32)
     freqs = np.fft.rfftfreq(win, 1.0 / sr)
-    bass_bins = freqs < 150.0
-    for i in range(n_frames):
-        seg = mono[i * hop:(i + 1) * hop]
-        if len(seg):
-            rms[i] = float(np.sqrt(np.mean(seg ** 2)))
+    m_bass = freqs < 150.0
+    m_mid = (freqs >= 150.0) & (freqs < 4000.0)
+    m_high = freqs >= 4000.0
+    # log-spaced bar bins 40Hz..10kHz
+    edges = np.geomspace(40.0, 10000.0, NBARS + 1)
+    bar_masks = [(freqs >= edges[k]) & (freqs < edges[k + 1])
+                 for k in range(NBARS)]
+
+    rms = np.zeros(n, np.float32)
+    bass = np.zeros(n, np.float32)
+    mid = np.zeros(n, np.float32)
+    high = np.zeros(n, np.float32)
+    bars = np.zeros((n, NBARS), np.float32)
+    for i in range(n):
         c = i * hop
-        chunk = mono[max(0, c - win // 2):c + win // 2]
-        if len(chunk) >= 256:
-            spec = np.abs(np.fft.rfft(chunk, n=win))
-            bass[i] = float(spec[bass_bins[:len(spec)]].sum())
+        seg = mono[c:c + hop]
+        if len(seg):
+            rms[i] = np.sqrt(np.mean(seg ** 2))
+        a = max(0, c - win // 2)
+        chunk = mono[a:a + win]
+        if len(chunk) < 256:
+            continue
+        if len(chunk) < win:
+            chunk = np.pad(chunk, (0, win - len(chunk)))
+        mag = np.abs(np.fft.rfft(chunk * hann))
+        bass[i] = mag[m_bass].sum()
+        mid[i] = mag[m_mid].sum()
+        high[i] = mag[m_high].sum()
+        for k, bm in enumerate(bar_masks):
+            if bm.any():
+                bars[i, k] = mag[bm].mean()
 
-    def norm_smooth(v: np.ndarray, decay: float = 0.85) -> np.ndarray:
-        hi = np.percentile(v[v > 0], 95) if (v > 0).any() else 1.0
-        v = np.clip(v / max(hi, 1e-9), 0.0, 1.0)
-        out = np.zeros_like(v)
+    bass_n = _norm95(bass)
+    kick = _onsets(bass_n, fps)
+    snare = _onsets(_norm95(mid), fps, refractory_s=0.10, k=1.6)
+    drop = _detect_drop(bass_n, fps)
+    bpm = _estimate_bpm(np.maximum(0, np.diff(bass_n, prepend=bass_n[0])), fps)
+
+    rms_s = np.clip(_ema(_norm95(rms), 0.15, fps), 0, 1)
+    slope_w = int(2.0 * fps)
+    build = np.zeros(n, np.float32)
+    for i in range(n):
+        j = max(0, i - slope_w)
+        build[i] = max(0.0, rms_s[i] - rms_s[j]) * 2.5
+    build = np.clip(build, 0, 1) * (~drop)
+
+    bars = np.clip(bars / np.maximum(
+        np.percentile(bars[bars > 0], 95) if (bars > 0).any() else 1.0, 1e-9),
+        0, 1)
+    # per-bar smoothing: fast attack, slow decay
+    for k in range(NBARS):
         prev = 0.0
-        for i, x in enumerate(v):        # fast attack, slow decay
-            prev = x if x > prev else prev * decay
-            out[i] = prev
-        return out
+        col = bars[:, k]
+        for i in range(n):
+            prev = col[i] if col[i] > prev else prev * 0.82
+            col[i] = prev
 
-    return Energy(norm_smooth(rms), norm_smooth(bass, decay=0.75)), y, sr
+    print(f"[lyric_viz] analysis: bpm~{bpm or '?'} kicks={int(kick.sum())} "
+          f"snares={int(snare.sum())} drop_frames={int(drop.sum())} "
+          f"({drop.mean() * 100:.0f}% of track)")
+    return (Analysis(rms=np.clip(_ema(_norm95(rms), 0.08, fps), 0, 1),
+                     bass=np.clip(_ema(bass_n, 0.08, fps), 0, 1),
+                     high=np.clip(_ema(_norm95(high), 0.06, fps), 0, 1),
+                     kick=kick, snare=snare, drop=drop, build=build,
+                     bars=bars, bpm=bpm),
+            y, sr)
 
 
 # ---------------------------------------------------------------------------
-# 3. Frame rendering
+# 3. Styles — the genre presets from the research
 # ---------------------------------------------------------------------------
 
-ACCENT = (120, 200, 255)      # active-word / glow colour (iris blue)
-DIM = (150, 150, 160)         # inactive words
-BG = (8, 8, 12)
+@dataclass
+class Style:
+    name: str
+    palette: list[tuple[int, int, int]]     # RGB accents, rotated per flash
+    bg: str                                 # starfield | plasma | flat
+    strobe: bool                            # hard white flash on kick in drop
+    glitch: bool                            # slice-tear on drop
+    rgb_split: bool                         # chromatic split on drop
+    shake: float                            # px of drop shake (0 = none)
+    zoom_punch: float                       # extra zoom per kick (0 = none)
+    scramble: bool                          # lyric chars scramble on drop
+    breakdown_desat: bool                   # desaturate quiet sections
+    flicker: float                          # persistent unease flicker 0..1
+    text_col: tuple[int, int, int] = (235, 235, 240)
 
+
+STYLES: dict[str, Style] = {
+    # festival EDM: saturated palette, strobe + zoom punch on the drop
+    "edm": Style("edm",
+                 palette=[(255, 70, 130), (70, 170, 255), (170, 90, 255),
+                          (255, 210, 70)],
+                 bg="starfield", strobe=True, glitch=False, rgb_split=True,
+                 shake=6.0, zoom_punch=0.035, scramble=True,
+                 breakdown_desat=True, flicker=0.04),
+    # dubstep/riddim: acid palette, glitch slices + shake, half-time weight
+    "dubstep": Style("dubstep",
+                     palette=[(150, 255, 60), (190, 70, 255), (255, 50, 90),
+                              (60, 255, 220)],
+                     bg="starfield", strobe=True, glitch=True, rgb_split=True,
+                     shake=10.0, zoom_punch=0.03, scramble=True,
+                     breakdown_desat=True, flicker=0.07),
+    # deep house: dark neon, hypnotic, smooth — NO hard strobes
+    "deephouse": Style("deephouse",
+                       palette=[(255, 90, 190), (90, 255, 235), (150, 100, 255),
+                                (255, 160, 90)],
+                       bg="plasma", strobe=False, glitch=False, rgb_split=False,
+                       shake=0.0, zoom_punch=0.015, scramble=False,
+                       breakdown_desat=False, flicker=0.0),
+}
+
+
+# ---------------------------------------------------------------------------
+# 4. Renderer
+# ---------------------------------------------------------------------------
 
 def _font(size: int):
     from PIL import ImageFont
@@ -221,99 +388,264 @@ def _font(size: int):
     return ImageFont.load_default()
 
 
+_SCRAMBLE_SET = "!<>-_\\/[]{}=+*^?#$%&0123456789"
+
+
 @dataclass
 class Renderer:
     W: int
     H: int
+    style: Style
     lines: list[list[Word]]
-    logo: "object | None" = None          # PIL.Image or None
+    fps: int
+    logo: "object | None" = None            # PIL RGBA or None
     title: str = ""
     _fonts: dict = field(default_factory=dict)
+    _stars: np.ndarray | None = None
+    _plasma_xy: tuple | None = None
+    _vignette: np.ndarray | None = None
+    _logo_mask: np.ndarray | None = None    # logo/title alpha at base size
+    _flash: float = 0.0                     # decaying kick flash
+    _zoom: float = 0.0                      # decaying zoom punch
+    _pal_i: int = 0
+
+    # -- setup ------------------------------------------------------------
+    def __post_init__(self):
+        rng = np.random.default_rng(7)
+        n = 380
+        self._stars = np.stack([rng.uniform(0, self.W, n),
+                                rng.uniform(0, self.H, n),
+                                rng.uniform(0.25, 1.0, n)], axis=1)
+        q = 4
+        yy, xx = np.mgrid[0:self.H // q, 0:self.W // q].astype(np.float32)
+        self._plasma_xy = (xx / (self.W // q), yy / (self.H // q))
+        Y, X = np.ogrid[0:self.H, 0:self.W]
+        d = np.sqrt(((X - self.W / 2) / (self.W / 2)) ** 2
+                    + ((Y - self.H / 2) / (self.H / 2)) ** 2)
+        self._vignette = np.clip(1.0 - 0.55 * np.clip(d - 0.55, 0, 1) ** 1.5,
+                                 0, 1).astype(np.float32)[..., None]
+        self._logo_mask = self._make_logo_mask()
 
     def font(self, size: int):
         if size not in self._fonts:
             self._fonts[size] = _font(size)
         return self._fonts[size]
 
-    def current_line(self, t: float) -> tuple[list[Word] | None, int]:
+    def _make_logo_mask(self) -> np.ndarray | None:
+        """Alpha mask (H',W') float 0..1 of the logo image or title text."""
+        from PIL import Image, ImageDraw
+        if self.logo is not None:
+            lw = int(self.W * 0.30)
+            lh = max(1, int(lw * self.logo.height / max(1, self.logo.width)))
+            logo = self.logo.resize((lw, lh))
+            return np.asarray(logo.split()[-1], np.float32) / 255.0
+        if not self.title:
+            return None
+        fs = int(self.H * 0.11)
+        f = self.font(fs)
+        probe = Image.new("L", (4, 4))
+        dr = ImageDraw.Draw(probe)
+        box = dr.textbbox((0, 0), self.title, font=f)
+        wpx, hpx = box[2] - box[0] + 8, box[3] - box[1] + 8
+        img = Image.new("L", (wpx, hpx), 0)
+        ImageDraw.Draw(img).text((4 - box[0], 4 - box[1]), self.title,
+                                 font=f, fill=255)
+        return np.asarray(img, np.float32) / 255.0
+
+    # -- pieces -----------------------------------------------------------
+    def _bg(self, i: int, t: float, a: Analysis) -> np.ndarray:
+        img = np.zeros((self.H, self.W, 3), np.float32)
+        img[:] = (8, 8, 14)
+        if self.style.bg == "starfield":
+            drop = bool(a.drop[i])
+            speed = 0.4 + 2.2 * a.bass[i] + (2.0 if drop else 0.0)
+            self._stars[:, 0] -= speed * self._stars[:, 2]
+            self._stars[:, 0] %= self.W
+            xs = self._stars[:, 0].astype(int)
+            ys = self._stars[:, 1].astype(int)
+            bright = (60 + 180 * self._stars[:, 2]
+                      * (0.35 + 0.65 * a.high[i]))
+            img[ys, xs] += bright[:, None]
+            near = self._stars[:, 2] > 0.7
+            img[ys[near], np.minimum(xs[near] + 1, self.W - 1)] += \
+                (bright[near] * 0.6)[:, None]
+        elif self.style.bg == "plasma":
+            xx, yy = self._plasma_xy
+            e = 0.25 + 0.75 * a.rms[i]
+            z = (np.sin(xx * 6.3 + t * 0.9) + np.sin(yy * 5.1 - t * 0.7)
+                 + np.sin((xx + yy) * 4.2 + t * 0.5)
+                 + np.sin(np.sqrt((xx - 0.5) ** 2 + (yy - 0.5) ** 2) * 11
+                          - t * (1.1 + a.bass[i])))
+            z = (z + 4.0) / 8.0
+            c1 = np.array(self.style.palette[0], np.float32)
+            c2 = np.array(self.style.palette[1], np.float32)
+            small = (z[..., None] * c1 + (1 - z[..., None]) * c2) * 0.45 * e
+            img += cv2.resize(small, (self.W, self.H),
+                              interpolation=cv2.INTER_LINEAR)
+        return img
+
+    def _bars(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        col = np.array(self.style.palette[self._pal_i % len(self.style.palette)],
+                       np.float32)
+        bw = self.W / NBARS
+        base = self.H - 6
+        maxh = self.H * 0.16
+        for k in range(NBARS):
+            h = int(a.bars[i, k] * maxh)
+            if h <= 0:
+                continue
+            x0, x1 = int(k * bw + 2), int((k + 1) * bw - 2)
+            img[base - h:base, x0:x1] += col * (0.20 + 0.5 * a.bars[i, k])
+
+    def _logo(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        mask = self._logo_mask
+        if mask is None:
+            return
+        drop = bool(a.drop[i])
+        scale = 1.0 + (0.10 + 0.06 * (1 if drop else 0)) * a.bass[i]
+        mh, mw = mask.shape
+        sw, sh = max(2, int(mw * scale)), max(2, int(mh * scale))
+        m = cv2.resize(mask, (sw, sh), interpolation=cv2.INTER_LINEAR)
+        cx, cy = self.W // 2, int(self.H * 0.30)
+        x0, y0 = cx - sw // 2, cy - sh // 2
+        xa, ya = max(0, x0), max(0, y0)
+        xb, yb = min(self.W, x0 + sw), min(self.H, y0 + sh)
+        if xb <= xa or yb <= ya:
+            return
+        sub = m[ya - y0:yb - y0, xa - x0:xb - x0]
+        # glowing OUTLINE (the Greyland treatment): edge of the mask, blurred,
+        # in palette color scaled by bass; plus a dim solid fill.
+        edge = cv2.morphologyEx(sub, cv2.MORPH_GRADIENT,
+                                np.ones((3, 3), np.uint8))
+        glow = cv2.GaussianBlur(edge, (0, 0), 3 + 6 * a.bass[i])
+        col = np.array(self.style.palette[self._pal_i % len(self.style.palette)],
+                       np.float32)
+        region = img[ya:yb, xa:xb]
+        region += glow[..., None] * col * (0.9 + 1.3 * a.bass[i])
+        region += sub[..., None] * np.array((70, 70, 78), np.float32)
+        region += edge[..., None] * col * 0.8
+
+    def _current_line(self, t: float) -> tuple[list[Word] | None, int]:
         LEAD = 0.25
         for ln in self.lines:
             if ln[0].start - LEAD <= t <= ln[-1].end + 0.6:
                 active = -1
-                for i, w in enumerate(ln):
+                for k, w in enumerate(ln):
                     if w.start <= t:
-                        active = i
+                        active = k
                 return ln, active
         return None, -1
 
-    def frame(self, t: float, rms: float, bass: float) -> np.ndarray:
-        from PIL import Image, ImageDraw, ImageFilter
-        img = Image.new("RGB", (self.W, self.H), BG)
-        draw = ImageDraw.Draw(img)
-
-        # ---- logo / title, bass-pulsed ---------------------------------
-        cy_logo = int(self.H * 0.30)
-        if self.logo is not None:
-            scale = 1.0 + 0.12 * bass
-            lw = int(self.W * 0.28 * scale)
-            lh = int(lw * self.logo.height / max(1, self.logo.width))
-            logo = self.logo.resize((lw, lh))
-            img.paste(logo, ((self.W - lw) // 2, cy_logo - lh // 2),
-                      logo if logo.mode == "RGBA" else None)
-        elif self.title:
-            fs = int(self.H * 0.10 * (1.0 + 0.10 * bass))
+    def _lyrics(self, img: np.ndarray, i: int, t: float, a: Analysis) -> None:
+        from PIL import Image, ImageDraw
+        ln, active = self._current_line(t)
+        if not ln:
+            return
+        drop = bool(a.drop[i])
+        words = []
+        for k, w in enumerate(ln):
+            txt = w.text
+            if drop and self.style.scramble and k != active:
+                rng = random.Random(hash((i // 3, k, len(txt))))
+                txt = "".join(c if c == " " or rng.random() < 0.35
+                              else rng.choice(_SCRAMBLE_SET) for c in txt)
+            words.append(txt)
+        fs = int(self.H * 0.075)
+        f = self.font(fs)
+        layer = Image.new("RGB", (self.W, self.H), (0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        space = draw.textlength(" ", font=f)
+        widths = [draw.textlength(w, font=f) for w in words]
+        total = sum(widths) + space * (len(words) - 1)
+        while total > self.W * 0.92 and fs > 18:
+            fs = int(fs * 0.9)
             f = self.font(fs)
-            tw = draw.textlength(self.title, font=f)
-            col = tuple(int(90 + 120 * bass) for _ in range(3))
-            draw.text(((self.W - tw) // 2, cy_logo - fs // 2), self.title,
-                      font=f, fill=col)
-
-        # ---- lyric line, active word accented --------------------------
-        ln, active = self.current_line(t)
-        if ln:
-            fs = int(self.H * 0.075)
-            f = self.font(fs)
-            words = [w.text for w in ln]
             space = draw.textlength(" ", font=f)
             widths = [draw.textlength(w, font=f) for w in words]
             total = sum(widths) + space * (len(words) - 1)
-            # shrink to fit
-            while total > self.W * 0.92 and fs > 18:
-                fs = int(fs * 0.9)
-                f = self.font(fs)
-                space = draw.textlength(" ", font=f)
-                widths = [draw.textlength(w, font=f) for w in words]
-                total = sum(widths) + space * (len(words) - 1)
-            x = (self.W - total) / 2
-            y = int(self.H * 0.68)
-            # glow layer: active word only, blurred, energy-scaled
-            glow = Image.new("RGB", (self.W, self.H), (0, 0, 0))
-            gdraw = ImageDraw.Draw(glow)
-            xx = x
-            for i, (w, wd) in enumerate(zip(words, widths)):
-                if i == active:
-                    gdraw.text((xx, y), w, font=f, fill=ACCENT)
-                xx += wd + space
-            glow = glow.filter(ImageFilter.GaussianBlur(6 + 10 * rms))
-            img = Image.blend(img, Image.blend(img, glow, 0.9),
-                              min(1.0, 0.35 + 0.65 * rms))
-            draw = ImageDraw.Draw(img)
-            xx = x
-            for i, (w, wd) in enumerate(zip(words, widths)):
-                draw.text((xx, y), w, font=f,
-                          fill=ACCENT if i == active else DIM)
-                xx += wd + space
+        x = (self.W - total) / 2
+        y = int(self.H * 0.66)
+        accent = self.style.palette[self._pal_i % len(self.style.palette)]
+        xx = x
+        for k, (w, wd) in enumerate(zip(words, widths)):
+            draw.text((xx, y), w, font=f,
+                      fill=accent if k == active else
+                      ((120, 120, 130) if not drop else accent))
+            xx += wd + space
+        lyr = np.asarray(layer, np.float32)
+        glow = cv2.GaussianBlur(lyr, (0, 0), 4 + 8 * a.rms[i])
+        img += lyr * 0.95 + glow * (0.35 + 0.75 * a.rms[i])
 
-        # ---- baseline energy bar (subtle) ------------------------------
-        bar_w = int(self.W * 0.6 * rms)
-        draw.rectangle([(self.W - bar_w) // 2, self.H - 8,
-                        (self.W + bar_w) // 2, self.H - 5],
-                       fill=(40 + int(120 * rms),) * 3)
-        return np.asarray(img)
+    # -- drop FX ----------------------------------------------------------
+    def _fx(self, img: np.ndarray, i: int, a: Analysis) -> np.ndarray:
+        s = self.style
+        drop = bool(a.drop[i])
+        if a.kick[i]:
+            self._pal_i += 1
+            self._flash = max(self._flash, (1.0 if drop else 0.45))
+            self._zoom = max(self._zoom, s.zoom_punch * (1.5 if drop else 1.0))
+        if drop and s.glitch:
+            rng = random.Random(i // 2)
+            for _ in range(rng.randint(2, 5)):
+                y0 = rng.randrange(0, self.H - 12)
+                h = rng.randrange(4, 26)
+                off = rng.randrange(-int(30 + 60 * a.bass[i]),
+                                    int(30 + 60 * a.bass[i]) or 1)
+                img[y0:y0 + h] = np.roll(img[y0:y0 + h], off, axis=1)
+        if drop and s.rgb_split:
+            off = int(2 + 6 * a.bass[i])
+            img[..., 0] = np.roll(img[..., 0], off, axis=1)
+            img[..., 2] = np.roll(img[..., 2], -off, axis=1)
+        # geometric: zoom punch + shake in one affine
+        z = 1.0 + self._zoom
+        dx = dy = 0.0
+        if drop and s.shake > 0:
+            rng = random.Random(i)
+            amp = s.shake * (0.4 + 0.6 * a.bass[i])
+            dx, dy = rng.uniform(-amp, amp), rng.uniform(-amp, amp)
+        if z > 1.0005 or abs(dx) + abs(dy) > 0.5:
+            M = np.array([[z, 0, (1 - z) * self.W / 2 + dx],
+                          [0, z, (1 - z) * self.H / 2 + dy]], np.float32)
+            img = cv2.warpAffine(img, M, (self.W, self.H),
+                                 flags=cv2.INTER_LINEAR,
+                                 borderMode=cv2.BORDER_REFLECT)
+        # strobe/kick flash
+        if self._flash > 0.02:
+            if s.strobe and drop:
+                img += self._flash * 175.0
+            else:
+                col = np.array(s.palette[self._pal_i % len(s.palette)],
+                               np.float32)
+                img += self._flash * 0.35 * col
+        self._flash *= 0.62
+        self._zoom *= 0.80
+        # persistent flicker (build unease)
+        if s.flicker > 0:
+            img *= 1.0 + s.flicker * (0.5 + a.build[i]) * np.sin(i * 2.7)
+        return img
+
+    # -- one frame --------------------------------------------------------
+    def frame(self, i: int, t: float, a: Analysis) -> np.ndarray:
+        img = self._bg(i, t, a)
+        self._bars(img, i, a)
+        self._logo(img, i, a)
+        self._lyrics(img, i, t, a)
+        img = self._fx(img, i, a)
+        img *= self._vignette
+        if self.style.breakdown_desat:
+            sat = 0.45 + 0.55 * max(a.rms[i], 1.0 if a.drop[i] else 0.0)
+            if sat < 0.99:
+                gray = img.mean(axis=2, keepdims=True)
+                img = gray + (img - gray) * sat
+        noise = np.random.default_rng(i).standard_normal(
+            (self.H // 2, self.W // 2, 1)).astype(np.float32)
+        img += cv2.resize(noise, (self.W, self.H))[..., None] * \
+            (2.0 + 5.0 * a.rms[i])
+        return np.clip(img, 0, 255).astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------
-# 4. Encode (PyAV — no external ffmpeg.exe needed)
+# 5. Encode (PyAV) — proven in v0
 # ---------------------------------------------------------------------------
 
 def encode(out: Path, frames_iter, fps: int, audio_pcm: np.ndarray, sr: int,
@@ -327,7 +659,6 @@ def encode(out: Path, frames_iter, fps: int, audio_pcm: np.ndarray, sr: int,
         vstream = container.add_stream("mpeg4", rate=fps)
     vstream.width, vstream.height = W, H
     astream = container.add_stream("aac", rate=sr)
-
     n = 0
     for rgb in frames_iter:
         frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
@@ -336,8 +667,6 @@ def encode(out: Path, frames_iter, fps: int, audio_pcm: np.ndarray, sr: int,
         n += 1
     for pkt in vstream.encode():
         container.mux(pkt)
-
-    # audio: s16 → resampler feeds whatever aac wants
     pcm16 = (np.clip(audio_pcm, -1.0, 1.0) * 32767).astype(np.int16)
     channels = pcm16.shape[1]
     layout = "stereo" if channels == 2 else "mono"
@@ -346,8 +675,6 @@ def encode(out: Path, frames_iter, fps: int, audio_pcm: np.ndarray, sr: int,
     pts = 0
     for i in range(0, len(pcm16), CH):
         chunk = pcm16[i:i + CH]
-        # packed s16 wants shape (1, samples*channels), interleaved — which is
-        # exactly soundfile's row-major (n, ch) flattened.
         af = av.AudioFrame.from_ndarray(
             np.ascontiguousarray(chunk.reshape(1, -1)),
             format="s16", layout=layout)
@@ -371,27 +698,34 @@ def encode(out: Path, frames_iter, fps: int, audio_pcm: np.ndarray, sr: int,
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--audio", required=True, type=Path)
-    ap.add_argument("--lyrics", type=Path, default=None,
-                    help="written lyrics (text is ground truth; whisper only times it)")
+    ap.add_argument("--lyrics", type=Path, default=None)
     ap.add_argument("--logo", type=Path, default=None)
-    ap.add_argument("--title", default="", help="text logo fallback")
+    ap.add_argument("--title", default="")
+    ap.add_argument("--style", default="edm", choices=sorted(STYLES))
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--size", default="1280x720")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    ap.add_argument("--no-vocals", action="store_true",
+                    help="skip transcription (instrumental track)")
     args = ap.parse_args()
 
     W, H = (int(v) for v in args.size.lower().split("x"))
-    out = args.out or args.audio.with_suffix(".viz.mp4")
-
+    out = args.out or args.audio.with_suffix(f".{args.style}.mp4")
+    style = STYLES[args.style]
     t0 = time.time()
-    heard = transcribe_words(args.audio, args.device)
-    if args.lyrics and args.lyrics.is_file():
-        lines = align_to_lyrics(heard, args.lyrics.read_text(encoding="utf-8"))
-    else:
-        lines = lines_from_transcript(heard)
 
-    energy, pcm, sr = energy_envelope(args.audio, args.fps)
+    if args.no_vocals:
+        lines: list[list[Word]] = []
+    else:
+        heard = transcribe_words(args.audio, args.device)
+        if args.lyrics and args.lyrics.is_file():
+            lines = align_to_lyrics(heard,
+                                    args.lyrics.read_text(encoding="utf-8"))
+        else:
+            lines = lines_from_transcript(heard)
+
+    analysis, pcm, sr = analyze(args.audio, args.fps)
     duration = len(pcm) / sr
     n_frames = int(np.ceil(duration * args.fps))
 
@@ -400,18 +734,18 @@ def main() -> int:
         from PIL import Image
         logo = Image.open(args.logo).convert("RGBA")
 
-    r = Renderer(W, H, lines, logo=logo, title=args.title)
+    r = Renderer(W, H, style, lines, args.fps, logo=logo, title=args.title)
 
     def frames():
         for i in range(n_frames):
-            t = i / args.fps
-            e = min(i, len(energy.rms) - 1)
-            yield r.frame(t, float(energy.rms[e]), float(energy.bass[e]))
+            yield r.frame(i, i / args.fps, analysis)
             if i and i % (args.fps * 10) == 0:
-                print(f"[lyric_viz] {i}/{n_frames} frames "
-                      f"({i / args.fps:.0f}s/{duration:.0f}s)")
+                print(f"[lyric_viz] {i}/{n_frames} frames")
 
     encode(out, frames(), args.fps, pcm, sr, W, H)
+    if style.strobe:
+        print("[lyric_viz] WARNING: this style strobes on the drop - publish "
+              "with a flash/photosensitivity warning in the caption.")
     print(f"[lyric_viz] done in {time.time() - t0:.1f}s -> {out} "
           f"({out.stat().st_size / 1e6:.1f} MB)")
     return 0
