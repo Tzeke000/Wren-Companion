@@ -1171,6 +1171,20 @@ class Renderer:
             edge = cv2.morphologyEx(wm[..., 0], cv2.MORPH_GRADIENT,
                                     np.ones((3, 3), np.uint8))
             layer += cv2.GaussianBlur(edge, (0, 0), 3)[..., None] * col
+        elif self.shape.startswith("model:"):
+            # GLB wireframe centerpiece (Zeke 08-27: "adding some 3-D reactive
+            # shapes... like a skull"). Mesh from assets/models3d via trimesh,
+            # same projection pipeline as the procedural shapes.
+            mesh = self._model_mesh()
+            if mesh is None:
+                return
+            v, edges = mesh
+            pts = self._project(v, size * 1.5, cx, cy, self._rot,
+                                tumble=False)
+            lw = 1 if len(edges) > 900 else 2
+            for e0, e1 in edges:
+                cv2.line(layer, tuple(pts[e0][0]), tuple(pts[e1][0]),
+                         tuple(float(x) for x in col), lw, cv2.LINE_AA)
         else:
             mesh = self._shape_mesh().get(self.shape)
             if mesh is None:
@@ -1183,9 +1197,43 @@ class Renderer:
         glow = cv2.GaussianBlur(layer, (0, 0), 5 + 7 * a.bass[i])
         img += layer + glow * (0.5 + 0.8 * a.rms[i])
 
+    _MODEL_CACHE: dict = None    # class-level cache, lazy dict (dataclass-safe)
+
+    def _model_mesh(self):
+        """Load `model:<name-or-path>` -> (verts[-1..1, y-flipped], edges).
+        Bare names resolve to assets/models3d/<name>.glb. Cached per path."""
+        spec = self.shape.split(":", 1)[1]
+        if Renderer._MODEL_CACHE is None:
+            Renderer._MODEL_CACHE = {}
+        if spec in Renderer._MODEL_CACHE:
+            return Renderer._MODEL_CACHE[spec]
+        try:
+            p = Path(spec)
+            if not p.is_file():
+                p = Path(__file__).resolve().parent.parent \
+                    / "assets" / "models3d" / f"{spec}.glb"
+            import trimesh
+            m = trimesh.load(str(p), force="mesh")
+            v = np.asarray(m.vertices, np.float32)
+            v -= v.mean(axis=0)
+            v /= max(1e-6, np.abs(v).max())          # unit cube like _SHAPES
+            v[:, 1] *= -1.0                          # glTF Y-up -> screen Y-down
+            f = np.asarray(m.faces, np.int64)
+            e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]],
+                                        f[:, [2, 0]]]), axis=1)
+            edges = [tuple(x) for x in np.unique(e, axis=0)]
+            print(f"[lyric_viz] model loaded: {p.name} "
+                  f"({len(v)} verts, {len(edges)} edges)")
+            out = (v, edges)
+        except Exception as ex:
+            print(f"[lyric_viz] model load FAILED ({spec}): {ex!r}")
+            out = None
+        Renderer._MODEL_CACHE[spec] = out
+        return out
+
     def _project(self, v: np.ndarray, size: float, cx: int, cy: int,
-                 rot: float) -> np.ndarray:
-        ry, rx = rot, rot * 0.62
+                 rot: float, tumble: bool = True) -> np.ndarray:
+        ry, rx = rot, (rot * 0.62 if tumble else 0.30)
         cyr, syr = np.cos(ry), np.sin(ry)
         cxr, sxr = np.cos(rx), np.sin(rx)
         Ry = np.array([[cyr, 0, syr], [0, 1, 0], [-syr, 0, cyr]], np.float32)
@@ -1606,9 +1654,9 @@ def main() -> int:
                     help="keep loop videos' original colors (default: duotone "
                          "through the style palette so colors always match)")
     ap.add_argument("--shape", default="none",
-                    choices=["none", "cube", "pyramid", "cylinder", "orb",
-                             "logo3d"],
-                    help="rotating music-reactive 3D centerpiece")
+                    help="rotating music-reactive 3D centerpiece: none|cube|"
+                         "pyramid|cylinder|orb|logo3d|model:<name-or-glb-path>"
+                         " (bare names resolve to assets/models3d/<name>.glb)")
     ap.add_argument("--no-vocals", action="store_true",
                     help="skip transcription (instrumental track)")
     ap.add_argument("--tiktok", action="store_true",
