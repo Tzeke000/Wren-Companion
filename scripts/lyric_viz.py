@@ -364,6 +364,34 @@ def _detect_drop(bass_raw: np.ndarray, fps: int) -> np.ndarray:
     return drop
 
 
+def pick_hook_window(a: Analysis, lines: list, duration: float, fps: int,
+                     target_s: float = 27.0) -> tuple[float, float]:
+    """Find the strongest ≤30s window (docs/tiktok_playbook.md): TikTok wants
+    the interesting point IMMEDIATELY — completion rate is the ranking king,
+    so the clip must open ~1s before the song's best moment.
+
+    Score per candidate start = drop coverage + vocal density + energy."""
+    n = len(a.rms)
+    word_times = [w.start for ln in lines for w in ln]
+    best_t, best_score = 0.0, -1.0
+    for t0 in np.arange(0.0, max(1.0, duration - target_s), 1.0):
+        i0, i1 = int(t0 * fps), int(min(n, (t0 + target_s) * fps))
+        if i1 <= i0:
+            break
+        drop_cov = float(a.drop[i0:i1].mean())
+        energy = float(a.rms[i0:i1].mean())
+        words = sum(1 for t in word_times if t0 <= t < t0 + target_s)
+        vocal = min(1.0, words / (target_s * 1.5))
+        # hook lands EARLY bonus: drop/kick within the first 3s of the window
+        early = float(a.drop[i0:i0 + 3 * fps].any() or
+                      a.kick[i0:i0 + 3 * fps].any())
+        score = 1.2 * drop_cov + 0.9 * vocal + 0.8 * energy + 0.5 * early
+        if score > best_score:
+            best_score, best_t = score, float(t0)
+    t0 = max(0.0, best_t - 1.0)          # open ~1s before the moment lands
+    return t0, min(duration, t0 + target_s + 1.0)
+
+
 def analyze(audio: Path, fps: int) -> tuple[Analysis, np.ndarray, int]:
     import soundfile as sf
     y, sr = sf.read(str(audio), dtype="float32", always_2d=True)
@@ -1456,7 +1484,14 @@ def main() -> int:
                     help="rotating music-reactive 3D centerpiece")
     ap.add_argument("--no-vocals", action="store_true",
                     help="skip transcription (instrumental track)")
+    ap.add_argument("--tiktok", action="store_true",
+                    help="one-flag TikTok cut: 9:16, spinning logo, auto-hook "
+                         "start, <=30s (see docs/tiktok_playbook.md)")
     args = ap.parse_args()
+    if args.tiktok:
+        args.aspect = "9:16"
+        if args.shape == "none":
+            args.shape = "logo3d"
 
     if args.size:
         W, H = (int(v) for v in args.size.lower().split("x"))
@@ -1593,11 +1628,19 @@ def main() -> int:
                  deck=deck, deck_idx=deck_idx, corner_logo=corner,
                  shape=args.shape, bgclips=bgclips, bgclip_idx=bgclip_idx)
 
+    f0, f1 = 0, n_frames
+    if args.tiktok:
+        h0, h1 = pick_hook_window(analysis, lines, duration, args.fps)
+        f0, f1 = int(h0 * args.fps), int(h1 * args.fps)
+        pcm = pcm[int(h0 * sr):int(h1 * sr)]
+        print(f"[lyric_viz] TIKTOK hook window: {h0:.1f}s -> {h1:.1f}s "
+              f"({h1 - h0:.0f}s clip)")
+
     def frames():
-        for i in range(n_frames):
+        for i in range(f0, f1):
             yield r.frame(i, i / args.fps, analysis)
-            if i and i % (args.fps * 10) == 0:
-                print(f"[lyric_viz] {i}/{n_frames} frames")
+            if i > f0 and (i - f0) % (args.fps * 10) == 0:
+                print(f"[lyric_viz] {i - f0}/{f1 - f0} frames")
 
     encode(out, frames(), args.fps, pcm, sr, W, H)
     if style.strobe:
