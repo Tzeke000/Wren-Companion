@@ -290,13 +290,14 @@ class EyeTracker:
             return None
 
     # ── Gaze estimation ───────────────────────────────────────────────────────
+    # 2026-08-27 dedup: each public method used to run its own facemesh detect,
+    # so the common consumer pattern (attention + looking + region on the same
+    # frame) burned up to 4 detects (~40ms). The math now lives in *_from_iris
+    # helpers that take the iris position; analyze() is the one-detect path.
+    # The old per-method signatures still work (each does its own detect).
 
-    def get_gaze_point(self, frame: Any) -> Optional[tuple[int, int]]:
-        """Map iris position to screen pixel coordinates. Returns None if not calibrated."""
-        if self._calib is None:
-            return None
-        iris = self._get_iris_position(frame)
-        if iris is None:
+    def _gaze_point_from_iris(self, iris: Optional[tuple[float, float]]) -> Optional[tuple[int, int]]:
+        if self._calib is None or iris is None:
             return None
         x_screen = self._calib["sx_slope"] * iris[0] + self._calib["sx_inter"]
         y_screen = self._calib["sy_slope"] * iris[1] + self._calib["sy_inter"]
@@ -306,11 +307,10 @@ class EyeTracker:
         y_screen = max(0, min(sh, int(y_screen)))
         return (x_screen, y_screen)
 
-    def get_gaze_region(self, frame: Any, screen_w: int = 1920, screen_h: int = 1080) -> str:
-        """Return one of 9 region names or 'off_screen' / 'unknown'."""
-        pt = self.get_gaze_point(frame)
+    def _gaze_region_from_iris(self, iris: Optional[tuple[float, float]],
+                               screen_w: int = 1920, screen_h: int = 1080) -> str:
+        pt = self._gaze_point_from_iris(iris)
         if pt is None:
-            iris = self._get_iris_position(frame)
             if iris is None:
                 return "unknown"
             # Use raw iris position as proxy if not calibrated
@@ -324,15 +324,9 @@ class EyeTracker:
         row = min(2, int((y / screen_h) * 3))
         return _REGIONS_3X3[row][col]
 
-    def is_looking_at_screen(self, frame: Any) -> bool:
-        region = self.get_gaze_region(frame)
-        return region not in ("off_screen", "unknown")
-
-    def get_attention_state(self, frame: Any) -> str:
-        """'focused' | 'distracted' | 'away' | 'absent'"""
+    def _attention_from_iris(self, iris: Optional[tuple[float, float]], looking: bool) -> str:
+        """Stateful attention classification (updates history/timers)."""
         now = time.time()
-        iris = self._get_iris_position(frame)
-
         if iris is None:
             # No face
             if now - self._last_face_ts > 30.0:
@@ -340,21 +334,56 @@ class EyeTracker:
                 return "absent"
             self._attention_history.append("away")
             return "away"
-
-        looking = self.is_looking_at_screen(frame)
         if looking:
             self._looking_away_since = 0.0
             self._attention_history.append("focused")
             return "focused"
-        else:
-            if self._looking_away_since == 0.0:
-                self._looking_away_since = now
-            away_sec = now - self._looking_away_since
-            if away_sec > 10.0:
-                self._attention_history.append("away")
-                return "away"
-            self._attention_history.append("distracted")
-            return "distracted"
+        if self._looking_away_since == 0.0:
+            self._looking_away_since = now
+        away_sec = now - self._looking_away_since
+        if away_sec > 10.0:
+            self._attention_history.append("away")
+            return "away"
+        self._attention_history.append("distracted")
+        return "distracted"
+
+    def analyze(self, frame: Any, screen_w: int = 1920, screen_h: int = 1080) -> dict[str, Any]:
+        """ONE facemesh detect → the full attention read. Preferred entry point.
+
+        Returns {iris, gaze_point, gaze_region, looking_at_screen,
+        attention_state, calibrated}. Updates attention history/timers exactly
+        once per call (the old 3-call pattern also triple-appended history)."""
+        iris = self._get_iris_position(frame)          # the single detect
+        region = self._gaze_region_from_iris(iris, screen_w, screen_h)
+        looking = region not in ("off_screen", "unknown")
+        return {
+            "iris": iris,
+            "gaze_point": self._gaze_point_from_iris(iris),
+            "gaze_region": region,
+            "looking_at_screen": looking,
+            "attention_state": self._attention_from_iris(iris, looking),
+            "calibrated": self.calibrated,
+        }
+
+    def get_gaze_point(self, frame: Any) -> Optional[tuple[int, int]]:
+        """Map iris position to screen pixel coordinates. Returns None if not calibrated."""
+        if self._calib is None:
+            return None
+        return self._gaze_point_from_iris(self._get_iris_position(frame))
+
+    def get_gaze_region(self, frame: Any, screen_w: int = 1920, screen_h: int = 1080) -> str:
+        """Return one of 9 region names or 'off_screen' / 'unknown'."""
+        return self._gaze_region_from_iris(self._get_iris_position(frame), screen_w, screen_h)
+
+    def is_looking_at_screen(self, frame: Any) -> bool:
+        region = self.get_gaze_region(frame)
+        return region not in ("off_screen", "unknown")
+
+    def get_attention_state(self, frame: Any) -> str:
+        """'focused' | 'distracted' | 'away' | 'absent'"""
+        iris = self._get_iris_position(frame)
+        looking = self._gaze_region_from_iris(iris) not in ("off_screen", "unknown")
+        return self._attention_from_iris(iris, looking)
 
 
 # ── Module singleton ──────────────────────────────────────────────────────────

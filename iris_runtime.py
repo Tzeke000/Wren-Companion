@@ -4388,11 +4388,14 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                 g["_attention_state"] = "absent"
                 g["_looking_at_screen"] = False
             else:
-                new_attn = ez.get_attention_state(frame)
+                # analyze() = ONE facemesh detect for the whole read
+                # (was 4 via get_attention_state + is_looking + get_gaze_region)
+                az = ez.analyze(frame)
+                new_attn = az["attention_state"]
                 g["_attention_state"] = new_attn
-                g["_looking_at_screen"] = bool(ez.is_looking_at_screen(frame))
-                if getattr(ez, "calibrated", False):
-                    g["_gaze_region"] = ez.get_gaze_region(frame) or ""
+                g["_looking_at_screen"] = bool(az["looking_at_screen"])
+                if az["calibrated"]:
+                    g["_gaze_region"] = az["gaze_region"] or ""
             # Fire on transition only.
             if new_attn and new_attn != prev_attn:
                 try:

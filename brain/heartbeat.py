@@ -642,11 +642,11 @@ def _run_heartbeat_tick(
                 _meta = read_live_frame_with_meta(max_age=LIVE_CACHE_MAX_AGE_SEC)
                 _frame = _meta.frame
                 if _frame is not None:
-                    _attn = _et.get_attention_state(_frame)
-                    _gaze_region = _et.get_gaze_region(_frame)
+                    _az = _et.analyze(_frame)  # one facemesh detect (was 3)
+                    _attn = _az["attention_state"]
                     g["_attention_state"] = _attn
-                    g["_gaze_region"] = _gaze_region
-                    g["_looking_at_screen"] = _et.is_looking_at_screen(_frame)
+                    g["_gaze_region"] = _az["gaze_region"]
+                    g["_looking_at_screen"] = _az["looking_at_screen"]
                     # Track away duration
                     if _attn in ("away", "absent"):
                         if not g.get("_user_away"):
