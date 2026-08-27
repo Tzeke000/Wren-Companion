@@ -41,17 +41,31 @@ def _add_cuda_paths() -> list[str]:
     AND prepend to PATH for completeness. Returns the directories actually
     added so callers can log them.
     """
-    site_packages = Path(sys.executable).parent / "Lib" / "site-packages"
-    nv_root = site_packages / "nvidia"
-    if not nv_root.is_dir():
-        return []
+    # Locate the venv site-packages robustly. NOTE: on Windows the venv python
+    # is at .venv/Scripts/python.exe, so `Path(sys.executable).parent` is
+    # .venv/Scripts — the OLD code appended Lib/site-packages to THAT and looked
+    # in .venv/Scripts/Lib/site-packages, which does not exist, so this helper
+    # silently returned [] and registered nothing (found 2026-08-27). GPU still
+    # worked in practice only because insightface imports torch, which registers
+    # its own torch/lib dir — a dependency on import order we don't want.
+    site_packages: Path | None = None
+    try:
+        import site as _site
+        for _sp in _site.getsitepackages():
+            _p = Path(_sp)
+            if (_p / "torch").is_dir() or (_p / "nvidia").is_dir():
+                site_packages = _p
+                break
+    except Exception:
+        pass
+    if site_packages is None:
+        # Fallback: .venv/Scripts/python.exe -> .venv -> Lib/site-packages
+        site_packages = Path(sys.executable).parent.parent / "Lib" / "site-packages"
     added: list[str] = []
-    for sub in sorted(nv_root.iterdir()):
-        if not sub.is_dir():
-            continue
-        bin_dir = sub / "bin"
+
+    def _register(bin_dir: Path, label: str) -> None:
         if not bin_dir.is_dir():
-            continue
+            return
         try:
             os.add_dll_directory(str(bin_dir))  # Python 3.8+ Windows DLL search
         except Exception:
@@ -60,7 +74,26 @@ def _add_cuda_paths() -> list[str]:
         existing = os.environ.get("PATH", "")
         if str(bin_dir) not in existing.split(os.pathsep):
             os.environ["PATH"] = str(bin_dir) + os.pathsep + existing
-        added.append(f"nvidia/{sub.name}/bin")
+        added.append(label)
+
+    # 1) pip-installed nvidia-* wheels drop DLLs under nvidia/<lib>/bin/.
+    nv_root = site_packages / "nvidia"
+    if nv_root.is_dir():
+        for sub in sorted(nv_root.iterdir()):
+            if sub.is_dir() and (sub / "bin").is_dir():
+                _register(sub / "bin", f"nvidia/{sub.name}/bin")
+
+    # 2) torch bundles the CUDA runtime (cudnn64_9.dll, cublas64_12.dll,
+    #    cudart) in torch/lib. onnxruntime's CUDA EP needs these loadable at
+    #    session-prepare time. In the runtime process torch's own dll-dir
+    #    registration is not guaranteed to have run before InsightFace inits,
+    #    so register it explicitly. Without this, and with no pip nvidia-*
+    #    wheels present, the CUDA EP silently falls back to CPU — which is
+    #    exactly what stranded the face pipeline at ~10 FPS on CPU while a
+    #    standalone process (with torch's dll dir registered) hit the GPU
+    #    fine (root-caused 2026-08-27).
+    _register(site_packages / "torch" / "lib", "torch/lib")
+
     return added
 
 
