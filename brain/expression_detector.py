@@ -1,7 +1,12 @@
 """
-Facial expression detection using MediaPipe Face Mesh landmark geometry.
-No ML model inference — pure geometric ratio calculations on 468 landmarks.
+Facial expression detection using MediaPipe face landmark geometry.
+No expression-ML inference — pure geometric ratio calculations on the landmarks.
 Falls back gracefully if mediapipe not available.
+
+2026-08-27 PORTED off the legacy `mp.solutions.face_mesh` API (dead since
+fork day under mediapipe 0.10.35 — see eye_tracker.py header). Uses the shared
+FaceMeshVideo wrapper (FaceLandmarker tasks API, own instance); landmark
+indices are unchanged.
 """
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ from typing import Any, Optional
 
 _MEDIAPIPE_OK = False
 try:
-    import mediapipe as mp
+    from brain.eye_tracker import FaceMeshVideo, _MODEL_PATH
     _MEDIAPIPE_OK = True
 except ImportError:
     pass
@@ -69,19 +74,13 @@ class ExpressionDetector:
         self._init()
 
     def _init(self) -> None:
-        if not _MEDIAPIPE_OK:
+        if not _MEDIAPIPE_OK or not _MODEL_PATH.is_file():
             return
         try:
-            self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=False,
-                max_num_faces=1,
-                refine_landmarks=False,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-            )
+            self._face_mesh = FaceMeshVideo()
             self._available = True
         except Exception as e:
-            print(f"[expression_detector] MediaPipe init failed: {e}")
+            print(f"[expression_detector] FaceLandmarker init failed: {e}")
 
     @property
     def available(self) -> bool:
@@ -100,12 +99,9 @@ class ExpressionDetector:
         if not self._available or frame is None:
             return empty
         try:
-            import cv2
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if len(frame.shape) == 3 else frame
-            result = self._face_mesh.process(rgb)
-            if not result.multi_face_landmarks:
+            lm = self._face_mesh.detect(frame)
+            if lm is None:
                 return empty
-            lm = result.multi_face_landmarks[0].landmark
         except Exception:
             return empty
 
