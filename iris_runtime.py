@@ -4174,14 +4174,21 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
 
     def _open_cam():
         c = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        c.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        c.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        # 2026-08-27 (all-30fps): ask for MJPG + 30fps explicitly — some UVC
-        # modes default to a lower internal rate, and then cap.read() itself
-        # caps the loop no matter how well we pace. Failed sets are harmless.
+        # 2026-08-27 THE 30FPS FIX — MJPG 1280x720 @ 60 REQUESTED.
+        # The PIXY's firmware AE in any 30fps mode parks at a ~48ms shutter
+        # (20fps delivered) regardless of light/mode/exposure props — fully
+        # investigated live, memory/camera_fps_investigation_2026-08-27.md.
+        # But its 60fps modes (MJPG-only: 720p60/1080p60, per the verified
+        # v4l2 dump in profiles/emeet-pixy) FORCE the AE to a <=16.6ms shutter
+        # and it compensates with internal gain: bright image AND fast.
+        # Loop still paces at 30; measured 28.5fps stable, face pass ~25ms.
+        # 640x480 has NO 60 mode (YUY2-only there -> 20fps trap). Failed sets
+        # are harmless on a non-PIXY camera — it just runs its default.
         try:
             c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            c.set(cv2.CAP_PROP_FPS, 30)
+            c.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            c.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            c.set(cv2.CAP_PROP_FPS, 60)
         except Exception:
             pass
         # 2026-08-27: log what the device actually GRANTED (post-restart-#2
@@ -4468,7 +4475,21 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
             # atomic tuple swap under the GIL; workers only ever read it, and
             # the capture path never draws on the raw frame (annotate_frame is
             # a pass-through since 2026-08-21), so sharing without copy is safe.
-            g["_raw_frame_slot"] = (time.time(), frame)
+            _pub_ts = time.time()
+            _slot_prev = g.get("_raw_frame_slot")
+            g["_raw_frame_slot"] = (_pub_ts, frame)
+            # Measured capture fps (EMA over inter-frame gaps) — Zeke directive
+            # 2026-08-27: perception runs at the camera's ACTUAL rate. Workers
+            # already frame-gate (a new frame is the tick), so this is the
+            # observability half: g["_capture_fps_measured"] is the truth that
+            # vision_fps_probe and future tuning read.
+            if _slot_prev:
+                _gap = _pub_ts - _slot_prev[0]
+                if 0.0 < _gap < 2.0:
+                    _ema = g.get("_capture_fps_ema") or (1.0 / _gap)
+                    _ema = 0.95 * _ema + 0.05 * (1.0 / _gap)
+                    g["_capture_fps_ema"] = _ema
+                    g["_capture_fps_measured"] = round(_ema, 1)
 
             # Phase 1.5 enrollment hook — save the RAW pre-annotation frame to
             # disk when an enrollment is in progress. Throttled by interval_s.
