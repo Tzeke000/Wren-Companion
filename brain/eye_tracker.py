@@ -1,6 +1,14 @@
 """
-Eye tracking and gaze estimation using MediaPipe Face Mesh.
+Eye tracking and gaze estimation using MediaPipe Face Landmarker (tasks API).
 Falls back gracefully if mediapipe not available.
+
+2026-08-27 PORTED off the legacy `mp.solutions.face_mesh` API — the venv's
+mediapipe (0.10.35, installed fork day 2026-05-09) only ships the new `tasks`
+API, so this module had silently init-failed since day one (`available=False`,
+every consumer took its fallback branch). Now uses FaceLandmarker VIDEO mode
+with the model at models/mediapipe/face_landmarker.task; that model always
+outputs 478 landmarks, so the iris indices (468-477) work unchanged.
+`FaceMeshVideo` below is shared with expression_detector.py.
 
 Calibration: 9-point tkinter overlay → maps iris coords to screen pixels.
 Bootstrap: Ava decides what to do with gaze data. She develops her own sense
@@ -19,9 +27,50 @@ from typing import Any, Optional
 _MEDIAPIPE_OK = False
 try:
     import mediapipe as mp
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision as mp_vision
     _MEDIAPIPE_OK = True
 except ImportError:
     pass
+
+_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "mediapipe" / "face_landmarker.task"
+
+
+class FaceMeshVideo:
+    """Thin thread-safe wrapper: BGR frame in → 478-landmark list out (or None).
+
+    FaceLandmarker VIDEO mode needs strictly-increasing timestamps (same trick
+    as iris_hands) and is not documented thread-safe, so detect() is locked.
+    Each consumer owns its own instance (model is 3.7MB — cheap)."""
+
+    def __init__(self) -> None:
+        opts = mp_vision.FaceLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=str(_MODEL_PATH)),
+            running_mode=mp_vision.RunningMode.VIDEO,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        self._lm = mp_vision.FaceLandmarker.create_from_options(opts)
+        self._lock = threading.Lock()
+        self._last_ts_ms = 0
+
+    def detect(self, frame_bgr: Any) -> Optional[list]:
+        """Return the landmark list (NormalizedLandmark with .x/.y/.z) or None."""
+        if frame_bgr is None:
+            return None
+        import cv2
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB) if len(frame_bgr.shape) == 3 else frame_bgr
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        with self._lock:
+            ts_ms = int(time.time() * 1000)
+            if ts_ms <= self._last_ts_ms:
+                ts_ms = self._last_ts_ms + 1
+            self._last_ts_ms = ts_ms
+            res = self._lm.detect_for_video(mp_img, ts_ms)
+        if not res.face_landmarks:
+            return None
+        return res.face_landmarks[0]
 
 # MediaPipe Face Mesh iris landmark indices (refine_landmarks=True required)
 # Left iris:  468 (center), 469, 470, 471, 472 (edge points)
@@ -44,8 +93,7 @@ _REGIONS_3X3 = [
 class EyeTracker:
     def __init__(self, base_dir: Path):
         self._base_dir = base_dir
-        self._mp_face_mesh = None
-        self._face_mesh = None
+        self._face_mesh: Optional[FaceMeshVideo] = None
         self._calib: Optional[dict[str, Any]] = None
         self._available = False
         self._attention_history: deque[str] = deque(maxlen=60)  # last 60 checks
@@ -58,18 +106,14 @@ class EyeTracker:
     def _init_mediapipe(self) -> None:
         if not _MEDIAPIPE_OK:
             return
+        if not _MODEL_PATH.is_file():
+            print(f"[eye_tracker] model missing: {_MODEL_PATH}")
+            return
         try:
-            self._mp_face_mesh = mp.solutions.face_mesh
-            self._face_mesh = self._mp_face_mesh.FaceMesh(
-                static_image_mode=False,
-                max_num_faces=1,
-                refine_landmarks=True,  # enables iris landmarks 468-477
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-            )
+            self._face_mesh = FaceMeshVideo()
             self._available = True
         except Exception as e:
-            print(f"[eye_tracker] MediaPipe init failed: {e}")
+            print(f"[eye_tracker] FaceLandmarker init failed: {e}")
 
     @property
     def available(self) -> bool:
@@ -216,12 +260,9 @@ class EyeTracker:
         if not self._available or self._face_mesh is None or frame is None:
             return None
         try:
-            import cv2
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if len(frame.shape) == 3 else frame
-            result = self._face_mesh.process(rgb)
-            if not result.multi_face_landmarks:
+            lm = self._face_mesh.detect(frame)
+            if lm is None:
                 return None
-            lm = result.multi_face_landmarks[0].landmark
             # Average left and right iris centers
             points: list[tuple[float, float]] = []
             for idx in _LEFT_IRIS + _RIGHT_IRIS:
@@ -237,17 +278,14 @@ class EyeTracker:
             return None
 
     def get_face_landmarks(self, frame: Any) -> Optional[Any]:
-        """Return raw MediaPipe face landmarks or None."""
+        """Return the raw landmark list (478 NormalizedLandmarks) or None."""
         if not self._available or self._face_mesh is None or frame is None:
             return None
         try:
-            import cv2
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if len(frame.shape) == 3 else frame
-            result = self._face_mesh.process(rgb)
-            if result.multi_face_landmarks:
+            lm = self._face_mesh.detect(frame)
+            if lm is not None:
                 self._last_face_ts = time.time()
-                return result.multi_face_landmarks[0]
-            return None
+            return lm
         except Exception:
             return None
 
@@ -337,7 +375,7 @@ def bootstrap_eye_tracker(g: dict[str, Any]) -> Optional[EyeTracker]:
     et = EyeTracker(base)
     _SINGLETON = et
     g["_eye_tracker"] = et
-    state = "available" if et.available else "unavailable (mediapipe missing)"
+    state = "available" if et.available else "unavailable (mediapipe/model missing)"
     calib = "calibrated" if et.calibrated else "not calibrated"
     print(f"[eye_tracker] {state}, {calib}")
     return et
