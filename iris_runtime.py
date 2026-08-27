@@ -4184,6 +4184,24 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
             c.set(cv2.CAP_PROP_FPS, 30)
         except Exception:
             pass
+        # 2026-08-27: log what the device actually GRANTED (post-restart-#2
+        # probe measured 20fps ⇒ device-side cap; distinguish "mode not taken"
+        # from "auto-exposure stretching"). Published to g for vision_fps_probe.
+        try:
+            fourcc_i = int(c.get(cv2.CAP_PROP_FOURCC))
+            fourcc = "".join(chr((fourcc_i >> 8 * k) & 0xFF) for k in range(4))
+            props = {
+                "fps": c.get(cv2.CAP_PROP_FPS),
+                "fourcc": fourcc,
+                "width": c.get(cv2.CAP_PROP_FRAME_WIDTH),
+                "height": c.get(cv2.CAP_PROP_FRAME_HEIGHT),
+                "auto_exposure": c.get(cv2.CAP_PROP_AUTO_EXPOSURE),
+                "exposure": c.get(cv2.CAP_PROP_EXPOSURE),
+            }
+            g["_cam_props"] = props
+            print(f"[iris_video] camera granted: {props}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
         return c
 
     cap = None
