@@ -473,10 +473,11 @@ class CameraManager:
             from brain.eye_tracker import get_eye_tracker
             et = get_eye_tracker()
             if et is not None and et.available:
-                result["gaze_region"] = et.get_gaze_region(frame)
-                result["attention_state"] = et.get_attention_state(frame)
-                result["looking_at_screen"] = et.is_looking_at_screen(frame)
-                result["gaze_calibrated"] = et.calibrated
+                az = et.analyze(frame)  # one facemesh detect (was 3)
+                result["gaze_region"] = az["gaze_region"]
+                result["attention_state"] = az["attention_state"]
+                result["looking_at_screen"] = az["looking_at_screen"]
+                result["gaze_calibrated"] = az["calibrated"]
         except Exception:
             pass
         try:

@@ -3108,9 +3108,10 @@ def create_app():
             }
             if frame is not None:
                 if et is not None and et.available:
-                    result["gaze_region"] = et.get_gaze_region(frame)
-                    result["attention_state"] = et.get_attention_state(frame)
-                    result["looking_at_screen"] = et.is_looking_at_screen(frame)
+                    az = et.analyze(frame)  # one facemesh detect (was 3)
+                    result["gaze_region"] = az["gaze_region"]
+                    result["attention_state"] = az["attention_state"]
+                    result["looking_at_screen"] = az["looking_at_screen"]
                 if ed is not None and ed.available:
                     scores = ed.detect_expression(frame)
                     result["expression"] = str(scores.get("dominant") or "neutral")
