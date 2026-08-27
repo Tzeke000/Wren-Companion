@@ -104,6 +104,20 @@ def _append(p: Path, d: dict) -> None:
         f.write(json.dumps(d, ensure_ascii=False) + "\n")
 
 
+# ── DELIBERATE-OFF FLAG (2026-08-27, Zeke: "just not load your mini brain
+# until we get that cable for your server for the V100"). Every model query
+# makes Ollama pull ~4-5GB onto the 3060 and hold it ~7 min — the named crash
+# class is a big runtime alloc landing inside that window (OOM, dead process).
+# Until the little brain lives on the V100, she stays parked. A flag FILE (not
+# an env var) so a future me checking state/ for deliberate-off flags finds it
+# before "healing" the down pilot. Delete the file (or set off:false) to wake her.
+OFF_FLAG = LB / "pilot_deliberately_off.json"
+
+
+def _deliberately_off() -> bool:
+    return bool(_read_json(OFF_FLAG).get("off"))
+
+
 def _single_instance() -> bool:
     try:
         if PIDFILE.is_file():
@@ -583,6 +597,10 @@ def _can_leave_home(goals: dict) -> bool:
 
 
 def main() -> int:
+    if _deliberately_off():
+        print("little_pilot deliberately OFF "
+              "(state/little_brain/pilot_deliberately_off.json) — exiting")
+        return 0
     if not _single_instance():
         print("another little_pilot is alive — exiting")
         return 0
@@ -594,6 +612,14 @@ def main() -> int:
     live_prev: dict = {}
     while True:
         try:
+            # off-flag set while running → exit within one pulse (~1s)
+            if _deliberately_off():
+                print("off-flag appeared — little_pilot exiting")
+                try:
+                    PIDFILE.unlink()
+                except OSError:
+                    pass
+                return 0
             # ── LIVE PULSE (~1s): her nervous system. A cheap snapshot read;
             # edge events here wake the FULL cycle instantly — she now lives
             # inside the feed instead of waking every ~150s (2026-07-23, Zeke:
