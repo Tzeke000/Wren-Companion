@@ -51,6 +51,7 @@ def _vision_fps_probe(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
     out["perc_last_ms"] = {k: g.get(f"_perc_{k}_last_ms") for k in ("face", "hands", "expr", "attn")}
     out["frame_age_s"] = round(time.time() - last, 3) if last else None
     out["cam_props"] = g.get("_cam_props")  # what the device granted at open (None pre-restart-#3)
+    out["capture_fps_measured"] = g.get("_capture_fps_measured")  # loop's own EMA (None pre-restart-#3)
     ins = g.get("_insight_face")
     ez = g.get("_eye_tracker")
     out["engines"] = {
