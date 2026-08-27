@@ -770,9 +770,13 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         st["_prev_offset"] = {"dx": dx, "dy": dy, "ts": now_t}
                     else:
                         # ── PD control: P centers, D matches the target's pace
-                        # (see _KD_UNITS derivation above).
-                        ux = -( _GAIN_UNITS * dx + _KD_UNITS * rx)
-                        uy = -( _GAIN_UNITS * dy + _KD_UNITS * ry)
+                        # (see _KD_UNITS derivation above). Live-tunable via
+                        # action='tune' (2026-08-27, for the "a little slow"
+                        # referee session) — st overrides beat the constants.
+                        _gp = float(st.get("gain_units") or _GAIN_UNITS)
+                        _gd = float(st.get("kd_units") or _KD_UNITS)
+                        ux = -( _gp * dx + _gd * rx)
+                        uy = -( _gp * dy + _gd * ry)
                         ux = max(-_MAX_UNITS, min(_MAX_UNITS, ux))
                         uy = max(-_MAX_UNITS, min(_MAX_UNITS, uy))
                         # inside deadband AND target static on that axis ->
@@ -1107,7 +1111,28 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
 
     if action == "status":
         out = {k: v for k, v in st.items() if k not in ("thread", "stop")}
-        out.update({"ok": True, "running": running})
+        out.update({"ok": True, "running": running,
+                    "gain_units": float(st.get("gain_units") or _GAIN_UNITS),
+                    "kd_units": float(st.get("kd_units") or _KD_UNITS)})
+        return out
+
+    if action == "tune":
+        # Live PD tune for referee sessions (2026-08-27, "a little slow").
+        # Takes effect on the NEXT servo tick — no restart, no reload.
+        # Clamps: gain 40 oscillated on a static object (2026-08-21) and the
+        # 08-21 jitters came back with hot gain, so the rails are tight.
+        out: dict[str, Any] = {"ok": True, "running": running}
+        if params.get("reset"):
+            st.pop("gain_units", None)
+            st.pop("kd_units", None)
+        else:
+            if params.get("gain") is not None:
+                st["gain_units"] = max(5.0, min(35.0, float(params["gain"])))
+            if params.get("kd") is not None:
+                st["kd_units"] = max(0.0, min(80.0, float(params["kd"])))
+        out["gain_units"] = float(st.get("gain_units") or _GAIN_UNITS)
+        out["kd_units"] = float(st.get("kd_units") or _KD_UNITS)
+        out["defaults"] = {"gain_units": _GAIN_UNITS, "kd_units": _KD_UNITS}
         return out
 
     if action == "stop":
@@ -1156,7 +1181,8 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
                 "target": (g.get("_attention_state_obj") or {}).get("target"),
                 "period_s": _PERIOD_S, "max_deg_s": _MAX_UNITS * _UNIT_DEG_S}
 
-    return {"ok": False, "error": f"unknown action {action!r} — start|stop|status"}
+    return {"ok": False,
+            "error": f"unknown action {action!r} — start|stop|status|tune"}
 
 
 register_tool(
