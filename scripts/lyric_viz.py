@@ -68,23 +68,34 @@ def transcribe_words(audio: Path, device: str = "cuda") -> list[Word]:
     model = None
     for dev, compute in chain:
         try:
-            with logged_load(f"whisper:distil-large-v3:{dev}:{compute}:lyric_viz"):
-                model = WhisperModel("distil-large-v3", device=dev,
+            with logged_load(f"whisper:large-v3-turbo:{dev}:{compute}:lyric_viz"):
+                model = WhisperModel("large-v3-turbo", device=dev,
                                      compute_type=compute)
             break
         except Exception as e:
             print(f"[lyric_viz] whisper on {dev} failed ({e!r}), trying next")
     if model is None:
         raise RuntimeError("no whisper backend loaded")
+    # MUSIC settings (2026-08-26, the Chipped White Car sync bug): VAD is
+    # speech-tuned and EATS sung vocals — distil+VAD heard 38 of 235 words;
+    # large-v3-turbo with VAD off heard 233. Never VAD a song.
     segments, _info = model.transcribe(str(audio), word_timestamps=True,
-                                       vad_filter=True)
+                                       vad_filter=False, beam_size=5,
+                                       condition_on_previous_text=False)
     words: list[Word] = []
+    segs: list[tuple[float, float, list[Word]]] = []
     for seg in segments:
+        sw = []
         for w in (seg.words or []):
             t = w.word.strip()
             if t:
-                words.append(Word(float(w.start), float(w.end), t))
-    print(f"[lyric_viz] transcribed {len(words)} words")
+                wd = Word(float(w.start), float(w.end), t)
+                words.append(wd)
+                sw.append(wd)
+        if sw:
+            segs.append((sw[0].start, sw[-1].end, sw))
+    print(f"[lyric_viz] transcribed {len(words)} words / {len(segs)} segments")
+    transcribe_words.last_segments = segs
     return words
 
 
@@ -95,11 +106,23 @@ def _norm(s: str) -> str:
     return _NORM_RE.sub("", s.lower())
 
 
-def align_to_lyrics(heard: list[Word], lyrics_text: str) -> list[list[Word]]:
+def align_to_lyrics(heard: list[Word], lyrics_text: str,
+                    segments: "list | None" = None) -> list[list[Word]]:
     """Written lyrics = ground truth TEXT (and line breaks); whisper = TIME.
+
+    v2 (2026-08-26, after Chipped White Car drifted): when whisper SEGMENTS
+    are available, align at LINE level with a monotonic DP and gap penalties —
+    repeated chorus lines ("(Late night lover)" x8) made the old global word
+    matcher pin text to the WRONG chorus instance and drift whole sections.
+    Line-level context + ordered path with skip costs kills that class.
 
     Section tags like [Verse] / [Hook] / [Chorus 2] are structure, not lyrics —
     dropped before alignment (Zeke's lyric PDFs use them)."""
+    if segments:
+        out = _align_lines_dp(segments, lyrics_text)
+        if out is not None:
+            return out
+    # fallback: the v1 global word matcher
     lines_raw = [ln.strip() for ln in lyrics_text.splitlines()
                  if ln.strip() and not re.fullmatch(r"\[[^\]]+\]", ln.strip())]
     written: list[tuple[int, str]] = []
@@ -143,6 +166,91 @@ def align_to_lyrics(heard: list[Word], lyrics_text: str) -> list[list[Word]]:
     print(f"[lyric_viz] aligned {len(known)}/{n} written words "
           f"({len(out)} lines)")
     return [ln for ln in out if ln]
+
+
+def _align_lines_dp(segments: list, lyrics_text: str) -> "list[list[Word]] | None":
+    """Monotonic line↔segment alignment with gap penalties.
+
+    Each written LINE matches at most one whisper segment, in order. Skipping
+    a line (not sung / mumbled) or a segment (adlib, instrumental vocalizing)
+    is allowed but costs — so mapping chorus-1 text onto chorus-2 audio now
+    requires paying for a whole skipped chorus of segments, which the path
+    won't do when the true instance is available."""
+    lines_raw = [ln.strip() for ln in lyrics_text.splitlines()
+                 if ln.strip() and not re.fullmatch(r"\[[^\]]+\]", ln.strip())]
+    if not lines_raw or not segments:
+        return None
+    line_norm = [" ".join(_norm(w) for w in ln.split()) for ln in lines_raw]
+    seg_norm = [" ".join(_norm(w.text) for w in sw) for _, _, sw in segments]
+    L, S = len(lines_raw), len(segments)
+    sim = np.zeros((L, S), np.float32)
+    for i in range(L):
+        for j in range(S):
+            sim[i, j] = difflib.SequenceMatcher(
+                a=line_norm[i], b=seg_norm[j], autojunk=False).ratio()
+    SKIP_LINE, SKIP_SEG, MIN_SIM = -0.25, -0.06, 0.40
+    # dp[i][j]: best score using lines[:i], segments[:j]
+    dp = np.full((L + 1, S + 1), -1e9, np.float32)
+    back = np.zeros((L + 1, S + 1), np.int8)     # 1=match 2=skip line 3=skip seg
+    dp[0, :] = np.arange(S + 1) * SKIP_SEG
+    dp[:, 0] = np.arange(L + 1) * SKIP_LINE
+    for i in range(1, L + 1):
+        for j in range(1, S + 1):
+            m = dp[i - 1, j - 1] + (sim[i - 1, j - 1]
+                                    if sim[i - 1, j - 1] >= MIN_SIM else -0.5)
+            sl = dp[i - 1, j] + SKIP_LINE
+            ss = dp[i, j - 1] + SKIP_SEG
+            best = max(m, sl, ss)
+            dp[i, j] = best
+            back[i, j] = 1 if best == m else (2 if best == sl else 3)
+    # walk back
+    pairs: dict[int, int] = {}
+    i, j = L, S
+    while i > 0 and j > 0:
+        b = back[i, j]
+        if b == 1:
+            if sim[i - 1, j - 1] >= MIN_SIM:
+                pairs[i - 1] = j - 1
+            i, j = i - 1, j - 1
+        elif b == 2:
+            i -= 1
+        else:
+            j -= 1
+    if len(pairs) < max(2, L // 6):
+        print(f"[lyric_viz] line-DP matched only {len(pairs)}/{L} lines — "
+              f"falling back to global matcher")
+        return None
+    out: list[list[Word]] = []
+    matched_words = 0
+    for li, ln in enumerate(lines_raw):
+        wtexts = ln.split()
+        if li in pairs:
+            s0, s1, sw = segments[pairs[li]]
+            # word-level match inside the segment for precise times
+            smw = difflib.SequenceMatcher(
+                a=[_norm(w) for w in wtexts],
+                b=[_norm(w.text) for w in sw], autojunk=False)
+            starts: list[float | None] = [None] * len(wtexts)
+            ends: list[float | None] = [None] * len(wtexts)
+            for blk in smw.get_matching_blocks():
+                for k in range(blk.size):
+                    starts[blk.a + k] = sw[blk.b + k].start
+                    ends[blk.a + k] = sw[blk.b + k].end
+                    matched_words += 1
+            # fill gaps linearly across the segment span
+            span = max(0.2, s1 - s0)
+            for k in range(len(wtexts)):
+                if starts[k] is None:
+                    frac = k / max(1, len(wtexts))
+                    starts[k] = s0 + frac * span
+                    ends[k] = min(s1, starts[k] + span / max(1, len(wtexts)))
+            out.append([Word(float(starts[k]), float(ends[k]), wtexts[k])
+                        for k in range(len(wtexts))])
+        # unmatched lines are DROPPED from display (not sung ≠ on screen —
+        # showing them at guessed times is exactly the drift Zeke saw)
+    print(f"[lyric_viz] line-DP aligned {len(pairs)}/{L} lines "
+          f"({matched_words} word anchors); unsung lines dropped")
+    return out if out else None
 
 
 def lines_from_transcript(heard: list[Word], max_words: int = 6,
@@ -1363,9 +1471,11 @@ def main() -> int:
         lines: list[list[Word]] = []
     else:
         heard = transcribe_words(args.audio, args.device)
+        segs = getattr(transcribe_words, "last_segments", None)
         if args.lyrics and args.lyrics.is_file():
             lines = align_to_lyrics(heard,
-                                    args.lyrics.read_text(encoding="utf-8"))
+                                    args.lyrics.read_text(encoding="utf-8"),
+                                    segments=segs)
         else:
             lines = lines_from_transcript(heard)
 
