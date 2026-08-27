@@ -53,13 +53,17 @@ _HAND_BONE = (255, 180, 0)      # cyan-ish (BGR) skeleton
 _HAND_JOINT = (0, 230, 255)     # yellow joints
 _HAND_LABEL = (0, 230, 255)
 
-# ── Box/landmark smoothing (2026-07-08) ──────────────────────────────────────
-# Detection runs at ~5fps (insight_every_n=6) but annotate_frame runs at 30fps,
-# so drawing raw _face_results froze the box for 6 frames then snapped it —
-# Zeke saw the tracker "lagging behind" his face. Exponential easing toward the
-# newest detection each frame turns the freeze-and-jump into a smooth glide.
-# _SMOOTH_ALPHA=0.35 reaches ~92% of a new target within one detection interval.
-_SMOOTH_ALPHA = 0.35
+# ── Box/landmark smoothing (2026-07-08; RETIRED 2026-08-27) ──────────────────
+# ORIGINAL (5fps-detection era, insight_every_n=6): drawing raw _face_results
+# froze the box for 6 frames then snapped it, so alpha 0.35 turned freeze-and-
+# jump into a glide. SINCE the 08-27 all-30fps rebuild the face worker runs
+# ~22-30fps and easing only ADDED visible trail.
+# ZEKE'S DIRECTIVE (08-27 evening): the orb mini-cam is a DIAGNOSTIC surface —
+# "what I really want the little mini cam in your app to be is exactly what
+# you're seeing... if it's not true and accurate to what you're seeing, I
+# can't help you diagnose." Alpha 1.0 = raw detections, zero cosmetics. Do not
+# re-add easing here; prettiness costs him diagnostic truth.
+_SMOOTH_ALPHA = 1.0
 # Snap (no easing) when the target center jumps more than this fraction of the
 # frame diagonal — a real teleport (camera cut, person swap), not motion.
 _SNAP_FRAC = 0.25
