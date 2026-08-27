@@ -4147,11 +4147,11 @@ def anchor_mark(kind: str, summary: str, person_id: str = "zeke",
 
 
 def _iris_video_capture_loop(g: dict[str, Any]) -> None:
-    """Phase 1 video capture loop — InsightFace at 5fps over a 15fps capture
-    using DSHOW (more reliable than MSMF on this Windows machine for the
-    `USB Live Camera`). Fork of brain/background_ticks._video_frame_capture_thread
-    minus the signal-bus / expression / eye-tracker / video-memory branches —
-    those are Phase 2+ wiring and not needed for the green-box demo.
+    """Video capture loop — 30fps deadline-paced capture with face/hands/
+    expression/attention each in their own 30Hz worker thread (all-equal-30,
+    Zeke directive 2026-08-27). DSHOW (more reliable than MSMF on this Windows
+    machine for the `USB Live Camera`). Fork of
+    brain/background_ticks._video_frame_capture_thread, since heavily diverged.
 
     Pushes annotated frames into brain/frame_store so the orb's HTTP camera
     endpoint serves them via shim's frame_store.get_buffered_frame() fast path.
@@ -4176,6 +4176,14 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
         c = cv2.VideoCapture(0, cv2.CAP_DSHOW)
         c.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         c.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        # 2026-08-27 (all-30fps): ask for MJPG + 30fps explicitly — some UVC
+        # modes default to a lower internal rate, and then cap.read() itself
+        # caps the loop no matter how well we pace. Failed sets are harmless.
+        try:
+            c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            c.set(cv2.CAP_PROP_FPS, 30)
+        except Exception:
+            pass
         return c
 
     cap = None
@@ -4189,23 +4197,24 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
             cap.release()
             cap = None
         else:
-            print("[iris_video] camera opened (DSHOW), streaming at 15fps", file=sys.stderr, flush=True)
+            print("[iris_video] camera opened (DSHOW), streaming at 30fps target", file=sys.stderr, flush=True)
 
-    # 2026-05-20: bumped capture to 30fps for smoother orb camera feed.
-    # Detect cadences scaled (insight 3->6, expr 5->10, attn 30->60) so the
-    # per-second detect rate stays the same — no CUDA cost change, just more
-    # frames pushed to frame_store for the orb to sample at higher rate.
-    # Trade-off: ~2x CPU on capture path (cheap), no GPU change.
-    interval = 1.0 / 30.0
-    insight_every_n = 6   # ~5fps face detection (unchanged)
-    expr_every_n = 10     # ~3fps expression detection (unchanged)
-    attn_every_n = 60     # ~0.5fps attention/gaze (unchanged)
-    hands_every_n = 10    # ~3fps hand/gesture step (2026-07-13, Zeke directive) —
-                          # CPU-only (XNNPACK, ~17ms/frame, ZERO VRAM), and it only
-                          # runs at all while the face step sees someone (person-
-                          # present gate) AND g["_hands_enabled"] is true (hands_rest
-                          # tool). Model lazy-loads on the first gated frame.
-    frame_idx = 0
+    # ── 2026-08-27 ALL-30FPS restructure (Zeke: "let's make it all 30 FPS so
+    # it's all equal"). Two changes:
+    #   1. The capture loop is DEADLINE-paced now. The old loop slept a fixed
+    #      33ms on top of cap.read()'s own ~33ms block, so "30fps" really
+    #      pushed ~19fps (measured 2026-08-27 via live_frame age-sawtooth).
+    #   2. Perception steps (face / hands / expression / attention) moved OFF
+    #      the capture thread into per-step worker threads, each self-paced at
+    #      30Hz over the newest frame in g["_raw_frame_slot"]. Inline at 30fps
+    #      they would serialize (~29ms face + ~17ms hands + 2× facemesh) and
+    #      drag the whole loop to ~10fps — workers make each step independent.
+    # Person gates (empty room = capture only, near-zero perception compute):
+    #   hands — existing gate kept; expr/attn — NEW gate on face presence while
+    #   InsightFace is up (attn reports "absent" itself, cheap, no facemesh);
+    #   if InsightFace is down, expr/attn run ungated (pre-08-27 behavior).
+    interval = 1.0 / 30.0        # capture pace target
+    step_period = 1.0 / 30.0     # perception workers' pace target ("all equal")
 
     from brain.camera_annotator import annotate_frame as _annotate
     from brain.frame_store import push_frame as _push_frame
@@ -4215,6 +4224,203 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
         _hands_mod = None
         print(f"[iris_video] iris_hands unavailable (non-fatal): {_he!r}",
               file=sys.stderr, flush=True)
+
+    def _insight_up() -> bool:
+        ins = g.get("_insight_face")
+        return ins is not None and getattr(ins, "available", False)
+
+    # ── Perception steps (bodies moved verbatim from the old inline loop) ───
+
+    def _face_step(frame) -> None:
+        insight = g.get("_insight_face")
+        if insight is None or not getattr(insight, "available", False):
+            time.sleep(0.2)      # engine not up (yet) — don't spin
+            return
+        try:
+            results = insight.analyze_frame(frame)
+            prev_pid = g.get("_recognized_person_id") or "unknown"
+            prev_face_count = len(g.get("_face_results") or [])
+            g["_face_results"] = results
+            if results:
+                best = max(results, key=lambda r: float(r.get("confidence") or 0.0))
+                g["_recognized_person_id"] = str(best.get("person_id") or "unknown")
+                g["_recognized_confidence"] = float(best.get("confidence") or 0.0)
+                g["_recognized_age"] = best.get("age", 0)
+                g["_face_age"] = best.get("age", 0)
+                g["_recognized_gender"] = best.get("gender", "?")
+                g["_face_gender"] = best.get("gender", "?")
+            else:
+                g["_recognized_person_id"] = "unknown"
+                g["_recognized_confidence"] = 0.0
+            # Phase 26: fire signal-bus events on transitions so downstream
+            # subscribers (heartbeat, mood, journal hooks) see them. Only fire
+            # on TRANSITION, not every tick.
+            # Phase 36: track _person_present_since_ts for
+            # current_person.time_at_machine in orb snapshot.
+            try:
+                bus = g.get("_signal_bus")
+                cur_pid = g.get("_recognized_person_id") or "unknown"
+                cur_face_count = len(results or [])
+                if cur_face_count > 0 and prev_face_count == 0:
+                    # Just appeared — start the present-since clock.
+                    g["_person_present_since_ts"] = time.time()
+                    if bus is not None:
+                        bus.fire("face_appeared",
+                                 data={"person_id": cur_pid,
+                                       "confidence": g.get("_recognized_confidence")},
+                                 priority="medium")
+                elif cur_face_count == 0 and prev_face_count > 0:
+                    # Lost — clear the clock.
+                    g["_person_present_since_ts"] = 0.0
+                    if bus is not None:
+                        bus.fire("face_lost",
+                                 data={"prior_person_id": prev_pid},
+                                 priority="medium")
+                elif cur_pid != prev_pid and cur_pid != "unknown":
+                    # Different person — restart the clock.
+                    g["_person_present_since_ts"] = time.time()
+                    if bus is not None:
+                        bus.fire("face_changed",
+                                 data={"from": prev_pid, "to": cur_pid,
+                                       "confidence": g.get("_recognized_confidence")},
+                                 priority="medium")
+            except Exception:
+                pass
+            # ── Temporal face filter (wired 2026-08-07) ────────────────────
+            # Imported per-iteration on purpose so the gate can be tuned via
+            # brain_hot_swap without restarting the runtime.
+            try:
+                from brain import face_tracking as _ft
+                _ftr = _ft.tick_from_capture(
+                    g, face_results=results,
+                    recognized_person_id=g.get("_recognized_person_id"),
+                    similarity=g.get("_recognized_confidence"),
+                    frame_ts=time.time())
+                g["_face_tracking_last"] = _ftr
+                if _ftr.get("promoted_new_person"):
+                    print(f"[iris_video] new person promoted: "
+                          f"{_ftr.get('temp_id')}", flush=True)
+            except Exception as _fte:
+                print(f"[iris_video] face_tracking tick error: {_fte!r}",
+                      file=sys.stderr, flush=True)
+        except Exception as _ie:
+            print(f"[iris_video] insight analyze error: {_ie!r}", file=sys.stderr, flush=True)
+
+    def _hands_step(frame) -> None:
+        # brain/iris_hands.py handles the lazy model, wave heuristic, and
+        # transition-fired signal events (hand_wave / gesture_detected /
+        # gesture_cleared).
+        try:
+            _hands_mod.process_frame(frame, g)
+        except Exception as _hge:
+            print(f"[iris_video] hands step error (non-fatal): {_hge!r}",
+                  file=sys.stderr, flush=True)
+
+    def _hands_gate() -> bool:
+        return (_hands_mod is not None and bool(g.get("_hands_enabled", True))
+                and bool(g.get("_face_results") or []))
+
+    def _expr_step(frame) -> None:
+        et = g.get("_expression_detector")
+        if et is None or not getattr(et, "available", False):
+            time.sleep(0.2)
+            return
+        try:
+            expr = et.detect_expression(frame)
+            if expr:
+                new_expr = str(expr.get("dominant", "") or "")
+                prev_expr = str(g.get("_current_expression") or "")
+                g["_current_expression"] = new_expr
+                # Fire on transition only.
+                if new_expr and new_expr != prev_expr:
+                    try:
+                        bus = g.get("_signal_bus")
+                        if bus is not None:
+                            bus.fire("expression_changed",
+                                     data={"from": prev_expr, "to": new_expr},
+                                     priority="low")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _expr_gate() -> bool:
+        # Face-presence gate only while InsightFace is actually up; if the face
+        # engine is down, fall back to ungated (old behavior).
+        return (not _insight_up()) or bool(g.get("_face_results") or [])
+
+    def _attn_step(frame) -> None:
+        ez = g.get("_eye_tracker")
+        if ez is None or not getattr(ez, "available", False):
+            time.sleep(0.2)
+            return
+        try:
+            prev_attn = str(g.get("_attention_state") or "")
+            if _insight_up() and not (g.get("_face_results") or []):
+                # Nobody in frame per the (30Hz-fresh) face step — report
+                # absent without paying for a facemesh pass.
+                new_attn = "absent"
+                g["_attention_state"] = "absent"
+                g["_looking_at_screen"] = False
+            else:
+                new_attn = ez.get_attention_state(frame)
+                g["_attention_state"] = new_attn
+                g["_looking_at_screen"] = bool(ez.is_looking_at_screen(frame))
+                if getattr(ez, "calibrated", False):
+                    g["_gaze_region"] = ez.get_gaze_region(frame) or ""
+            # Fire on transition only.
+            if new_attn and new_attn != prev_attn:
+                try:
+                    bus = g.get("_signal_bus")
+                    if bus is not None:
+                        bus.fire("attention_changed",
+                                 data={"from": prev_attn, "to": new_attn},
+                                 priority="low")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _perception_worker(name: str, step_fn, gate_fn=None) -> None:
+        """30Hz self-paced worker over the newest raw frame. Never processes
+        the same frame twice; sleeps the remainder of its 33ms budget after
+        each pass (a step slower than 33ms just runs flat-out at its own
+        natural rate — no backlog, always the freshest frame)."""
+        last_ts = 0.0
+        while True:
+            try:
+                if _cam_paused():
+                    time.sleep(0.5)
+                    continue
+                slot = g.get("_raw_frame_slot")
+                if not slot or slot[0] <= last_ts:
+                    time.sleep(0.004)            # wait for a NEW frame
+                    continue
+                if gate_fn is not None and not gate_fn():
+                    last_ts = slot[0]
+                    time.sleep(step_period)      # gated off — idle at pace
+                    continue
+                t0 = time.time()
+                last_ts = slot[0]
+                step_fn(slot[1])
+                dt = time.time() - t0
+                g[f"_perc_{name}_last_ms"] = round(dt * 1000.0, 1)
+                time.sleep(max(0.0, step_period - dt))
+            except Exception as _we:
+                print(f"[iris_video] {name} worker error: {_we!r}",
+                      file=sys.stderr, flush=True)
+                time.sleep(1.0)
+
+    for _wname, _wfn, _wgate in (
+        ("face", _face_step, None),
+        ("hands", _hands_step, _hands_gate),
+        ("expr", _expr_step, _expr_gate),
+        ("attn", _attn_step, None),
+    ):
+        threading.Thread(target=_perception_worker, args=(_wname, _wfn, _wgate),
+                         daemon=True, name=f"iris-{_wname}-worker").start()
+    print("[iris_video] perception workers started — face/hands/expr/attn @ 30Hz targets",
+          file=sys.stderr, flush=True)
 
     while True:
         try:
@@ -4235,107 +4441,16 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                     time.sleep(1.0)
                     continue
                 print("[iris_video] camera reopened (body resumed)", file=sys.stderr, flush=True)
+            _t0 = time.time()
             ok, frame = cap.read()
             if not ok or frame is None:
                 time.sleep(interval)
                 continue
-            frame_idx += 1
-
-            insight = g.get("_insight_face")
-            if insight is not None and getattr(insight, "available", False):
-                if frame_idx % insight_every_n == 0:
-                    try:
-                        results = insight.analyze_frame(frame)
-                        prev_pid = g.get("_recognized_person_id") or "unknown"
-                        prev_face_count = len(g.get("_face_results") or [])
-                        g["_face_results"] = results
-                        if results:
-                            best = max(results, key=lambda r: float(r.get("confidence") or 0.0))
-                            g["_recognized_person_id"] = str(best.get("person_id") or "unknown")
-                            g["_recognized_confidence"] = float(best.get("confidence") or 0.0)
-                            g["_recognized_age"] = best.get("age", 0)
-                            g["_face_age"] = best.get("age", 0)
-                            g["_recognized_gender"] = best.get("gender", "?")
-                            g["_face_gender"] = best.get("gender", "?")
-                        else:
-                            g["_recognized_person_id"] = "unknown"
-                            g["_recognized_confidence"] = 0.0
-                        # Phase 26: fire signal-bus events on transitions so
-                        # downstream subscribers (heartbeat, mood, journal hooks)
-                        # see them. Only fire on TRANSITION, not every tick.
-                        # Phase 36: track _person_present_since_ts for
-                        # current_person.time_at_machine in orb snapshot.
-                        try:
-                            bus = g.get("_signal_bus")
-                            cur_pid = g.get("_recognized_person_id") or "unknown"
-                            cur_face_count = len(results or [])
-                            if cur_face_count > 0 and prev_face_count == 0:
-                                # Just appeared — start the present-since clock.
-                                g["_person_present_since_ts"] = time.time()
-                                if bus is not None:
-                                    bus.fire("face_appeared",
-                                             data={"person_id": cur_pid,
-                                                   "confidence": g.get("_recognized_confidence")},
-                                             priority="medium")
-                            elif cur_face_count == 0 and prev_face_count > 0:
-                                # Lost — clear the clock.
-                                g["_person_present_since_ts"] = 0.0
-                                if bus is not None:
-                                    bus.fire("face_lost",
-                                             data={"prior_person_id": prev_pid},
-                                             priority="medium")
-                            elif cur_pid != prev_pid and cur_pid != "unknown":
-                                # Different person — restart the clock.
-                                g["_person_present_since_ts"] = time.time()
-                                if bus is not None:
-                                    bus.fire("face_changed",
-                                             data={"from": prev_pid, "to": cur_pid,
-                                                   "confidence": g.get("_recognized_confidence")},
-                                             priority="medium")
-                        except Exception:
-                            pass
-                        # ── Temporal face filter (wired 2026-08-07) ──────────
-                        # brain/face_tracking.update() existed since May and had
-                        # NEVER run in this runtime: its only caller lives in
-                        # brain/background_ticks.py, reachable only from
-                        # avaagent.py, which Iris does not run. So "an unknown
-                        # face that persists 12s gets promoted to a tracked
-                        # person" was a feature on paper only.
-                        # Imported per-iteration on purpose so the gate can be
-                        # tuned via brain_hot_swap without restarting the
-                        # runtime (a running while-loop keeps its old code
-                        # object, so the CALL SITE can never be hot-swapped —
-                        # only what it calls into).
-                        try:
-                            from brain import face_tracking as _ft
-                            _ftr = _ft.tick_from_capture(
-                                g, face_results=results,
-                                recognized_person_id=g.get("_recognized_person_id"),
-                                similarity=g.get("_recognized_confidence"),
-                                frame_ts=time.time())
-                            g["_face_tracking_last"] = _ftr
-                            if _ftr.get("promoted_new_person"):
-                                print(f"[iris_video] new person promoted: "
-                                      f"{_ftr.get('temp_id')}", flush=True)
-                        except Exception as _fte:
-                            print(f"[iris_video] face_tracking tick error: {_fte!r}",
-                                  file=sys.stderr, flush=True)
-                    except Exception as _ie:
-                        print(f"[iris_video] insight analyze error: {_ie!r}", file=sys.stderr, flush=True)
-
-            # ── Hands step (2026-07-13) — gesture understanding, person-gated ──
-            # Runs ONLY when someone is in frame (face step's results non-empty):
-            # empty room = zero hand compute. brain/iris_hands.py handles the
-            # lazy model, wave heuristic, and transition-fired signal events
-            # (hand_wave / gesture_detected / gesture_cleared).
-            if (_hands_mod is not None and frame_idx % hands_every_n == 0
-                    and g.get("_hands_enabled", True)
-                    and (g.get("_face_results") or [])):
-                try:
-                    _hands_mod.process_frame(frame, g)
-                except Exception as _hge:
-                    print(f"[iris_video] hands step error (non-fatal): {_hge!r}",
-                          file=sys.stderr, flush=True)
+            # Publish the newest RAW frame for the perception workers. Single
+            # atomic tuple swap under the GIL; workers only ever read it, and
+            # the capture path never draws on the raw frame (annotate_frame is
+            # a pass-through since 2026-08-21), so sharing without copy is safe.
+            g["_raw_frame_slot"] = (time.time(), frame)
 
             # Phase 1.5 enrollment hook — save the RAW pre-annotation frame to
             # disk when an enrollment is in progress. Throttled by interval_s.
@@ -4387,58 +4502,6 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
                 except Exception as _ee:
                     print(f"[iris_video] enroll error: {_ee!r}", file=sys.stderr, flush=True)
 
-            # Phase 2 — expression detection (MediaPipe-backed). Throttled
-            # because it runs face mesh per call. Stores dominant label on _g
-            # for orb snapshot (current_person.expression) and annotator overlay.
-            et = g.get("_expression_detector")
-            if et is not None and getattr(et, "available", False):
-                if frame_idx % expr_every_n == 0:
-                    try:
-                        expr = et.detect_expression(frame)
-                        if expr:
-                            new_expr = str(expr.get("dominant", "") or "")
-                            prev_expr = str(g.get("_current_expression") or "")
-                            g["_current_expression"] = new_expr
-                            # Fire on transition only.
-                            if new_expr and new_expr != prev_expr:
-                                try:
-                                    bus = g.get("_signal_bus")
-                                    if bus is not None:
-                                        bus.fire("expression_changed",
-                                                 data={"from": prev_expr, "to": new_expr},
-                                                 priority="low")
-                                except Exception:
-                                    pass
-                    except Exception as _ee:
-                        pass
-
-            # Phase 2 — attention / gaze. eye_tracker.get_attention_state returns
-            # one of focused/distracted/away/absent. _looking_at_screen drives
-            # the "should I speak" gate downstream. Heavily throttled (~0.5fps)
-            # since the orb just polls snapshot at 5s anyway.
-            ez = g.get("_eye_tracker")
-            if ez is not None and getattr(ez, "available", False):
-                if frame_idx % attn_every_n == 0:
-                    try:
-                        prev_attn = str(g.get("_attention_state") or "")
-                        new_attn = ez.get_attention_state(frame)
-                        g["_attention_state"] = new_attn
-                        g["_looking_at_screen"] = bool(ez.is_looking_at_screen(frame))
-                        if getattr(ez, "calibrated", False):
-                            g["_gaze_region"] = ez.get_gaze_region(frame) or ""
-                        # Fire on transition only.
-                        if new_attn and new_attn != prev_attn:
-                            try:
-                                bus = g.get("_signal_bus")
-                                if bus is not None:
-                                    bus.fire("attention_changed",
-                                             data={"from": prev_attn, "to": new_attn},
-                                             priority="low")
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-
             try:
                 annotated = _annotate(frame, g.get("_face_results"), g)
             except Exception as _ae:
@@ -4450,7 +4513,12 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
             except Exception:
                 pass
 
-            time.sleep(interval)
+            # Deadline pacing: sleep only the REMAINDER of the 33ms budget —
+            # cap.read()'s block time counts against the budget, it doesn't
+            # stack on top of it.
+            _delay = interval - (time.time() - _t0)
+            if _delay > 0:
+                time.sleep(_delay)
         except Exception as e:
             print(f"[iris_video] loop error: {e!r}", file=sys.stderr, flush=True)
             # Release and set cap=None — let the top-of-loop recover. Blindly reopening here
@@ -4525,7 +4593,7 @@ def _eager_init_engines() -> None:
                     daemon=True,
                     name="iris-video-capture",
                 ).start()
-                print("[iris_runtime] video capture thread started (15fps capture, 5fps face detect)", file=sys.stderr, flush=True)
+                print("[iris_runtime] video capture thread started (30fps capture, 30Hz perception workers)", file=sys.stderr, flush=True)
             else:
                 print("[iris_runtime] InsightFace not available — camera will serve raw frames without overlays", file=sys.stderr, flush=True)
         except Exception as _ve:
