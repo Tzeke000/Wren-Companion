@@ -762,10 +762,137 @@ class Renderer:
             self._viz_bars_center(img, i, a)
         elif v == "wave":
             self._viz_wave(img, i, a)
+        elif v == "tunnel":
+            self._viz_tunnel(img, i, a)
+        elif v == "supernova":
+            self._viz_supernova(img, i, a)
+        elif v == "kaleido":
+            self._viz_kaleido(img, i, a)
         else:
             self._viz_bars_bottom(img, i, a)
         if self.style.particles:
             self._viz_particles(img, i, a)
+
+    # -- NEW CENTERPIECES (Zeke 08-27: "main visualization needs to be
+    #    something different, more complicated") --------------------------
+
+    def _viz_tunnel(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """Bass-reactive 3D tunnel fly-through: spectrum-deformed polygon
+        rings receding to a vanishing point; bass drives fly speed, highs
+        spin it, the drop kicks both."""
+        cx, cy = self.W // 2, int(self.H * 0.45)
+        drop = bool(a.drop[i])
+        ph = getattr(self, "_tun_phase", 0.0)
+        rot = getattr(self, "_tun_rot", 0.0)
+        ph += 0.10 + 0.55 * a.bass[i] + (0.35 if drop else 0.0)
+        rot += 0.004 + 0.030 * a.high[i] + (0.012 if drop else 0.0)
+        self._tun_phase, self._tun_rot = ph, rot
+        n_r, n_v = 16, 40
+        th = np.linspace(0, 2 * np.pi, n_v, endpoint=False)
+        # spectrum wraps the ring, mirrored so bass sits top+bottom
+        bi = (np.abs(((th / (2 * np.pi)) * 2 * NBARS) % (2 * NBARS)
+                     - NBARS)).astype(int) % NBARS
+        deform = 1.0 + a.bars[i, bi] * (0.30 + 0.45 * a.bass[i])
+        frac = ph % 1.0
+        for k in range(n_r, 0, -1):
+            z = (k - frac) / n_r
+            if z <= 0.03:
+                continue
+            r = (self.H * 0.085) / z
+            if r > self.H * 1.6:
+                continue
+            wob = 0.10 * np.sin(k * 0.9 + ph * 0.7)
+            thk = th + rot * (1.0 + 0.12 * k) + wob
+            xs = cx + r * deform * np.cos(thk)
+            ys = cy + r * deform * 0.82 * np.sin(thk)
+            pts = np.stack([xs, ys], 1).astype(np.int32).reshape(-1, 1, 2)
+            fade = np.clip(1.15 - z, 0, 1) ** 1.6
+            col = self._pal(k % 4) * (0.20 + 0.80 * fade) \
+                * (0.45 + 0.75 * a.rms[i])
+            cv2.polylines(img, [pts], True,
+                          tuple(float(x) for x in col),
+                          max(1, int(1 + 2.5 * fade * (0.5 + a.bass[i]))),
+                          cv2.LINE_AA)
+
+    def _viz_supernova(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """Orbiting particle cloud around the logo that DETONATES on the
+        drop, with expanding shockwave rings on every kick."""
+        if getattr(self, "_nova", None) is None:
+            rng = np.random.default_rng(3)
+            n = 420
+            self._nova = np.stack([rng.uniform(0, 2 * np.pi, n),
+                                   rng.uniform(0.45, 1.0, n),
+                                   rng.uniform(0.25, 1.0, n)], 1) \
+                .astype(np.float32)          # angle, radius-norm, size
+            self._nova_burst = 0.0
+            self._shock: list = []
+        cx, cy = self._logo_center()
+        drop = bool(a.drop[i])
+        if a.kick[i]:
+            self._shock.append([self.H * 0.10, 1.0 if drop else 0.45])
+            if drop:
+                self._nova_burst = min(1.6, self._nova_burst + 0.9)
+        p = self._nova
+        p[:, 0] += (0.012 + 0.055 * a.bass[i]) * (0.6 + p[:, 2])
+        burst = self._nova_burst
+        self._nova_burst *= 0.90
+        # orbit OUTSIDE the logo (first cut hid everything behind the helmet)
+        base_r = self.H * (0.30 + 0.06 * a.bass[i])
+        rr = base_r * p[:, 1] * (1.0 + burst * p[:, 2] * 2.8)
+        xs = (cx + rr * np.cos(p[:, 0])).astype(np.int32)
+        ys = (cy + rr * 0.85 * np.sin(p[:, 0])).astype(np.int32)
+        ok = ((xs >= 2) & (xs < self.W - 2) & (ys >= 2) & (ys < self.H - 2))
+        col, col2 = self._pal(), self._pal(1)
+        bright = 0.55 + 0.65 * a.rms[i] + 0.6 * burst
+        layer = np.zeros_like(img)
+        for j in np.where(ok)[0]:
+            c = col if j % 2 else col2
+            sz = 1 if p[j, 2] < 0.6 else 2
+            layer[ys[j] - sz:ys[j] + sz + 1, xs[j] - sz:xs[j] + sz + 1] += \
+                c * (p[j, 2] * bright)
+        keep = []
+        for s in self._shock:
+            s[0] += self.H * 0.020 * (1.0 + a.bass[i])
+            s[1] *= 0.90
+            if s[1] > 0.04 and s[0] < self.H * 1.3:
+                cv2.circle(layer, (cx, cy), int(s[0]),
+                           tuple(float(x) for x in col * s[1] * 1.6),
+                           max(1, int(1 + 5 * s[1])), cv2.LINE_AA)
+                keep.append(s)
+        self._shock = keep
+        # glow pass so the cloud reads as light, not specks
+        img += layer + cv2.GaussianBlur(layer, (0, 0), 4) * 1.4
+
+    def _viz_kaleido(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """Kaleidoscope: renders the radial spectrum, then folds the whole
+        frame through a rotating 6-fold mirror — fractal cathedral look.
+        Logo + lyrics stay crisp on top (drawn after _viz)."""
+        # source content that always crosses the fold wedge: full-width
+        # center bars + radial spokes (v1 folded empty starfield — the rings
+        # sat behind the logo, out of the sampled wedge)
+        self._viz_bars_center(img, i, a)
+        self._viz_radial(img, i, a)
+        q = 2
+        h, w = self.H // q, self.W // q
+        if getattr(self, "_kal_r", None) is None:
+            Y, X = np.mgrid[0:h, 0:w].astype(np.float32)
+            dx, dy = X - w / 2, Y - h / 2
+            self._kal_r = np.sqrt(dx * dx + dy * dy)
+            self._kal_th0 = np.arctan2(dy, dx)
+        rot = getattr(self, "_kal_rot", 0.0) + 0.004 + 0.022 * a.bass[i] \
+            + (0.010 if a.drop[i] else 0.0)
+        self._kal_rot = rot
+        small = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+        seg = np.pi / 3.0
+        theta = np.abs(((self._kal_th0 + rot) % (2 * seg)) - seg)
+        zoom = 1.0 + 0.30 * a.bass[i]
+        mx = (w / 2 + self._kal_r / zoom * np.cos(theta)).astype(np.float32)
+        my = (h * 0.55 + self._kal_r / zoom * np.sin(theta) * 0.6) \
+            .astype(np.float32)
+        fold = cv2.remap(small, mx, my, cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_REFLECT)
+        img[:] = cv2.resize(fold, (self.W, self.H),
+                            interpolation=cv2.INTER_LINEAR) * 1.25
 
     def _pal(self, off: int = 0) -> np.ndarray:
         p = self.style.palette
@@ -1487,6 +1614,16 @@ def main() -> int:
     ap.add_argument("--tiktok", action="store_true",
                     help="one-flag TikTok cut: 9:16, spinning logo, auto-hook "
                          "start, <=30s (see docs/tiktok_playbook.md)")
+    ap.add_argument("--no-strobe", action="store_true",
+                    help="disable the hard white kick-flash on the drop "
+                         "(photosensitivity-safe; everything else unchanged)")
+    ap.add_argument("--viz", default="",
+                    choices=["", "radial", "bars_center", "wave", "tunnel",
+                             "supernova", "kaleido"],
+                    help="override the style's centerpiece visualization")
+    ap.add_argument("--window", default="",
+                    help="render only START:END seconds (e.g. 55:85) — "
+                         "cheap test renders")
     args = ap.parse_args()
     if args.tiktok:
         args.aspect = "9:16"
@@ -1500,6 +1637,13 @@ def main() -> int:
                 "1:1": (1080, 1080)}[args.aspect]
     out = args.out or args.audio.with_suffix(f".{args.style}.mp4")
     style = STYLES[args.style]
+    from dataclasses import replace as _dc_replace
+    if args.no_strobe and style.strobe:
+        style = _dc_replace(style, strobe=False)
+        print("[lyric_viz] strobe DISABLED (--no-strobe); rest of style unchanged")
+    if args.viz:
+        style = _dc_replace(style, viz=args.viz)
+        print(f"[lyric_viz] centerpiece OVERRIDE: viz={args.viz}")
     t0 = time.time()
 
     if args.no_vocals:
@@ -1635,6 +1779,12 @@ def main() -> int:
         pcm = pcm[int(h0 * sr):int(h1 * sr)]
         print(f"[lyric_viz] TIKTOK hook window: {h0:.1f}s -> {h1:.1f}s "
               f"({h1 - h0:.0f}s clip)")
+    elif args.window:
+        w0, w1 = (float(v) for v in args.window.split(":"))
+        w1 = min(w1, duration)
+        f0, f1 = int(w0 * args.fps), int(w1 * args.fps)
+        pcm = pcm[int(w0 * sr):int(w1 * sr)]
+        print(f"[lyric_viz] TEST window: {w0:.1f}s -> {w1:.1f}s")
 
     def frames():
         for i in range(f0, f1):
