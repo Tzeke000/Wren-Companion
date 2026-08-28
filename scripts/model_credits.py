@@ -49,17 +49,29 @@ def main() -> int:
     unknown = [n for n in names if man.get(n, {}).get("license") == "UNKNOWN"]
     need = {}
     free = []
+    unclassified = []
     for n in names:
         e = man.get(n)
         if not e:
             continue
-        if e["license"] == "CC0":
+        lic = e["license"]
+        if lic == "CC0" or lic.startswith("ORIGINAL"):
             free.append(n)
-        elif e["license"].startswith("CC-BY"):
+        elif lic.startswith("CC-BY"):
             need.setdefault(e["author"] or "unknown author", []).append(n)
+        else:
+            # anything that matches no known licence class must SURFACE, not
+            # fall through. ORIGINAL used to land here and the script then
+            # reported "every model used is CC0" — a wrong-but-reassuring
+            # message, which is the dangerous kind.
+            unclassified.append(f"{n} ({lic})")
 
     if free:
-        print(f"CC0 (no credit needed): {', '.join(sorted(free))}")
+        print(f"No attribution required: {', '.join(sorted(free))}")
+    if unclassified:
+        print(f"UNCLASSIFIED LICENCE — CHECK BEFORE PUBLISHING: "
+              f"{', '.join(unclassified)}", file=sys.stderr)
+        unknown = unknown + unclassified
     if missing:
         print(f"NOT IN MANIFEST: {', '.join(missing)}", file=sys.stderr)
     if unknown:
@@ -75,7 +87,7 @@ def main() -> int:
         for a in authors:
             print(f"  {a}: {', '.join(sorted(need[a]))}")
     elif not unknown and not missing:
-        print("\nNothing to credit — every model used is CC0.")
+        print("\nNothing to credit — no model used requires attribution.")
 
     return 2 if (unknown or missing) else 0
 
