@@ -34,29 +34,61 @@ def resolve(short_id: str) -> "str | None":
 
 
 def resolve_full(short_id: str):
-    """-> (uuid, title, license) from the model page, or None."""
+    """-> (uuid, title, license, author) from the model page, or None.
+
+    ⚠ MUST check status_code. A poly.pizza 404 page still embeds
+    `static.poly.pizza/<uuid>.glb` links (suggested models), so scraping a 404
+    yields a real, downloadable — but completely UNRELATED — model. That is how
+    a 'dragon' search produced a dragonfly and 3 files whose licence could not
+    be traced at all. Verified 2026-08-28."""
     try:
         r = requests.get(f"https://poly.pizza/m/{short_id}", headers=UA, timeout=25)
+        if r.status_code != 200:
+            return None
         m = _UUID.search(r.text)
         if not m:
             return None
-        t = re.search(r"<title>([^<]{1,120})</title>", r.text)
-        title = t.group(1).split("|")[0].split(" by ")[0].strip() if t else short_id
-        lic = "CC0" if "CC0" in r.text else (
-            "CC-BY" if re.search(r"CC[- ]BY|Creative Commons", r.text) else "?")
-        return m.group(1), title, lic
+        txt = r.text
+        t = re.search(r"<title[^>]*>([^<]{1,140})</title>", txt)
+        title = (t.group(1).split(" - Free")[0].split("|")[0].strip()
+                 if t else short_id)
+        lic = "CC0" if "CC0" in txt else (
+            "CC-BY 3.0" if re.search(r"CC[- ]?BY", txt) else "UNKNOWN")
+        # /u/<author> is the reliable anchor; <title> carries a react attribute
+        # so a bare `<title>` regex silently matches nothing
+        au = re.search(r'href="/u/([^"]{1,60})"', txt)
+        return m.group(1), title, lic, (au.group(1).strip() if au else None)
     except Exception as e:
         print(f"    resolve failed: {e!r}")
         return None
 
 
 def search_ids(term: str) -> "list[str]":
+    """⚠ CASE-SENSITIVE. poly.pizza ids mix case ('2c3eNMf_J4y'); lowercasing
+    one gives a 404. Anchor on href="/m/..." so nothing else on the page is
+    mistaken for an id."""
     try:
         r = requests.get(f"https://poly.pizza/search/{term}", headers=UA, timeout=30)
-        return sorted(set(re.findall(r"/m/([A-Za-z0-9_-]{8,14})", r.text)))
+        return sorted(set(re.findall(r'href="/m/([A-Za-z0-9_-]{6,20})"', r.text)))
     except Exception as e:
         print(f"  search '{term}' failed: {e!r}")
         return []
+
+
+def record(name: str, sid: str, lic: str, author: "str | None") -> None:
+    """Append to manifest.json. Not optional: without a persisted per-file
+    licence + author, a later rename/prune pass loses attribution, and CC-BY
+    3.0 legally requires naming the author wherever the render is published."""
+    mf = DEST / "manifest.json"
+    import json
+    data = {}
+    if mf.exists():
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data[name] = {"id": sid, "author": author, "license": lic}
+    mf.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def edge_count(path: Path) -> "tuple[int, int] | None":
@@ -159,12 +191,14 @@ def main() -> int:
                 info = resolve_full(sid)
                 if not info:
                     continue
-                uuid, title, lic = info
+                uuid, title, lic, author = info
                 if args.cc0_only and lic != "CC0":
                     continue
+                # name from the model's REAL title, never from the search term
+                # — term-derived names lied ('dragon_1' was a dragonfly)
                 name = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")[:28]
-                if not name:
-                    name = f"{term}_{sid[:5]}"
+                if not name or name.lower() == sid.lower():
+                    name = f"{term}_{sid[:5].lower()}"
                 base, k = name, 2
                 while name in existing:
                     name = f"{base}_{k}"
@@ -173,6 +207,7 @@ def main() -> int:
                     existing.add(name)
                     kept += 1
                     kept_total += 1
+                    record(name, sid, lic, author)
                     manifest.append((name, sid, lic))
         print(f"\nkept {kept_total} new")
         for n, s, l in manifest:

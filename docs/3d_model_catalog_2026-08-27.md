@@ -1,77 +1,93 @@
-# 3D model library — what is ACTUALLY on disk (rewritten 2026-08-28)
+# 3D model library — 57 models, every one licence-verified (2026-08-28)
 
-All files live in `assets/models3d/`. Use with
-`--shape model:<name>` (comma-list to rotate several — see `--shape-every`).
+Files: `assets/models3d/`. Use `--shape model:<name>` (comma-list rotates — see `--shape-every`).
+Machine-readable source of truth: **`assets/models3d/manifest.json`**.
 
-**42 models.** All verified to load through `Renderer._model_mesh` and all inside the
-wireframe edge budget.
+## Before you publish
 
-## Why the edge budget exists (200–4000)
+Run this and paste what it prints:
 
-These render as **wireframes** — every mesh edge drawn as a line. Verified by eye
-2026-08-28: **low-poly reads as the object; dense meshes collapse into an unreadable ball
-of lines.** `scripts/fetch_models.py` enforces 40–4000 edges and *deletes* anything outside
-it rather than leaving it to disappoint someone later. 20+ downloads were rejected on this
-rule alone — cars, motorcycles, city scenes and realistic skulls run 8k–92k edges.
+```
+py scripts/model_credits.py --shape "model:skull_kay,model:heart"
+```
 
-## ★ The naming lesson (2026-08-28)
+It names only the models that legally need crediting and **exits non-zero if any model's
+licence is unverified** — that is a stop sign, not a warning.
 
-The first pass named files after the **search term** that found them. That produced names
-that lied: `dragon_1` was a **dragonfly**, `headphones_2` was a **phone**, `helmet_2` was a
-**top hat**, `star_2` was a **sphere**. Nothing catches this except *rendering every model
-and looking at it* — which I did, in one contact sheet, and then renamed or deleted.
-**A library whose names lie is worse than a smaller honest one.** 9 unidentifiable models
-were deleted outright.
+- **CC0 (7)** — public domain, no credit: `crystal_2`, `gem_green`, `heart_2`, `skull_kay`, `skull_q3`, `skull_q4`, `skull_quaternius`
+- **CC-BY 3.0 (50)** — free, but the author MUST be named in the video description.
 
-⇒ If you add models: render them face-on as wireframes and LOOK before trusting the name.
+## Hard-won rules for adding models
 
-## Licensing — read before posting publicly
-
-Sources are **poly.pizza** (Google Poly archive + living creators). Two licenses appear:
-
-- **CC0** — public domain. No credit needed. Preferred, and what most of this library is.
-- **CC-BY 3.0** — free but **legally requires crediting the author** in the video
-  description/caption.
-
-**The known CC-BY authors in this set** (from the original 08-27 catalog): Jake K-H,
-CreativeTechLab, Alex Safayan, Ian Wall, Poly by Google, Jakob Hippe, Ignition Labs,
-J-Toastie, IvOfficial, Alan Zimmerman, Michal Minecki, smoj, Zsky, Jarlan Perez.
-CC0 authors: **Quaternius**, **Kay Lousberg**.
-
-⚠ The per-file license mapping was not fully preserved through the rename/prune pass.
-**Before Zeke posts anything using a non-skull model, re-check that model's page** — the
-CC0 skulls (Kay Lousberg + Quaternius) are the safe default and are what the current
-Chipped White Car render uses, so **that post is clean**.
+1. **poly.pizza ids are CASE-SENSITIVE.** `2c3eNMf_J4y` is real; `2c3enmf_j4y` is a 404.
+2. **A 404 page still embeds .glb links.** Scraping one downloads a real but COMPLETELY
+   UNRELATED model. This is what made a 'dragon' search yield a dragonfly. `fetch_models.py`
+   now requires HTTP 200 before it will trust a page.
+3. **Name from the model's real title, never the search term** — term-derived names lie.
+4. **Edge budget 40–4000.** These render as wireframes: low-poly reads as the object, dense
+   meshes collapse into an unreadable ball of lines. ~25 downloads were rejected on this.
+5. **Never rename a .glb after download** without updating the manifest — the licence is keyed
+   to the filename, and a rename silently orphans the attribution.
+6. **Unverifiable licence = delete it.** Better a smaller library than a landmine.
 
 ## The library
 
-| Name | Reads as |
-|---|---|
-| `skull_kay`, `skull_quaternius`, `skull_2`, `skull_3`, `skull_4`, `skull_q3`, `skull_q4` | skulls — the workhorses, all legible |
-| `heart`, `heart_2` | hearts |
-| `diamond`, `jewel`, `gem_green` | faceted gems — very low poly, very crisp |
-| `crystal_1`, `crystal_2`, `crystal_3` | crystal shards / clusters |
-| `lightning_bolt`, `lightning_bolt_2` | bolts |
-| `fire`, `campfire` | flames |
-| `moon_1`, `moon_2`, `moon_3`, `sphere_1` | spheres / planetoids |
-| `planets_set`, `sun` | planet row; spiky sun |
-| `star_1` | a real 5-point star |
-| `rocket_1`, `rocket_3` | rockets |
-| `wolf_1`, `wolf_2`, `wolf_3` | standing wolves — ⚠ read well at an angle, edge-on they vanish |
-| `dragonfly` | dragonfly |
-| `figure` | small human figure |
-| `red_car` | low-poly car |
-| `harp`, `headphones_3`, `phone` | instruments/objects |
-| `crown_1`, `crown_2`, `top_hat`, `hat_1`, `dome` | headwear / domes |
-
-## Adding more
-
-```
-py scripts/fetch_models.py --search "crystal,helmet,wolf" --limit 3
-py scripts/fetch_models.py --from-catalog
-py scripts/fetch_models.py mything:PolyPizzaShortId
-```
-★ The short ID in a poly.pizza URL is **not** the asset filename —
-`static.poly.pizza/<shortid>.glb` returns 403. The script scrapes the model page for the
-real `static.poly.pizza/<uuid>.glb`. A downloaded file starting with `<?xm` instead of
-`glTF` is an S3 error page, not a model.
+| Model | Author | Licence |
+|---|---|---|
+| `boombox` | Poly by Google | CC-BY 3.0 |
+| `campfire` | Poly by Google | CC-BY 3.0 |
+| `cd` | Poly by Google | CC-BY 3.0 |
+| `crown_1` | Poly by Google | CC-BY 3.0 |
+| `crown_2` | Potential Synergy | CC-BY 3.0 |
+| `crystal_1` | Sutu Eats Flies | CC-BY 3.0 |
+| `crystal_2` | iPoly3D | CC0 |
+| `crystal_3` | Ashley Alicea | CC-BY 3.0 |
+| `diamond` | smoj | CC-BY 3.0 |
+| `dome` | jeremy | CC-BY 3.0 |
+| `door` | Poly by Google | CC-BY 3.0 |
+| `doughnut` | Matthew Collier | CC-BY 3.0 |
+| `dragonfly` | Poly by Google | CC-BY 3.0 |
+| `figure` | joney_lol | CC-BY 3.0 |
+| `fire` | Jakob Hippe | CC-BY 3.0 |
+| `fluorescent_light` | Nick Slough | CC-BY 3.0 |
+| `gate` | Poly by Google | CC-BY 3.0 |
+| `gem_green` | Quaternius | CC0 |
+| `harp` | Poly by Google | CC-BY 3.0 |
+| `hat_1` | Olivia Wynn | CC-BY 3.0 |
+| `headphones` | Poly by Google | CC-BY 3.0 |
+| `headphones_2` | Soonho Kwon | CC-BY 3.0 |
+| `heart` | Poly by Google | CC-BY 3.0 |
+| `heart_2` | Quaternius | CC0 |
+| `jewel` | Zsky | CC-BY 3.0 |
+| `lightning_bolt` | Jarlan Perez | CC-BY 3.0 |
+| `lightning_bolt_2` | Poly by Google | CC-BY 3.0 |
+| `microphone` | Poly by Google | CC-BY 3.0 |
+| `midi_controller` | Gabriel Ibias | CC-BY 3.0 |
+| `moon_1` | Zoe XR | CC-BY 3.0 |
+| `moon_2` | Poly by Google | CC-BY 3.0 |
+| `moon_3` | Poly by Google | CC-BY 3.0 |
+| `neptune` | Poly by Google | CC-BY 3.0 |
+| `palm_tree` | Alex Safayan | CC-BY 3.0 |
+| `palm_tree_2` | Poly by Google | CC-BY 3.0 |
+| `phone` | Alex Safayan | CC-BY 3.0 |
+| `piano` | Poly by Google | CC-BY 3.0 |
+| `piano_2` | daniele100 | CC-BY 3.0 |
+| `planets_set` | Poly by Google | CC-BY 3.0 |
+| `red_car` | J-Toastie | CC-BY 3.0 |
+| `rocket_1` | Jarlan Perez | CC-BY 3.0 |
+| `rolling_music_speaker_stand` | Peter Simcoe | CC-BY 3.0 |
+| `skull_2` | CreativeTechLab | CC-BY 3.0 |
+| `skull_3` | Alex Safayan | CC-BY 3.0 |
+| `skull_4` | Ian Wall | CC-BY 3.0 |
+| `skull_kay` | Kay Lousberg | CC0 |
+| `skull_q3` | Quaternius | CC0 |
+| `skull_q4` | Quaternius | CC0 |
+| `skull_quaternius` | Quaternius | CC0 |
+| `star_1` | Poly by Google | CC-BY 3.0 |
+| `stereo_furniture` | Silverstone78 | CC-BY 3.0 |
+| `street_lamp` | Poly by Google | CC-BY 3.0 |
+| `sun` | Poly by Google | CC-BY 3.0 |
+| `top_hat` | Cael Wood | CC-BY 3.0 |
+| `toro` | Matt Newell | CC-BY 3.0 |
+| `wolf_1` | Poly by Google | CC-BY 3.0 |
+| `wolf_3` | Poly by Google | CC-BY 3.0 |
