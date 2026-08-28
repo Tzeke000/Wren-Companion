@@ -289,6 +289,11 @@ class Analysis:
 
 NBARS = 40
 
+# every centrepiece visualization Renderer._viz can dispatch to. Single source
+# of truth so --viz validation can't drift from what the renderer supports.
+VIZ_MODES = ("radial", "bars_center", "bars", "wave", "tunnel", "supernova",
+             "kaleido")
+
 
 def _ema(x: np.ndarray, tau_s: float, fps: int) -> np.ndarray:
     a = 1.0 - np.exp(-1.0 / max(1e-6, tau_s * fps))
@@ -694,6 +699,9 @@ class Renderer:
                                             # — or a COMMA LIST to rotate through
     shape_every: int = 8                    # swap to the next shape every N beats
     nod: bool = False                       # bob/pitch the shape on each beat
+    viz_deck: "list | None" = None          # rotate the CENTREPIECE viz on the beat
+    viz_every: int = 16                     # ...every N beats (4 bars in 4/4)
+    readable: bool = False                  # lyrics-first: fewer FX + contrast scrim
     _rot: float = 0.0                       # accumulated 3D rotation
     _shapes: "list | None" = None           # parsed shape list (set in __post_init__)
     _shape_last: int = -1                   # last slot index, for swap logging
@@ -819,8 +827,26 @@ class Renderer:
                               interpolation=cv2.INTER_LINEAR)
         return img
 
+    def _viz_now(self, i: int, a: Analysis) -> str:
+        """Which centrepiece visualization is drawn at frame i.
+
+        Zeke 2026-08-28: *"change different audio visualizations instead of
+        just the one that's across and straight like every 16 beats so it keeps
+        it interesting for the viewer."*
+
+        ⚠ Only the DRAWN viz rotates. `style.viz` still drives LAYOUT — lyric
+        font size, lyric baseline, logo position — and those must not jump
+        mid-song, so they stay pinned to the style (or to the first deck entry).
+        Rotating layout too would make the text hop around every 4 bars."""
+        if not self.viz_deck:
+            return self.style.viz
+        if len(self.viz_deck) == 1 or self.viz_every <= 0:
+            return self.viz_deck[0]
+        slot = int(a.beat_i[i]) // int(self.viz_every)
+        return self.viz_deck[slot % len(self.viz_deck)]
+
     def _viz(self, img: np.ndarray, i: int, a: Analysis) -> None:
-        v = self.style.viz
+        v = self._viz_now(i, a)
         if v == "radial":
             self._viz_radial(img, i, a)
         elif v == "bars_center":
@@ -1390,7 +1416,10 @@ class Renderer:
         words = []
         for k, w in enumerate(ln):
             txt = w.text.upper() if self.style.caps else w.text
-            if drop and self.style.scramble and k != active:
+            # scramble is the single biggest readability cost — it replaces the
+            # actual characters. --readable kills it outright rather than
+            # softening it; a half-scrambled word is still an unreadable word.
+            if drop and self.style.scramble and k != active and not self.readable:
                 rng = random.Random(hash((i // 3, k, len(txt))))
                 txt = "".join(c if c == " " or rng.random() < 0.35
                               else rng.choice(_SCRAMBLE_SET) for c in txt)
@@ -1443,6 +1472,18 @@ class Renderer:
                     letter_j += 1
             xx += wd + space
         lyr = np.asarray(layer, np.float32)
+        if self.readable:
+            # CONTRAST SCRIM (Zeke 2026-08-28: "easier for people to read the
+            # words"). Not a rectangle bar — a mask grown from the glyphs
+            # themselves, so it hugs the text and stays invisible as a shape.
+            # Darkening BEHIND is what buys legibility over a busy centrepiece;
+            # brightening the text alone just blooms into the background.
+            m = lyr.max(axis=2)
+            m = cv2.dilate(m, np.ones((9, 9), np.uint8))
+            m = cv2.GaussianBlur(m, (0, 0), 13)
+            peak = float(m.max())
+            if peak > 1e-6:
+                img *= (1.0 - 0.72 * np.clip(m / peak, 0, 1)[..., None])
         glow = cv2.GaussianBlur(lyr, (0, 0), 4 + 8 * a.rms[i])
         img += lyr * 0.95 + glow * (0.35 + 0.75 * a.rms[i])
 
@@ -1454,16 +1495,21 @@ class Renderer:
             self._pal_i += 1
             self._flash = max(self._flash, (1.0 if drop else 0.45))
             self._zoom = max(self._zoom, s.zoom_punch * (1.5 if drop else 1.0))
-        if drop and s.glitch:
-            rng = random.Random(i // 2)
-            for _ in range(rng.randint(2, 5)):
+        # --readable turns the tearing DOWN, not off: the drop should still
+        # feel violent, it just must not eat the words (Zeke 2026-08-28).
+        # Gating on `i // 6` instead of `i // 2` also makes each tear last
+        # ~3x longer, so it reads as a deliberate cut rather than as noise.
+        if drop and s.glitch and not (self.readable and (i // 6) % 3):
+            rng = random.Random(i // (6 if self.readable else 2))
+            lo, hi = ((1, 2) if self.readable else (2, 5))
+            amp = (0.4 if self.readable else 1.0) * (30 + 60 * a.bass[i])
+            for _ in range(rng.randint(lo, hi)):
                 y0 = rng.randrange(0, self.H - 12)
                 h = rng.randrange(4, 26)
-                off = rng.randrange(-int(30 + 60 * a.bass[i]),
-                                    int(30 + 60 * a.bass[i]) or 1)
+                off = rng.randrange(-int(amp), int(amp) or 1)
                 img[y0:y0 + h] = np.roll(img[y0:y0 + h], off, axis=1)
         if drop and s.rgb_split:
-            off = int(2 + 6 * a.bass[i])
+            off = int((2 + 6 * a.bass[i]) * (0.45 if self.readable else 1.0))
             img[..., 0] = np.roll(img[..., 0], off, axis=1)
             img[..., 2] = np.roll(img[..., 2], -off, axis=1)
         # geometric: zoom punch + shake in one affine
@@ -1471,7 +1517,10 @@ class Renderer:
         dx = dy = 0.0
         if drop and s.shake > 0:
             rng = random.Random(i)
-            amp = s.shake * (0.4 + 0.6 * a.bass[i])
+            # per-frame random shake is what makes text swim; halve it in
+            # --readable rather than remove it, so the drop keeps its weight
+            amp = s.shake * (0.4 + 0.6 * a.bass[i]) * (0.5 if self.readable
+                                                       else 1.0)
             dx, dy = rng.uniform(-amp, amp), rng.uniform(-amp, amp)
         if z > 1.0005 or abs(dx) + abs(dy) > 0.5:
             M = np.array([[z, 0, (1 - z) * self.W / 2 + dx],
@@ -1791,6 +1840,15 @@ def main() -> int:
     ap.add_argument("--nod", action="store_true",
                     help="make the 3D shape NOD to the beat (dip-and-settle "
                          "pitch + bob) instead of only spinning")
+    ap.add_argument("--viz-every", type=int, default=16, metavar="BEATS",
+                    help="with a comma-list --viz, rotate the centrepiece "
+                         "visualization every N BEATS (default 16 = four bars). "
+                         "0 = never rotate")
+    ap.add_argument("--readable", action="store_true",
+                    help="LYRICS FIRST: no character scramble, glitch tearing "
+                         "and rgb-split dialled down, drop-shake halved, and a "
+                         "contrast scrim grown from the glyphs so words stay "
+                         "legible over a busy centrepiece")
     ap.add_argument("--no-vocals", action="store_true",
                     help="skip transcription (instrumental track)")
     ap.add_argument("--tiktok", action="store_true",
@@ -1800,9 +1858,11 @@ def main() -> int:
                     help="disable the hard white kick-flash on the drop "
                          "(photosensitivity-safe; everything else unchanged)")
     ap.add_argument("--viz", default="",
-                    choices=["", "radial", "bars_center", "wave", "tunnel",
-                             "supernova", "kaleido"],
-                    help="override the style's centerpiece visualization")
+                    help="override the style's centerpiece visualization: "
+                         "radial|bars_center|bars|wave|tunnel|supernova|kaleido"
+                         ". COMMA-LIST to ROTATE through several on the beat "
+                         "grid (see --viz-every), e.g. "
+                         "'radial,tunnel,kaleido,bars_center'")
     ap.add_argument("--window", default="",
                     help="render only START:END seconds (e.g. 55:85) — "
                          "cheap test renders")
@@ -1823,9 +1883,25 @@ def main() -> int:
     if args.no_strobe and style.strobe:
         style = _dc_replace(style, strobe=False)
         print("[lyric_viz] strobe DISABLED (--no-strobe); rest of style unchanged")
+    viz_deck = None
     if args.viz:
-        style = _dc_replace(style, viz=args.viz)
-        print(f"[lyric_viz] centerpiece OVERRIDE: viz={args.viz}")
+        viz_deck = [v.strip() for v in args.viz.split(",") if v.strip()]
+        bad = [v for v in viz_deck if v not in VIZ_MODES]
+        if bad:
+            ap.error(f"unknown --viz mode(s) {bad} — pick from "
+                     f"{sorted(VIZ_MODES)}")
+        # layout (lyric size/baseline, logo position) pins to the FIRST entry so
+        # it stays put; only the drawn viz rotates. See Renderer._viz_now.
+        style = _dc_replace(style, viz=viz_deck[0])
+        if len(viz_deck) > 1:
+            print(f"[lyric_viz] viz deck: {len(viz_deck)} modes "
+                  f"({', '.join(viz_deck)}) rotating every {args.viz_every} "
+                  f"beats; layout pinned to '{viz_deck[0]}'")
+        else:
+            print(f"[lyric_viz] centerpiece OVERRIDE: viz={viz_deck[0]}")
+    if args.readable:
+        print("[lyric_viz] READABLE mode: scramble off, glitch/rgb-split/shake "
+              "reduced, contrast scrim behind lyrics")
     t0 = time.time()
 
     if args.no_vocals:
@@ -1953,7 +2029,9 @@ def main() -> int:
                  wave_env=wave_env.astype(np.float32),
                  deck=deck, deck_idx=deck_idx, corner_logo=corner,
                  shape=args.shape, bgclips=bgclips, bgclip_idx=bgclip_idx,
-                 shape_every=args.shape_every, nod=args.nod)
+                 shape_every=args.shape_every, nod=args.nod,
+                 viz_deck=viz_deck, viz_every=args.viz_every,
+                 readable=args.readable)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
