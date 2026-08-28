@@ -1,0 +1,4 @@
+{"timestamp": "2026-08-21T14:36:53", "role": "user", "source": "zeke", "content": "Mm. There's no way what... Oh my god, dude. Oh my god, dude.", "meta": {"person_id": "zeke", "person_name": "Zeke"}}
+{"timestamp": "2026-08-21T14:36:53", "role": "user", "source": "zeke", "content": "Mm.", "meta": {"person_id": "zeke", "person_name": "Zeke"}}
+{"timestamp": "2026-08-21T14:36:53", "role": "assistant", "source": "ava_response", "content": "I hit an internal error: model 'llama3.1:8b' not found (status code: 404)", "meta": {"person_id": "zeke", "person_name": "Zeke", "actions": []}}
+{"timestamp": "2026-08-21T14:36:53", "role": "assistant", "source": "ava_response", "content": "I hit an internal error: model 'llama3.1:8b' not found (status code: 404)", "meta": {"person_id": "zeke", "person_name": "Zeke", "actions": []}}
