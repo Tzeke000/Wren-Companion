@@ -702,6 +702,9 @@ class Renderer:
     viz_deck: "list | None" = None          # rotate the CENTREPIECE viz on the beat
     viz_every: int = 16                     # ...every N beats (4 bars in 4/4)
     readable: bool = False                  # lyrics-first: fewer FX + contrast scrim
+    bloom: float = 0.45                     # whole-frame glow amount (0 = off)
+    _viz_last: int = -1                     # last viz slot, for transition flash
+    _viz_flash: float = 0.0                 # decaying flash that hides the cut
     _rot: float = 0.0                       # accumulated 3D rotation
     _shapes: "list | None" = None           # parsed shape list (set in __post_init__)
     _shape_last: int = -1                   # last slot index, for swap logging
@@ -726,6 +729,28 @@ class Renderer:
         # every `shape_every` beats. A single value = old behaviour, no swaps.
         self._shapes = [s.strip() for s in str(self.shape).split(",")
                         if s.strip() and s.strip() != "none"]
+        # -- FBM flow background (bg="flow") --------------------------------
+        # Octave lattices for value noise, built ONCE. Each is made PERIODIC in
+        # x (last column == first) so scrolling can wrap without the straight
+        # vertical SEAM that a plain np.roll of a random lattice produces.
+        self._fbm_oct = []
+        for k, (w, h) in enumerate(((4, 3), (8, 5), (16, 10), (32, 20))):
+            g = np.random.default_rng(101 + k).random((h, w + 1)).astype(np.float32)
+            g[:, -1] = g[:, 0]
+            self._fbm_oct.append(g)
+        self._fbm_lw, self._fbm_lh = 160, 90
+        self._fbm_grid = np.mgrid[0:self._fbm_lh,
+                                  0:self._fbm_lw].astype(np.float32)
+        # 3-stop gradient LUT from the style palette — the background then
+        # matches the rest of the frame BY CONSTRUCTION, same trick as duotone()
+        lut = np.zeros((256, 1, 3), np.float32)
+        pal = self.style.palette
+        stops = (np.array(pal[0], np.float32) * 0.30,
+                 np.array(pal[1 % len(pal)], np.float32) * 0.22,
+                 np.array(pal[2 % len(pal)], np.float32) * 0.34)
+        for k, c in enumerate(stops):
+            lut[int(k * 85):int((k + 1) * 85) + 1] = c
+        self._fbm_lut = cv2.GaussianBlur(lut, (1, 161), 0)
 
     def font(self, size: int, name: str = ""):
         key = (size, name)
@@ -812,6 +837,8 @@ class Renderer:
             near = self._stars[:, 2] > 0.7
             img[ys[near], np.minimum(xs[near] + 1, self.W - 1)] += \
                 (bright[near] * 0.6)[:, None]
+        elif self.style.bg == "flow":
+            img += self._bg_flow(t, a, i)
         elif self.style.bg == "plasma":
             xx, yy = self._plasma_xy
             e = 0.25 + 0.75 * a.rms[i]
@@ -826,6 +853,108 @@ class Renderer:
             img += cv2.resize(small, (self.W, self.H),
                               interpolation=cv2.INTER_LINEAR)
         return img
+
+    def _fbm(self, t: float, seed_shift: float = 0.0) -> np.ndarray:
+        """4 octaves of value noise at 160x90, scrolled in x over time.
+
+        The lattices are PERIODIC in x (built in __post_init__), and we scroll
+        by a FLOAT offset through the cubic upsample rather than np.roll-ing
+        integer columns — an integer roll of a non-periodic random lattice puts
+        a straight vertical SEAM through the frame, which is glaringly visible
+        on a smooth gradient (the prototype had exactly that)."""
+        LW, LH = self._fbm_lw, self._fbm_lh
+        acc = np.zeros((LH, LW), np.float32)
+        amp = 0.5
+        base_y = np.arange(LH, dtype=np.float32)[:, None]
+        base_x = np.arange(LW, dtype=np.float32)[None, :]
+        for k, g in enumerate(self._fbm_oct):
+            h, w = g.shape[0], g.shape[1] - 1
+            off = (t * (0.6 + 0.35 * k) + seed_shift) % w
+            # ONE remap does the scroll AND the upsample: sample the periodic
+            # lattice at fractional coords. Cubic gives the smooth field.
+            mx = np.ascontiguousarray(
+                ((base_x * (w / LW) + off) % w) + np.zeros((LH, 1), np.float32))
+            my = np.ascontiguousarray(
+                (base_y * ((h - 1) / max(1, LH - 1))) + np.zeros((1, LW), np.float32))
+            acc += amp * cv2.remap(g, mx, my, cv2.INTER_CUBIC,
+                                   borderMode=cv2.BORDER_REFLECT)
+            amp *= 0.5
+        return acc
+
+    def _bg_flow(self, t: float, a: Analysis, i: int) -> np.ndarray:
+        """Domain-warped FBM gradient — the 'not flat black' background
+        (Zeke 2026-08-28: "make the background change from just being steady
+        black"). Everything is computed at 160x90 and cubic-upsampled, so it is
+        smooth by construction and the low-res work is invisible.
+
+        The domain warp (one fbm offsetting the lookup of another) is what
+        turns 'clouds' into 'flowing liquid', and it costs nothing at this
+        size. Colour comes from a LUT built off the style palette, so the
+        background matches the rest of the frame by construction."""
+        n = self._fbm(t * 0.5)
+        n2 = self._fbm(t * 0.35, seed_shift=40.0)
+        yy, xx = self._fbm_grid
+        mx = np.clip(xx + (n2 - 0.5) * 26.0, 0, self._fbm_lw - 1)
+        my = np.clip(yy + (n - 0.5) * 26.0, 0, self._fbm_lh - 1)
+        wv = cv2.remap(n, mx, my, cv2.INTER_LINEAR)
+        lo, hi = float(wv.min()), float(wv.max())
+        wv = (wv - lo) / max(1e-6, hi - lo)
+        small = self._fbm_lut[(wv * 255).astype(np.uint8), 0]
+        big = cv2.resize(small, (self.W, self.H), interpolation=cv2.INTER_CUBIC)
+        return big * (0.40 + 0.60 * float(a.rms[i]))
+
+    def _bloom(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """Quarter-res two-octave bloom over the WHOLE frame.
+
+        Every reference channel (Trap Nation, NCS, Monstercat, UKF) is built on
+        glow; before this only the lyrics glowed and the ring/bars/wireframes
+        were hard-edged, which was the main thing separating this from the
+        reference look. Full-res would be ~229ms; quarter-res is ~6ms and looks
+        identical because bloom is by definition low-frequency.
+
+        Threshold is fixed and the AMOUNT is what tracks energy — modulating
+        the threshold instead makes the whole frame haze over.
+
+        ⚠ HEADROOM WEIGHTING is load-bearing here, and it is a departure from
+        the textbook recipe. Textbook bloom assumes the source is not already
+        glowing; this renderer additively glows the wireframe, bars and lyrics
+        *before* this runs, so plain additive bloom drove the skull from 2%
+        blown-white pixels to 20% — a solid white blob with the mesh gone
+        (measured, and visible in .tmp/v4.jpg). Scaling the bloom by the
+        remaining headroom (1 - img/255) confines it to a HALO around bright
+        things instead of filling their interiors: same frames went 2.2%->3.9%
+        and 0.4%->0.6% while keeping the glow."""
+        qh, qw = max(1, self.H // 4), max(1, self.W // 4)
+        q = cv2.resize(img, (qw, qh), interpolation=cv2.INTER_AREA)
+        cv2.threshold(q, 190, 0, cv2.THRESH_TOZERO, dst=q)
+        # two octaves: a tight core plus a wide halo reads markedly better than
+        # one blur, and both are cheap at this size. The core is weighted down
+        # because at full weight it re-adds a near-copy of the bright pass and
+        # fills the interior back in.
+        bright = q.copy()
+        near = cv2.GaussianBlur(q, (0, 0), 3)
+        cv2.GaussianBlur(q, (0, 0), 10, dst=q)
+        cv2.addWeighted(near, 0.5, q, 1.0, 0.0, dst=q)
+        # HALO ONLY: subtract the unblurred bright pass. Without this the blur
+        # still carries the source's own energy, so bloom fills the INTERIOR of
+        # a wireframe skull and it reads as a milky blob with the mesh gone
+        # (confirmed by eye in .tmp/bloomcmp.jpg — the headroom clamp alone
+        # fixed the arithmetic but NOT the look). Subtracting the core leaves
+        # only what spilled outside the source, which is what "glow" means.
+        cv2.subtract(q, bright, dst=q)
+        np.maximum(q, 0, out=q)
+        big = cv2.resize(q, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+        big *= self.bloom * (0.55 + 0.65 * float(a.rms[i]))
+        # CLAMP TO THE REMAINING HEADROOM, exactly. A (1 - img/255) weight is
+        # not enough: at bloom time `img` is unclipped float and routinely sits
+        # at 200-250, where a tiny weight still multiplies a large bloom value
+        # over the top (measured 13.7% blown-white with the weighted form vs a
+        # 3.9% offline prediction — the offline proxy used ALREADY-CLIPPED
+        # frames and so did not reproduce the live float path). Taking the
+        # elementwise min against the true headroom makes it impossible for
+        # bloom to create a single new saturated pixel.
+        np.minimum(big, np.maximum(255.0 - img, 0.0), out=big)
+        img += big
 
     def _viz_now(self, i: int, a: Analysis) -> str:
         """Which centrepiece visualization is drawn at frame i.
@@ -843,6 +972,14 @@ class Renderer:
         if len(self.viz_deck) == 1 or self.viz_every <= 0:
             return self.viz_deck[0]
         slot = int(a.beat_i[i]) // int(self.viz_every)
+        if slot != self._viz_last:
+            # TRANSITION: the deck used to HARD-CUT between modes, which reads
+            # as a glitch rather than as a choice. A flash on the switch frame
+            # that decays over ~5 frames hides the discontinuity completely —
+            # the cheapest transition there is and the most effective.
+            if self._viz_last >= 0:
+                self._viz_flash = 1.0
+            self._viz_last = slot
         return self.viz_deck[slot % len(self.viz_deck)]
 
     def _viz(self, img: np.ndarray, i: int, a: Analysis) -> None:
@@ -1472,20 +1609,30 @@ class Renderer:
                     letter_j += 1
             xx += wd + space
         lyr = np.asarray(layer, np.float32)
-        if self.readable:
-            # CONTRAST SCRIM (Zeke 2026-08-28: "easier for people to read the
-            # words"). Not a rectangle bar — a mask grown from the glyphs
-            # themselves, so it hugs the text and stays invisible as a shape.
-            # Darkening BEHIND is what buys legibility over a busy centrepiece;
-            # brightening the text alone just blooms into the background.
-            m = lyr.max(axis=2)
-            m = cv2.dilate(m, np.ones((9, 9), np.uint8))
-            m = cv2.GaussianBlur(m, (0, 0), 13)
-            peak = float(m.max())
-            if peak > 1e-6:
-                img *= (1.0 - 0.72 * np.clip(m / peak, 0, 1)[..., None])
-        glow = cv2.GaussianBlur(lyr, (0, 0), 4 + 8 * a.rms[i])
-        img += lyr * 0.95 + glow * (0.35 + 0.75 * a.rms[i])
+        # CONTRAST SCRIM — a mask grown from the GLYPHS, not a rectangle bar,
+        # so it hugs the text and is invisible as a shape. Runs ALWAYS now
+        # (softly), not just under --readable: busy frames are the norm, and
+        # the governing principle is *protect the text by darkening the
+        # background, never by brightening the text* — brightening blooms into
+        # the backdrop and reduces contrast. --readable just deepens it.
+        m = lyr.max(axis=2)
+        cv2.dilate(m, np.ones((9, 9), np.uint8), dst=m)
+        cv2.GaussianBlur(m, (0, 0), 13, dst=m)
+        peak = float(m.max())
+        if peak > 1e-6:
+            np.multiply(m, 1.0 / peak, out=m)
+            np.clip(m, 0, 1, out=m)
+            img *= (1.0 - (0.72 if self.readable else 0.38) * m[..., None])
+        # QUARTER-RES glow. A full-res GaussianBlur at sigma up to 12 measures
+        # ~229ms; the same visual at quarter res is ~6ms. And scaleAdd writes
+        # in place — the old `img += lyr*0.95 + glow*k` allocated three full-res
+        # temporaries and measured 84ms against 25ms for these two calls.
+        qh, qw = max(1, self.H // 4), max(1, self.W // 4)
+        gq = cv2.resize(lyr, (qw, qh), interpolation=cv2.INTER_AREA)
+        cv2.GaussianBlur(gq, (0, 0), 1.0 + 2.0 * a.rms[i], dst=gq)
+        glow = cv2.resize(gq, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+        cv2.scaleAdd(lyr, 0.95, img, dst=img)
+        cv2.scaleAdd(glow, 0.35 + 0.75 * a.rms[i], img, dst=img)
 
     # -- drop FX ----------------------------------------------------------
     def _fx(self, img: np.ndarray, i: int, a: Analysis) -> np.ndarray:
@@ -1556,6 +1703,14 @@ class Renderer:
         self._corner(img, i, a)
         self._lyrics(img, i, t, a)
         img = self._fx(img, i, a)
+        if self.bloom > 0:
+            self._bloom(img, i, a)
+        if self._viz_flash > 0.01:
+            col = np.array(self.style.palette[self._pal_i
+                                              % len(self.style.palette)],
+                           np.float32)
+            img += self._viz_flash * 0.30 * col
+            self._viz_flash *= 0.60
         img *= self._vignette
         if self.style.breakdown_desat:
             sat = 0.45 + 0.55 * max(a.rms[i], 1.0 if a.drop[i] else 0.0)
@@ -1566,7 +1721,11 @@ class Renderer:
             (self.H // 2, self.W // 2, 1)).astype(np.float32)
         img += cv2.resize(noise, (self.W, self.H))[..., None] * \
             (2.0 + 5.0 * a.rms[i])
-        return np.clip(img, 0, 255).astype(np.uint8)
+        # clip IN PLACE then convertScaleAbs (12ms vs 38ms for .astype).
+        # ⚠ convertScaleAbs takes the ABSOLUTE value, so the clip to >=0 above
+        # is load-bearing, not tidiness — on unclipped data a -8 becomes 8.
+        np.clip(img, 0, 255, out=img)
+        return cv2.convertScaleAbs(img)
 
 
 # ---------------------------------------------------------------------------
@@ -1844,6 +2003,17 @@ def main() -> int:
                     help="with a comma-list --viz, rotate the centrepiece "
                          "visualization every N BEATS (default 16 = four bars). "
                          "0 = never rotate")
+    ap.add_argument("--bg", default="", choices=["", "flow", "starfield",
+                                                 "plasma", "flat"],
+                    help="override the style's background. 'flow' = "
+                         "domain-warped FBM gradient in the style palette — "
+                         "the fix for flat black")
+    ap.add_argument("--bloom", type=float, default=0.45, metavar="AMOUNT",
+                    help="whole-frame halo glow amount (default 0.45, 0 = off). "
+                         "Quarter-res two-octave halo-only bloom. Textbook "
+                         "amounts (0.8-1.4) assume the source is not already "
+                         "glowing; this renderer pre-glows its elements, and "
+                         "dense wireframes wash out above ~0.5")
     ap.add_argument("--readable", action="store_true",
                     help="LYRICS FIRST: no character scramble, glitch tearing "
                          "and rgb-split dialled down, drop-shake halved, and a "
@@ -1899,6 +2069,9 @@ def main() -> int:
                   f"beats; layout pinned to '{viz_deck[0]}'")
         else:
             print(f"[lyric_viz] centerpiece OVERRIDE: viz={viz_deck[0]}")
+    if args.bg:
+        style = _dc_replace(style, bg=args.bg)
+        print(f"[lyric_viz] background OVERRIDE: bg={args.bg}")
     if args.readable:
         print("[lyric_viz] READABLE mode: scramble off, glitch/rgb-split/shake "
               "reduced, contrast scrim behind lyrics")
@@ -2031,7 +2204,7 @@ def main() -> int:
                  shape=args.shape, bgclips=bgclips, bgclip_idx=bgclip_idx,
                  shape_every=args.shape_every, nod=args.nod,
                  viz_deck=viz_deck, viz_every=args.viz_every,
-                 readable=args.readable)
+                 readable=args.readable, bloom=args.bloom)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
