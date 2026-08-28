@@ -447,8 +447,24 @@ def pick_hook_window(a: Analysis, lines: list, duration: float, fps: int,
         score = 1.2 * drop_cov + 0.9 * vocal + 0.8 * energy + 0.5 * early
         if score > best_score:
             best_score, best_t = score, float(t0)
-    t0 = max(0.0, best_t - 1.0)          # open ~1s before the moment lands
-    return t0, min(duration, t0 + target_s + 1.0)
+    # SNAP TO A BEAT (research 2026-08-28). This used to subtract a flat 1.0s
+    # of pre-roll, which (a) spends the single most decisive second of a TikTok
+    # on dead air and (b) lands the cut mid-bar, so the clip opens on an
+    # offbeat. Back off by ~half a second, then snap to the nearest beat in the
+    # grid we already computed — the cut then lands ON the pulse, and a
+    # beat-aligned in/out point is also what makes a clip loop cleanly, which
+    # matters because replays feed watch time.
+    t0 = max(0.0, best_t - 0.5)
+    beats = np.flatnonzero(a.beat) / float(fps) if a.beat.any() else None
+    if beats is not None and len(beats):
+        t0 = float(beats[int(np.argmin(np.abs(beats - t0)))])
+    t1 = min(duration, t0 + target_s + 1.0)
+    if beats is not None and len(beats):
+        # end on a beat too, so first and last frame sit at the same phase
+        cand = beats[(beats > t0 + target_s * 0.6) & (beats <= t1)]
+        if len(cand):
+            t1 = float(cand[-1])
+    return t0, t1
 
 
 def analyze(audio: Path, fps: int) -> tuple[Analysis, np.ndarray, int]:
@@ -705,6 +721,8 @@ class Renderer:
     readable: bool = False                  # lyrics-first: fewer FX + contrast scrim
     bloom: float = 0.45                     # whole-frame glow amount (0 = off)
     layout: str = "row"                     # multi-object arrangement: row|nested
+    safe_margins: bool = False              # keep clear of TikTok's UI overlays
+    safe_overlay: bool = False              # draw the safe box to verify on a phone
     _viz_last: int = -1                     # last viz slot, for transition flash
     _viz_flash: float = 0.0                 # decaying flash that hides the cut
     _rot: float = 0.0                       # accumulated 3D rotation
@@ -1441,7 +1459,13 @@ class Renderer:
         rgb, mask = self.corner_logo
         lh, lw = mask.shape
         pad = int(self.H * 0.03)
-        y0, x0 = self.H - lh - pad, self.W - lw - pad
+        if self.safe_margins:
+            # bottom-right is the WORST spot on TikTok — the caption block and
+            # the action rail overlap there, so this watermark was rendering
+            # 100% invisible. Move it inside the safe box (upper-left).
+            y0, x0 = int(self.H * 0.115), int(self.W * 0.06)
+        else:
+            y0, x0 = self.H - lh - pad, self.W - lw - pad
         m3 = mask[..., None] * (0.75 + 0.25 * a.bass[i])
         region = img[y0:y0 + lh, x0:x0 + lw]
         region[:] = region * (1 - m3) + rgb * m3
@@ -1800,14 +1824,26 @@ class Renderer:
         space = draw.textlength(" ", font=f)
         widths = [draw.textlength(w, font=f) for w in words]
         total = sum(widths) + space * (len(words) - 1)
-        while total > self.W * 0.92 and fs > 18:
+        # SAFE ZONE (research 2026-08-28). TikTok's own UI covers the bottom
+        # caption block and the right-hand action rail, so a full-width line at
+        # the old 0.92 cap put ~97px of every long line UNDER the rail, and the
+        # 0.78 baseline pushed descenders into the caption block. Narrower and
+        # higher in --tiktok. ⚠ There is no authoritative TikTok safe-zone spec
+        # and the UI is responsive — these are a convergent envelope from
+        # several third-party sources, so --safe-overlay draws the box to check
+        # against a real phone rather than trusting the number.
+        wcap = 0.74 if self.safe_margins else 0.92
+        while total > self.W * wcap and fs > 18:
             fs = int(fs * 0.9)
             f = self.font(fs, self.style.font_lyrics)
             space = draw.textlength(" ", font=f)
             widths = [draw.textlength(w, font=f) for w in words]
             total = sum(widths) + space * (len(words) - 1)
         x = (self.W - total) / 2
-        y = int(self.H * (0.78 if self.style.viz == "radial" else 0.66))
+        if self.safe_margins:
+            y = int(self.H * 0.70)
+        else:
+            y = int(self.H * (0.78 if self.style.viz == "radial" else 0.66))
         accent = self.style.palette[self._pal_i % len(self.style.palette)]
         # REACTIVE LYRICS (Zeke 08-26: "the words also have audio
         # visualization on them"): every LETTER rides its own frequency band
@@ -1957,7 +1993,17 @@ class Renderer:
         # ⚠ convertScaleAbs takes the ABSOLUTE value, so the clip to >=0 above
         # is load-bearing, not tidiness — on unclipped data a -8 becomes 8.
         np.clip(img, 0, 255, out=img)
-        return cv2.convertScaleAbs(img)
+        out = cv2.convertScaleAbs(img)
+        if self.safe_overlay:
+            # DEBUG: the claimed TikTok-safe box. Render one, put it on a phone,
+            # open the TikTok upload preview, and see what the UI actually
+            # covers — the published figures are third-party guesses.
+            x0, x1 = int(self.W * 0.056), int(self.W * 0.870)
+            y0, y1 = int(self.H * 0.104), int(self.H * 0.823)
+            cv2.rectangle(out, (x0, y0), (x1, y1), (0, 255, 0), 2)
+            cv2.putText(out, "SAFE", (x0 + 6, y0 + 26),
+                        cv2.FONT_HERSHEY_PLAIN, 1.6, (0, 255, 0), 2)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -2156,10 +2202,26 @@ def encode(out: Path, frames_iter, fps: int, audio_pcm: np.ndarray, sr: int,
     try:
         vstream = container.add_stream("h264", rate=fps)
         vstream.pix_fmt = "yuv420p"
+        # RATE CONTROL WAS ENTIRELY UNSET — no bitrate, GOP, or profile, so
+        # output was whatever libx264's default happened to be (~6 Mbps at
+        # 720p) and could silently change on a PyAV upgrade. Social platforms
+        # re-encode from what you give them, so a soft master compounds into a
+        # much worse final. Scale the target with pixel count.
+        # ~0.19 bits/pixel/frame -> ~11.8 Mbps at 1080x1920p30. My first pass
+        # used 0.11 and measured out at 6.5 Mbps, which is under what survives
+        # a social re-encode; the research target was ~12.
+        vstream.bit_rate = int(max(8e6, min(20e6, W * H * fps * 0.19)))
+        vstream.options = {
+            "preset": "slow",
+            "profile": "high",
+            "g": str(int(fps * 2)),      # keyframe every 2s — helps seeking
+            "movflags": "+faststart",    # moov atom first: starts before full DL
+        }
     except Exception:
         vstream = container.add_stream("mpeg4", rate=fps)
     vstream.width, vstream.height = W, H
     astream = container.add_stream("aac", rate=sr)
+    astream.bit_rate = 192_000
     n = 0
     for rgb in frames_iter:
         frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
@@ -2233,6 +2295,10 @@ def main() -> int:
                          "(head:true in assets/models3d/poses.json) tilt "
                          "chin-down on the beat; everything else gets a size "
                          "pulse instead — a torus knot has no chin")
+    ap.add_argument("--safe-overlay", action="store_true",
+                    help="draw the claimed TikTok safe box over the frame so "
+                         "it can be checked against a real phone (the "
+                         "published figures are third-party, not official)")
     ap.add_argument("--layout", default="row", choices=["row", "nested"],
                     help="how a multi-object slot is arranged. Use '+' in "
                          "--shape for simultaneous objects, e.g. "
@@ -2279,6 +2345,16 @@ def main() -> int:
         args.aspect = "9:16"
         if args.shape == "none":
             args.shape = "logo3d"
+        # ★ --tiktok used to inherit the 9:16 default of 720x1280 — 2.25x FEWER
+        # PIXELS than TikTok's recommended 1080x1920 source, on a platform that
+        # re-encodes everything anyway, so we were handing it a degraded master
+        # and letting it degrade that further. Explicit unless --size is given.
+        if not args.size:
+            args.size = "1080x1920"
+        # TikTok is watched on a phone at arm's length: legibility beats FX.
+        # --tiktok now implies --readable (no character scramble, tearing and
+        # shake dialled down, contrast scrim deepened).
+        args.readable = True
 
     if args.size:
         W, H = (int(v) for v in args.size.lower().split("x"))
@@ -2442,7 +2518,8 @@ def main() -> int:
                  shape=args.shape, bgclips=bgclips, bgclip_idx=bgclip_idx,
                  shape_every=args.shape_every, nod=args.nod,
                  viz_deck=viz_deck, viz_every=args.viz_every,
-                 readable=args.readable, bloom=args.bloom, layout=args.layout)
+                 readable=args.readable, bloom=args.bloom, layout=args.layout,
+                 safe_margins=bool(args.tiktok), safe_overlay=args.safe_overlay)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
