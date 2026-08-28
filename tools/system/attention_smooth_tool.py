@@ -74,6 +74,12 @@ _DEADBAND = 0.05            # normalized offset that counts as centered
 # micro-hunting on a static face. Once centered, stay parked until the offset
 # is CLEARLY out (or the target is actually moving, rate check below).
 _DEADBAND_OUT = 0.09        # exit-centered threshold (enter at _DEADBAND)
+# How long an offset must sit CONTINUOUSLY outside _DEADBAND before the wide
+# hysteresis band is bypassed so the static trim can correct it. Long enough
+# that detector noise (which crosses back within a frame or two) never trips
+# it; short enough that a real standing error is fixed while Zeke is still
+# looking at it. See the STANDING-OFFSET ESCAPE note in the control loop.
+_STANDING_TRIM_S = 1.6
 _OBJECT_PERIOD_S = 0.05     # 20Hz for object targets (reval path is heavier)
 # 40 -> 20 (2026-08-21 late): at gain 40 the servo OSCILLATED on a STATIC
 # pyramid — the tracker's box lags the true position while the head moves, so
@@ -763,6 +769,36 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                     # pace-matching engages without extra lag.
                     band = _DEADBAND_OUT if (st.get("mode") == "centered"
                                              and _static) else _DEADBAND
+                    # ── STANDING-OFFSET ESCAPE (2026-08-28, Zeke: "your head
+                    # keeps drifting up even when I'm still and you're tracking
+                    # me"). The wide exit band stops JITTER, but it also
+                    # swallowed a genuine 2.2 deg aim error: his face sat at
+                    # dy=+0.085, just inside _DEADBAND_OUT=0.09, so the loop
+                    # declared itself centered and parked. The static-trim
+                    # branch — which exists precisely to walk out a standing
+                    # offset — lives in the pursuit path, so the hysteresis was
+                    # gating out its own fix. Combined with the 2.4x weaker
+                    # downward plant, hunting nets upward and then LATCHES.
+                    #
+                    # Noise and a real aim error look identical for one frame,
+                    # so distinguish them by PERSISTENCE: noise oscillates
+                    # across the band, a standing error does not. Only after
+                    # the offset has stayed out past _DEADBAND continuously do
+                    # we fall through to the trim.
+                    _standing = abs(dx) > _DEADBAND or abs(dy) > _DEADBAND
+                    if _standing:
+                        if not st.get("_standing_since"):
+                            st["_standing_since"] = now_t
+                    else:
+                        st["_standing_since"] = 0.0
+                    _held = (st.get("_standing_since")
+                             and now_t - float(st["_standing_since"])
+                             >= _STANDING_TRIM_S)
+                    if _held:
+                        band = _DEADBAND      # let the trim branch have it
+                        st["_standing_since"] = 0.0
+                        st["standing_trims"] = int(
+                            st.get("standing_trims") or 0) + 1
                     if abs(dx) <= band and abs(dy) <= band:
                         jog.stop()
                         st["zero_writes"] += 1
