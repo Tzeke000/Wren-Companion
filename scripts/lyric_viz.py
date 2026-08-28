@@ -292,7 +292,7 @@ NBARS = 40
 # every centrepiece visualization Renderer._viz can dispatch to. Single source
 # of truth so --viz validation can't drift from what the renderer supports.
 VIZ_MODES = ("radial", "bars_center", "bars", "wave", "tunnel", "supernova",
-             "kaleido")
+             "kaleido", "ncs_ring", "tn_blob", "mcat_bars")
 
 
 def _ema(x: np.ndarray, tau_s: float, fps: int) -> np.ndarray:
@@ -996,10 +996,137 @@ class Renderer:
             self._viz_supernova(img, i, a)
         elif v == "kaleido":
             self._viz_kaleido(img, i, a)
+        elif v == "ncs_ring":
+            self._viz_ncs_ring(img, i, a)
+        elif v == "tn_blob":
+            self._viz_tn_blob(img, i, a)
+        elif v == "mcat_bars":
+            self._viz_mcat_bars(img, i, a)
         else:
             self._viz_bars_bottom(img, i, a)
         if self.style.particles:
             self._viz_particles(img, i, a)
+
+    # -- ARCHETYPES copied from the real channels (research 2026-08-28,
+    #    docs/edm_visualizer_techniques_2026-08-28.md). A second agent pulled
+    #    real in-video frames from 7 channels via YouTube storyboards rather
+    #    than trusting tutorials, so these are what actually ships, not what
+    #    blog posts say ships. ----------------------------------------------
+
+    def _viz_ncs_ring(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """NCS's ring — the format they have shipped essentially unchanged for
+        a decade. Two things at once, and it is the combination that reads:
+
+        1. the ring's RADIUS is modulated at LOW ORDER (5-7 broad lobes), so
+           bass deforms the circle into a slow wobble rather than into spikes;
+        2. fine NEEDLES point INWARD from the ring toward the centre, dense on
+           high-frequency content and vanishing entirely in quiet passages —
+           verified clean perfect circles at breakdowns.
+
+        Monochrome by construction: ONE flat accent, no gradient across the
+        ring, ever. That restraint is most of why it looks expensive."""
+        cx, cy = self.W // 2, int(self.H * 0.42)
+        R = self.H * 0.24
+        col = self._pal()
+        n = 240
+        th = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        # low-order radius wobble: 5 and 7 lobes, phase-drifting so it breathes
+        ph = i * 0.013
+        wob = (np.sin(th * 5 + ph * 1.7) * 0.55 + np.sin(th * 7 - ph * 1.1) * 0.45)
+        rr = R * (1.0 + (0.05 + 0.16 * float(a.bass[i])) * wob
+                  + 0.05 * float(a.rms[i]))
+        pts = np.stack([cx + rr * np.cos(th), cy + rr * np.sin(th)], 1)
+        layer = np.zeros_like(img)
+        cv2.polylines(layer, [pts.astype(np.int32).reshape(-1, 1, 2)], True,
+                      tuple(float(x) for x in col), 3, cv2.LINE_AA)
+        # inward needles — length rides the spectrum, density rides the highs
+        hi = float(a.high[i])
+        if hi > 0.06:
+            step = max(1, int(6 - 4 * hi))
+            for k in range(0, n, step):
+                mag = float(a.bars[i, (k * NBARS) // n])
+                ln = rr[k] * (0.10 + 0.55 * mag) * (0.35 + 0.9 * hi)
+                x0, y0 = pts[k]
+                x1 = cx + (rr[k] - ln) * np.cos(th[k])
+                y1 = cy + (rr[k] - ln) * np.sin(th[k])
+                cv2.line(layer, (int(x0), int(y0)), (int(x1), int(y1)),
+                         tuple(float(x) for x in col * 0.85), 1, cv2.LINE_AA)
+        img += layer + cv2.GaussianBlur(layer, (0, 0), 6) * (0.6 + 0.9 * a.rms[i])
+
+    def _viz_tn_blob(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """Trap Nation / Bass Nation — a filled radial BLOB hugging a centre
+        disc, not discrete bars. Two details make it theirs:
+
+        * the spectrum is smoothed hard along the angular axis so neighbouring
+          bins MERGE into liquid lobes and pointed 'ears'. Their AE template
+          reaches this by using 2000 frequency bands at thickness 3 — far more
+          bands than the FFT has real bins — so bars stop being bars. Cheaper
+          here: few bins, heavy circular smoothing.
+        * mirrored left/right about a shared centroid, so it is symmetric.
+
+        The signature RGB split (offset scaling with bass) is applied by _fx's
+        rgb_split on the drop, so it is deliberately not duplicated here."""
+        cx, cy = self.W // 2, int(self.H * 0.42)
+        R0 = self.H * 0.105
+        n = 360
+        half = n // 2
+        # build HALF the spectrum then mirror — symmetry for free, and it is
+        # how the reference does it
+        idx = (np.arange(half) * NBARS) // half
+        mag = a.bars[i, idx].astype(np.float32)
+        # circular smoothing = the liquid merge
+        k = np.hanning(21).astype(np.float32); k /= k.sum()
+        mag = np.convolve(np.concatenate([mag[-20:], mag, mag[:20]]), k,
+                          "same")[20:-20]
+        mag = np.concatenate([mag, mag[::-1]])
+        th = np.linspace(-np.pi / 2, 1.5 * np.pi, n, endpoint=False)
+        # extent is a MODEST bump off the disc. v1 used H*(0.05+0.30*mag) with
+        # an rms multiplier, which at a loud moment put the rim ~300px past the
+        # disc on a 768-tall frame — the lobes left the screen and the whole
+        # thing read as one white ball with a haze (verified by eye).
+        rr = R0 * (1.0 + (0.14 + 1.35 * mag) * (0.55 + 0.55 * float(a.rms[i])))
+        outer = np.stack([cx + rr * np.cos(th), cy + rr * np.sin(th)], 1)
+        layer = np.zeros_like(img)
+        col = self._pal()
+        # FILLED, not stroked — the blob is a solid shape
+        cv2.fillPoly(layer, [outer.astype(np.int32).reshape(-1, 1, 2)],
+                     tuple(float(x) for x in col * 0.42))
+        # the disc is bright but NOT pure white: at 255 it clips, and the bloom
+        # pass then has no headroom to halo into, so it flattens to a blob
+        cv2.circle(layer, (cx, cy), int(R0 * 0.94), (170.0, 170.0, 176.0), -1)
+        cv2.circle(layer, (cx, cy), int(R0 * 0.94),
+                   tuple(float(x) for x in col), 2, cv2.LINE_AA)
+        img += layer + cv2.GaussianBlur(layer, (0, 0), 7) * (0.28 + 0.42 * a.rms[i])
+
+    def _viz_mcat_bars(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """Monstercat's CLASSIC format — the only one of these archetypes with
+        published hard numbers (from a Rainmeter skin that replicates it):
+        63 log-spaced bands 20Hz-16kHz, flat-topped rectangles on a SINGLE
+        baseline rising upward only, **not mirrored**, **no peak-hold caps**,
+        uniform fill with no gradient, attack 0ms / decay 50ms.
+
+        ⚠ Deviation, stated rather than hidden: this renderer's `bars` array is
+        NBARS=40 bins over 40Hz-10kHz, so the band count and span are not
+        theirs. The band ENVELOPE already matches (analyze() applies instant
+        attack with a slow decay). Widening the analysis would change every
+        other viz, so the shape is copied and the bin count is not.
+
+        Note their MODERN uploads do not use this at all — it is a retired
+        format, kept because it is a clean, readable, un-busy option."""
+        base = int(self.H * 0.72)
+        maxh = self.H * 0.22
+        n = NBARS
+        gap = max(1.0, self.W * 0.004)
+        bw = (self.W * 0.92 - gap * (n - 1)) / n
+        x = self.W * 0.04
+        col = self._pal() * 0.95
+        for k in range(n):
+            h = int(a.bars[i, k] * maxh)
+            if h > 1:
+                x0, x1 = int(x), int(x + bw)
+                cv2.rectangle(img, (x0, base - h), (x1, base),
+                              tuple(float(v) for v in col), -1)
+            x += bw + gap
 
     # -- NEW CENTERPIECES (Zeke 08-27: "main visualization needs to be
     #    something different, more complicated") --------------------------
