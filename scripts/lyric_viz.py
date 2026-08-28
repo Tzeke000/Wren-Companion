@@ -1190,15 +1190,43 @@ class Renderer:
         slot = int(a.beat_i[i]) // int(self.shape_every)
         return self._shapes[slot % len(self._shapes)]
 
+    # nod shape constants — see _nod_pitch
+    NOD_LIFT = 0.45      # how far it rides UP between beats, x the down peak
+    NOD_SWING = 0.25     # fraction of a beat spent swinging down into the hit
+
     def _nod_pitch(self, i: int, a: Analysis) -> float:
-        """Beat-synced nod: a sharp dip on the beat that eases back out.
-        exp decay on the beat phase = struck-then-settle, which reads as a head
-        nodding rather than a sine wobble that is always mid-motion."""
+        """Beat-synced NOD: a real head tilt whose **peak downward angle lands
+        exactly ON the beat** (Zeke 2026-08-28: "he needs to actually tilt to
+        nod... hits its peak downward angle on the beat").
+
+        v1 was wrong twice over: it was mostly a translation (read as bobbing,
+        not nodding) and its peak fell just AFTER the beat, because it decayed
+        from zero at phase 0. A head that starts moving on the beat is already
+        late — the swing has to be anticipatory, arriving at the bottom as the
+        kick lands. So the curve runs:
+
+            ph 0.00  ......  peak DOWN (the hit)
+            ph 0.00->0.75    ease back up, overshooting to -LIFT (chin raised)
+            ph 0.75->1.00    accelerate down, arriving at peak DOWN on the next
+
+        Periodic and continuous at the wrap (both ends = +1), so there is no
+        teleport frame.
+
+        Returns radians of CHIN-DOWN (+ = chin toward chest). ⚠ `_project`'s rx
+        runs the other way — verified by eye on a pitch sweep, -0.85 shows the
+        top of the cranium, +0.85 shows the jaw — so call sites pass `-nod`."""
         if not self.nod:
             return 0.0
         ph = float(a.beat_ph[i])
-        amp = 0.20 + 0.16 * float(a.bass[i]) + (0.10 if a.drop[i] else 0.0)
-        return amp * float(np.exp(-4.5 * ph) * np.sin(np.pi * min(1.0, ph * 2.2)))
+        lift, sw = self.NOD_LIFT, self.NOD_SWING
+        if ph >= 1.0 - sw:
+            u = (ph - (1.0 - sw)) / sw          # 0..1, the downward strike
+            val = -lift + (1.0 + lift) * u * u   # accelerating, hits +1 at u=1
+        else:
+            u = ph / (1.0 - sw)                  # 0..1, the recovery + windup
+            val = 1.0 - (1.0 + lift) * (1.0 - (1.0 - u) ** 2)
+        amp = 0.34 + 0.20 * float(a.bass[i]) + (0.10 if a.drop[i] else 0.0)
+        return amp * val
 
     def _viz_shape(self, img: np.ndarray, i: int, a: Analysis) -> None:
         shape = self._shape_now(i, a)
@@ -1214,7 +1242,9 @@ class Renderer:
         drop = bool(a.drop[i])
         self._rot += (0.012 + 0.05 * a.bass[i] + (0.03 if drop else 0.0))
         nod = self._nod_pitch(i, a)
-        cy = int(cy + nod * self.H * 0.10)      # the bob travels with the pitch
+        # small translation ONLY — the nod must read as a TILT (Zeke 08-28).
+        # v1 leaned on this offset and the result looked like bobbing.
+        cy = int(cy + nod * self.H * 0.028)
         size = self.H * 0.14 * (1.0 + 0.22 * a.bass[i])
         col = self._pal()
         layer = np.zeros_like(img)
@@ -1275,7 +1305,7 @@ class Renderer:
                 return
             v, edges = mesh
             pts = self._project(v, size * 1.5, cx, cy, self._rot,
-                                tumble=False, pitch=nod)
+                                tumble=False, pitch=-nod)
             lw = 1 if len(edges) > 900 else 2
             for e0, e1 in edges:
                 cv2.line(layer, tuple(pts[e0][0]), tuple(pts[e1][0]),
@@ -1285,7 +1315,7 @@ class Renderer:
             if mesh is None:
                 return
             v, edges = mesh
-            pts = self._project(v, size, cx, cy, self._rot, pitch=nod)
+            pts = self._project(v, size, cx, cy, self._rot, pitch=-nod)
             for e0, e1 in edges:
                 cv2.line(layer, tuple(pts[e0][0]), tuple(pts[e1][0]),
                          tuple(float(x) for x in col), 2, cv2.LINE_AA)
