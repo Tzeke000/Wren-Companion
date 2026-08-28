@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import random
 import re
 import sys
@@ -703,6 +704,7 @@ class Renderer:
     viz_every: int = 16                     # ...every N beats (4 bars in 4/4)
     readable: bool = False                  # lyrics-first: fewer FX + contrast scrim
     bloom: float = 0.45                     # whole-frame glow amount (0 = off)
+    layout: str = "row"                     # multi-object arrangement: row|nested
     _viz_last: int = -1                     # last viz slot, for transition flash
     _viz_flash: float = 0.0                 # decaying flash that hides the cut
     _rot: float = 0.0                       # accumulated 3D rotation
@@ -1519,8 +1521,15 @@ class Renderer:
         return amp * val
 
     def _viz_shape(self, img: np.ndarray, i: int, a: Analysis) -> None:
-        shape = self._shape_now(i, a)
-        if shape in ("none", ""):
+        """Draw the current slot, which may hold SEVERAL objects at once.
+
+        Zeke 2026-08-28: *"you can also have like more than 1 object up at a
+        time, like 3 skulls nodding their heads to the beat, or put shapes
+        inside each other."* A slot is `a+b+c` — '+' means simultaneous, comma
+        (handled in _shape_now) still means change-over-time. --layout picks
+        how a group is arranged."""
+        slot_spec = self._shape_now(i, a)
+        if slot_spec in ("none", ""):
             return
         if self._shapes and len(self._shapes) > 1:
             slot = int(a.beat_i[i]) // max(1, int(self.shape_every))
@@ -1528,14 +1537,46 @@ class Renderer:
                 self._shape_last = slot
                 # a swap resets the spin so each model enters facing forward
                 self._rot = 0.0
-        cx, cy = self._logo_center()
         drop = bool(a.drop[i])
         self._rot += (0.012 + 0.05 * a.bass[i] + (0.03 if drop else 0.0))
-        nod = self._nod_pitch(i, a)
-        # small translation ONLY — the nod must read as a TILT (Zeke 08-28).
-        # v1 leaned on this offset and the result looked like bobbing.
-        cy = int(cy + nod * self.H * 0.028)
-        size = self.H * 0.14 * (1.0 + 0.22 * a.bass[i])
+        members = [s for s in slot_spec.split("+") if s]
+        bx, by = self._logo_center()
+        base = self.H * 0.14 * (1.0 + 0.22 * a.bass[i])
+        n = len(members)
+        for k, shape in enumerate(members):
+            if n == 1:
+                cx, cy, size = bx, by, base
+            elif self.layout == "nested":
+                # concentric: biggest outermost, each inner one smaller
+                cx, cy = bx, by
+                size = base * (1.0 - 0.26 * k)
+            else:                                   # row
+                # derive spacing FROM the projected width, don't guess it. A
+                # model draws to roughly 2.9x `size` across (size*1.5 radius
+                # plus perspective), so a fixed span made three skulls overlap
+                # into one blob. This makes them always fit the frame.
+                slot_w = self.W * 0.94 / n
+                size = min(base, slot_w / 2.9)
+                cx = int(bx + slot_w * (k - (n - 1) / 2.0))
+                cy = by
+            self._draw_shape(img, i, a, shape, cx, cy, size, drop)
+
+    def _draw_shape(self, img: np.ndarray, i: int, a: Analysis, shape: str,
+                    cx: int, cy: int, size: float, drop: bool) -> None:
+        # NOD IS FOR HEADS ONLY (Zeke 08-28: "if it's not head shaped it
+        # doesn't need a head nod"). Non-heads get a beat PULSE instead — the
+        # object still answers the music, it just doesn't pretend to have a
+        # chin.
+        if self.nod and self.is_head(shape):
+            nod = self._nod_pitch(i, a)
+            cy = int(cy + nod * self.H * 0.028)
+        else:
+            nod = 0.0
+            if self.nod:
+                size *= 1.0 + 0.12 * max(0.0, 1.0 - float(a.beat_ph[i]) * 3.0)
+        # flat models rock instead of revolving, so they never go edge-on
+        spin = (0.62 * np.sin(self._rot * 0.55) if self.is_flat(shape)
+                else self._rot)
         col = self._pal()
         layer = np.zeros_like(img)
         if shape == "orb":
@@ -1594,7 +1635,7 @@ class Renderer:
             if mesh is None:
                 return
             v, edges = mesh
-            pts = self._project(v, size * 1.5, cx, cy, self._rot,
+            pts = self._project(v, size * 1.5, cx, cy, spin,
                                 tumble=False, pitch=-nod)
             lw = 1 if len(edges) > 900 else 2
             for e0, e1 in edges:
@@ -1605,7 +1646,7 @@ class Renderer:
             if mesh is None:
                 return
             v, edges = mesh
-            pts = self._project(v, size, cx, cy, self._rot, pitch=-nod)
+            pts = self._project(v, size, cx, cy, spin, pitch=-nod)
             for e0, e1 in edges:
                 cv2.line(layer, tuple(pts[e0][0]), tuple(pts[e1][0]),
                          tuple(float(x) for x in col), 2, cv2.LINE_AA)
@@ -1614,10 +1655,53 @@ class Renderer:
 
     _MODEL_CACHE: dict = None    # class-level cache, lazy dict (dataclass-safe)
 
+    _POSES: dict = None
+
+    @classmethod
+    def poses(cls) -> dict:
+        """Per-model pose data from assets/models3d/poses.json:
+            {"heart": {"rot": [rx, ry, rz], "scale": 1.0, "head": false}}
+
+        Zeke 2026-08-28: *"some of the 3d objects should be rotated like the
+        heart and what not and the star, also if it's not head shaped it
+        doesn't need a head nod."* A downloaded mesh arrives in whatever pose
+        its author modelled it in — there is no convention — so orientation has
+        to be per-model data, not a global guess.
+
+        Kept SEPARATE from manifest.json on purpose: build_model_manifest
+        rewrites that file wholesale, which would silently wipe hand-tuned
+        poses."""
+        if cls._POSES is None:
+            p = (Path(__file__).resolve().parent.parent / "assets"
+                 / "models3d" / "poses.json")
+            try:
+                cls._POSES = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                cls._POSES = {}
+        return cls._POSES
+
+    def is_head(self, spec: str) -> bool:
+        """Only head-shaped models nod. A torus knot has no chin."""
+        if not spec.startswith("model:"):
+            return spec == "logo3d"
+        return bool(self.poses().get(spec.split(":", 1)[1], {}).get("head"))
+
+    def is_flat(self, spec: str) -> bool:
+        """Essentially 2-D models (heart, star, bolt, disc). A continuous 360
+        spin turns these EDGE-ON for half of every revolution, where they
+        collapse to a line and effectively disappear — so they get a gentle
+        oscillation instead. Found by rendering the heart at 0/90/180/270 and
+        looking: two of the four angles were an invisible slab."""
+        if not spec.startswith("model:"):
+            return False
+        return bool(self.poses().get(spec.split(":", 1)[1], {}).get("flat"))
+
     def _model_mesh(self, spec: str):
         """Load `model:<name-or-path>` -> (verts[-1..1, y-flipped], edges).
         Bare names resolve to assets/models3d/<name>.glb. Cached per path, so a
-        multi-model rotation loads each mesh once and then swaps for free."""
+        multi-model rotation loads each mesh once and then swaps for free.
+        A pose from poses.json is baked in at load time, so it costs nothing
+        per frame."""
         if Renderer._MODEL_CACHE is None:
             Renderer._MODEL_CACHE = {}
         if spec in Renderer._MODEL_CACHE:
@@ -1633,6 +1717,27 @@ class Renderer:
             v -= v.mean(axis=0)
             v /= max(1e-6, np.abs(v).max())          # unit cube like _SHAPES
             v[:, 1] *= -1.0                          # glTF Y-up -> screen Y-down
+            # BAKE THE POSE (Zeke 08-28: "some of the 3d objects should be
+            # rotated like the heart and what not and the star"). Authors model
+            # in whatever orientation they like and glTF has no convention for
+            # "upright", so the correction is per-model data. Applied once at
+            # load and cached, so it is free per frame.
+            pose = self.poses().get(spec, {})
+            rot = pose.get("rot")
+            if rot:
+                rx, ry, rz = (np.radians(float(x)) for x in rot)
+                for axis, ang in ((0, rx), (1, ry), (2, rz)):
+                    if abs(ang) < 1e-9:
+                        continue
+                    c, s = np.cos(ang), np.sin(ang)
+                    if axis == 0:
+                        R = np.array([[1, 0, 0], [0, c, -s], [0, s, c]], np.float32)
+                    elif axis == 1:
+                        R = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], np.float32)
+                    else:
+                        R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], np.float32)
+                    v = v @ R.T
+                v = v / max(1e-6, float(np.abs(v).max()))
             f = np.asarray(m.faces, np.int64)
             e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]],
                                         f[:, [2, 0]]]), axis=1)
@@ -2124,8 +2229,14 @@ def main() -> int:
                     help="with a comma-list --shape, swap to the next one every "
                          "N BEATS (default 8 = two bars in 4/4). 0 = never swap")
     ap.add_argument("--nod", action="store_true",
-                    help="make the 3D shape NOD to the beat (dip-and-settle "
-                         "pitch + bob) instead of only spinning")
+                    help="beat reaction for the 3D shape. HEAD-shaped models "
+                         "(head:true in assets/models3d/poses.json) tilt "
+                         "chin-down on the beat; everything else gets a size "
+                         "pulse instead — a torus knot has no chin")
+    ap.add_argument("--layout", default="row", choices=["row", "nested"],
+                    help="how a multi-object slot is arranged. Use '+' in "
+                         "--shape for simultaneous objects, e.g. "
+                         "'model:skull_kay+model:skull_2+model:skull_3'")
     ap.add_argument("--viz-every", type=int, default=16, metavar="BEATS",
                     help="with a comma-list --viz, rotate the centrepiece "
                          "visualization every N BEATS (default 16 = four bars). "
@@ -2331,7 +2442,7 @@ def main() -> int:
                  shape=args.shape, bgclips=bgclips, bgclip_idx=bgclip_idx,
                  shape_every=args.shape_every, nod=args.nod,
                  viz_deck=viz_deck, viz_every=args.viz_every,
-                 readable=args.readable, bloom=args.bloom)
+                 readable=args.readable, bloom=args.bloom, layout=args.layout)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "

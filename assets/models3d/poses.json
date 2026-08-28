@@ -1,0 +1,38 @@
+{
+  "_README": [
+    "Per-model presentation data. Zeke 2026-08-28: 'some of the 3d objects should be",
+    "rotated like the heart and what not and the star, also if it's not head shaped it",
+    "doesn't need a head nod'.",
+    "",
+    "rot  : [rx, ry, rz] degrees, baked into the mesh once at load time. glTF has no",
+    "       'upright' convention, so authors model in whatever pose they like.",
+    "head : true = this reads as a HEAD, so --nod tilts it chin-down on the beat.",
+    "       Everything else gets a size pulse instead. A torus knot has no chin.",
+    "flat : true = essentially 2-D (heart, star, bolt, disc). A continuous 360 spin",
+    "       turns these edge-on for half of every revolution and they vanish, so",
+    "       flat models get a gentle +/- oscillation instead of a full rotation.",
+    "",
+    "Kept SEPARATE from manifest.json because build_model_manifest rewrites that file",
+    "wholesale and would silently wipe hand-tuned poses."
+  ],
+
+  "skull_kay":        {"head": true},
+  "skull_quaternius": {"head": true},
+  "skull_q3":         {"head": true},
+  "skull_q4":         {"head": true},
+  "skull_2":          {"head": true},
+  "skull_3":          {"head": true},
+  "skull_4":          {"head": true},
+
+  "iris_heart":       {"rot": [90, 0, 0], "flat": true},
+  "heart":            {"flat": true},
+  "heart_2":          {"flat": true},
+  "star_1":           {"flat": true},
+  "iris_star":        {"flat": true},
+  "iris_star_8":      {"flat": true},
+  "lightning_bolt":   {"flat": true},
+  "lightning_bolt_2": {"flat": true},
+  "cd":               {"flat": true},
+  "figure":           {"flat": true},
+  "dragonfly":        {"flat": true}
+}
