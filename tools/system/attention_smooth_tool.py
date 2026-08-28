@@ -73,7 +73,17 @@ _DEADBAND = 0.05            # normalized offset that counts as centered
 # so the servo flip-flopped centered<->pursuit every few ticks — visible
 # micro-hunting on a static face. Once centered, stay parked until the offset
 # is CLEARLY out (or the target is actually moving, rate check below).
-_DEADBAND_OUT = 0.09        # exit-centered threshold (enter at _DEADBAND)
+# 0.09 -> 0.06 (2026-08-28, Zeke: "the jitter might have came from the onboard
+# AI in your eyes fighting"). He is almost certainly right, and the dates say
+# so: this band was widened 08-21 to damp jitter, but the PIXY's gesture
+# control — which lets a raised palm switch the chip's OWN tracking on — was
+# not disabled until 08-25. So during that jitter two controllers were driving
+# one motor, and I damped MY loop to hide a fight I had misdiagnosed as
+# detector noise. That over-wide band is exactly what let the head latch aimed
+# above a static face (see STANDING-OFFSET ESCAPE). Chip verified off today:
+# mode=0, gesture=disabled. 0.06 keeps a real hysteresis margin over the 0.05
+# entry without swallowing a genuine aim error.
+_DEADBAND_OUT = 0.06        # exit-centered threshold (enter at _DEADBAND)
 # How long an offset must sit CONTINUOUSLY outside _DEADBAND before the wide
 # hysteresis band is bypassed so the static trim can correct it. Long enough
 # that detector noise (which crosses back within a frame or two) never trips
@@ -802,6 +812,12 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                     if abs(dx) <= band and abs(dy) <= band:
                         jog.stop()
                         st["zero_writes"] += 1
+                        # mode-flip counter: rapid centered<->pursuit churn IS
+                        # the jitter signature. Counting it makes "did the
+                        # narrower band bring the twitching back" a measurement
+                        # instead of an argument.
+                        if st.get("mode") != "centered":
+                            st["mode_flips"] = int(st.get("mode_flips") or 0) + 1
                         st["mode"] = "centered"
                         st["_prev_offset"] = {"dx": dx, "dy": dy, "ts": now_t}
                     else:
