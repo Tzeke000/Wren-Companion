@@ -36,8 +36,13 @@ def main() -> int:
 
     names = list(args.names)
     if args.shape:
+        # '+' joins objects shown SIMULTANEOUSLY, ',' separates slots shown in
+        # sequence — both must be split here. Missing '+' made a whole group
+        # parse as one unknown name. It failed safe (exit 2 rather than a false
+        # all-clear), but a licence checker that trips over the renderer's own
+        # syntax is a checker that will get ignored.
         names += [m.split(":", 1)[1] for m in
-                  re.split(r"[,\s]+", args.shape.strip())
+                  re.split(r"[,+\s]+", args.shape.strip())
                   if m.startswith("model:")]
     if args.all:
         names = sorted(man)
