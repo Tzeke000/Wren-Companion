@@ -58,10 +58,21 @@ def logged_load(name: str):
     finally:
         try:
             after = vram_mb()
+            # Attribution (added 2026-08-27): the night the shadow-Ava stack
+            # triple-booted, nobody could say WHICH process/thread loaded
+            # whisper 4×. pid + argv0 + thread name make the next stack
+            # name its own loader.
+            import os as _os
+            import sys as _sys
+            import threading as _threading
             rec = {
                 "ts": round(time.time(), 2),
                 "iso": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "model": name,
+                "pid": _os.getpid(),
+                "proc": (_sys.argv[0].rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+                         if _sys.argv else "?"),
+                "thread": _threading.current_thread().name,
                 "ok": ok,
                 "vram_before_mb": before,
                 "vram_after_mb": after,

@@ -46,6 +46,31 @@ def _print_to_stderr(*args, **kwargs):
     return _real_print(*args, **kwargs)
 _builtins.print = _print_to_stderr
 
+# ── SHADOW-AVA KILL SWITCH (2026-08-27, the night the tower froze at 98% RAM) ──
+# avaagent.py runs _run_startup(globals()) at MODULE level, so ANY
+# `import avaagent` boots Ava's ENTIRE stack (whisper, TTS, VideoMemory,
+# camera loop, voice loop, wake word) inside this process. Several brain/* and
+# tools/* files still carry deferred imports of it (person_registry,
+# prompt_builder, reply_engine, active_learning, notification_tool). Worse: if
+# that import FAILS partway, Python evicts the module and the NEXT deferred
+# import re-runs the whole startup again. Tonight that stacked THREE full
+# shadow stacks in here — 3× ava-voice-loop/video-capture/wake-word threads,
+# 5× STTEngine, 9× WhisperModel, 18GB private RAM — and the same mechanism is
+# the prime suspect for the 21:16 RAM-exhaustion freeze that rebooted the
+# tower. This stub makes the import permanently inert: importers receive an
+# empty module and their own try/except fallbacks handle the missing attrs
+# (those are avaagent-era code paths that must not run in the runtime anyway).
+# See memory: tower_bsod_2026-08-27_gpu_vram.md +
+# shadow_avaagent_stack_in_iris_runtime_2026-08-22.md. Do NOT remove this
+# without confirming every deferred `import avaagent` site is gone.
+import types as _types
+_ava_stub = _types.ModuleType("avaagent")
+_ava_stub.__doc__ = (
+    "STUB (2026-08-27) — the real avaagent must never boot inside "
+    "iris_runtime. See iris_runtime.py 'SHADOW-AVA KILL SWITCH'."
+)
+sys.modules["avaagent"] = _ava_stub
+
 # Wake-word config: until hey_iris.onnx is trained, fall back to the bundled
 # hey_jarvis proxy so we have a working trigger.
 os.environ.setdefault("AVA_USE_HEY_JARVIS_PROXY", "1")
