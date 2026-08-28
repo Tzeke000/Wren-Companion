@@ -282,6 +282,9 @@ class Analysis:
     build: np.ndarray      # 0..1 — rising-energy tension proxy
     bars: np.ndarray       # (n_frames, NBARS) 0..1 — spectrum for bar display
     bpm: float
+    beat: np.ndarray       # bool — TRUE beat grid (librosa tracked, not kicks)
+    beat_i: np.ndarray     # int — cumulative beat number at each frame
+    beat_ph: np.ndarray    # 0..1 — phase within the current beat (0 = on it)
 
 
 NBARS = 40
@@ -332,6 +335,56 @@ def _estimate_bpm(onset_strength: np.ndarray, fps: int) -> float:
         return 0.0
     lag = lo + int(np.argmax(ac[lo:hi]))
     return round(60.0 * fps / lag, 1) if ac[lag] > 0 else 0.0
+
+
+def _beat_grid(mono: np.ndarray, sr: int, fps: int, n: int,
+               kick: np.ndarray, bpm_fallback: float
+               ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """A REAL beat grid, not a kick-onset proxy (Zeke 2026-08-28: "get the BPM
+    ... switch every 8 beats").
+
+    Why not reuse `kick`: low-band onsets are the *pulse we can see*, not the
+    *beat we can count*. Kicks double up on fills, vanish in breakdowns, and
+    fire on 808 slides — so "every 8 kicks" drifts off the bar within a verse
+    and the swap stops landing musically. librosa's beat tracker fits a global
+    tempo with a dynamic-programming phase, so beat 800 is still on the grid.
+
+    Returns (beat_bool, beat_number_per_frame, phase_0_1, bpm). Falls back to a
+    synthetic grid at `bpm_fallback` phase-locked to the first kick when librosa
+    is unavailable or unsure — always returns a usable grid, never raises."""
+    beat_f: np.ndarray | None = None
+    bpm = float(bpm_fallback or 0.0)
+    try:
+        import librosa
+        tempo, frames = librosa.beat.beat_track(y=mono, sr=sr, units="time")
+        t = float(np.atleast_1d(tempo)[0])
+        if len(frames) >= 4 and 50.0 <= t <= 200.0:
+            beat_f = np.round(np.asarray(frames) * fps).astype(int)
+            bpm = round(t, 1)
+    except Exception as ex:
+        print(f"[lyric_viz] librosa beat track unavailable ({ex!r}) — "
+              f"synthesising grid from bpm~{bpm_fallback or 120}")
+    if beat_f is None:
+        # synthetic: uniform grid at the estimated tempo, phase-locked to the
+        # first detected kick so downbeat-ish alignment survives the fallback.
+        per = fps * 60.0 / max(60.0, bpm or 120.0)
+        first = int(np.argmax(kick)) if kick.any() else 0
+        beat_f = np.round(np.arange(first % per, n, per)).astype(int)
+        bpm = bpm or 120.0
+    beat_f = np.unique(beat_f[(beat_f >= 0) & (beat_f < n)])
+    beat = np.zeros(n, dtype=bool)
+    beat[beat_f] = True
+    # beat_i: how many beats have elapsed. cumsum-1 so the frame ON beat 0 is
+    # index 0 (a -1 would make the pre-roll swap a shape for a few frames).
+    beat_i = np.maximum(0, np.cumsum(beat.astype(int)) - 1)
+    # phase: 0 on the beat, ->1 just before the next one. Used for the nod.
+    ph = np.ones(n, np.float32)
+    if len(beat_f):
+        nxt = np.append(beat_f[1:], n)
+        for b, e in zip(beat_f, nxt):
+            if e > b:
+                ph[b:e] = np.linspace(0.0, 1.0, e - b, endpoint=False)
+    return beat, beat_i.astype(int), ph, bpm
 
 
 def _detect_drop(bass_raw: np.ndarray, fps: int) -> np.ndarray:
@@ -458,14 +511,17 @@ def analyze(audio: Path, fps: int) -> tuple[Analysis, np.ndarray, int]:
             prev = col[i] if col[i] > prev else prev * 0.82
             col[i] = prev
 
-    print(f"[lyric_viz] analysis: bpm~{bpm or '?'} kicks={int(kick.sum())} "
-          f"snares={int(snare.sum())} drop_frames={int(drop.sum())} "
-          f"({drop.mean() * 100:.0f}% of track)")
+    beat, beat_i, beat_ph, bpm = _beat_grid(mono, sr, fps, n, kick, bpm)
+
+    print(f"[lyric_viz] analysis: bpm~{bpm or '?'} beats={int(beat.sum())} "
+          f"kicks={int(kick.sum())} snares={int(snare.sum())} "
+          f"drop_frames={int(drop.sum())} ({drop.mean() * 100:.0f}% of track)")
     return (Analysis(rms=np.clip(_ema(_norm95(rms), 0.08, fps), 0, 1),
                      bass=np.clip(_ema(bass_n, 0.08, fps), 0, 1),
                      high=np.clip(_ema(_norm95(high), 0.06, fps), 0, 1),
                      kick=kick, snare=snare, drop=drop, build=build,
-                     bars=bars, bpm=bpm),
+                     bars=bars, bpm=bpm,
+                     beat=beat, beat_i=beat_i, beat_ph=beat_ph),
             y, sr)
 
 
@@ -635,7 +691,12 @@ class Renderer:
     _center_pocket: np.ndarray | None = None  # darkening behind centerpiece
     corner_logo: "tuple | None" = None      # (rgb, mask) small watermark
     shape: str = "none"                     # cube|pyramid|cylinder|orb|logo3d|none
+                                            # — or a COMMA LIST to rotate through
+    shape_every: int = 8                    # swap to the next shape every N beats
+    nod: bool = False                       # bob/pitch the shape on each beat
     _rot: float = 0.0                       # accumulated 3D rotation
+    _shapes: "list | None" = None           # parsed shape list (set in __post_init__)
+    _shape_last: int = -1                   # last slot index, for swap logging
 
     # -- setup ------------------------------------------------------------
     def __post_init__(self):
@@ -653,6 +714,10 @@ class Renderer:
         self._vignette = np.clip(1.0 - 0.55 * np.clip(d - 0.55, 0, 1) ** 1.5,
                                  0, 1).astype(np.float32)[..., None]
         self._logo_mask = self._make_logo_mask()
+        # shape deck: "model:skull_kay,model:skull_quaternius,orb,cube" rotates
+        # every `shape_every` beats. A single value = old behaviour, no swaps.
+        self._shapes = [s.strip() for s in str(self.shape).split(",")
+                        if s.strip() and s.strip() != "none"]
 
     def font(self, size: int, name: str = ""):
         key = (size, name)
@@ -1114,16 +1179,46 @@ class Renderer:
                                 "cylinder": (cyl_v, cyl_e)}
         return Renderer._SHAPES
 
+    def _shape_now(self, i: int, a: Analysis) -> str:
+        """Which shape is on screen at frame i. Swaps every `shape_every` beats
+        so the page changes with the music instead of one model reacting for
+        the whole song (Zeke 2026-08-28)."""
+        if not self._shapes:
+            return "none"
+        if len(self._shapes) == 1 or self.shape_every <= 0:
+            return self._shapes[0]
+        slot = int(a.beat_i[i]) // int(self.shape_every)
+        return self._shapes[slot % len(self._shapes)]
+
+    def _nod_pitch(self, i: int, a: Analysis) -> float:
+        """Beat-synced nod: a sharp dip on the beat that eases back out.
+        exp decay on the beat phase = struck-then-settle, which reads as a head
+        nodding rather than a sine wobble that is always mid-motion."""
+        if not self.nod:
+            return 0.0
+        ph = float(a.beat_ph[i])
+        amp = 0.20 + 0.16 * float(a.bass[i]) + (0.10 if a.drop[i] else 0.0)
+        return amp * float(np.exp(-4.5 * ph) * np.sin(np.pi * min(1.0, ph * 2.2)))
+
     def _viz_shape(self, img: np.ndarray, i: int, a: Analysis) -> None:
-        if self.shape in ("none", ""):
+        shape = self._shape_now(i, a)
+        if shape in ("none", ""):
             return
+        if self._shapes and len(self._shapes) > 1:
+            slot = int(a.beat_i[i]) // max(1, int(self.shape_every))
+            if slot != self._shape_last:
+                self._shape_last = slot
+                # a swap resets the spin so each model enters facing forward
+                self._rot = 0.0
         cx, cy = self._logo_center()
         drop = bool(a.drop[i])
         self._rot += (0.012 + 0.05 * a.bass[i] + (0.03 if drop else 0.0))
+        nod = self._nod_pitch(i, a)
+        cy = int(cy + nod * self.H * 0.10)      # the bob travels with the pitch
         size = self.H * 0.14 * (1.0 + 0.22 * a.bass[i])
         col = self._pal()
         layer = np.zeros_like(img)
-        if self.shape == "orb":
+        if shape == "orb":
             # glowing sphere: radial falloff core + two rotating rings
             rr = int(size)
             yy, xx = np.ogrid[-rr:rr, -rr:rr]
@@ -1140,7 +1235,7 @@ class Renderer:
                                     self._rot * (1.3 if k else 1.0))
                 cv2.polylines(layer, [pts], True,
                               tuple(float(x) for x in col * 0.8), 2, cv2.LINE_AA)
-        elif self.shape == "logo3d" and self._logo_rgb is not None:
+        elif shape == "logo3d" and self._logo_rgb is not None:
             # TRUE continuous 360 spin (Zeke 08-26 "do a 360 on a loop"):
             # width follows cos(ang); when the back faces us the logo is
             # MIRRORED (like a card turning), slightly dimmed — so it reads
@@ -1171,26 +1266,26 @@ class Renderer:
             edge = cv2.morphologyEx(wm[..., 0], cv2.MORPH_GRADIENT,
                                     np.ones((3, 3), np.uint8))
             layer += cv2.GaussianBlur(edge, (0, 0), 3)[..., None] * col
-        elif self.shape.startswith("model:"):
+        elif shape.startswith("model:"):
             # GLB wireframe centerpiece (Zeke 08-27: "adding some 3-D reactive
             # shapes... like a skull"). Mesh from assets/models3d via trimesh,
             # same projection pipeline as the procedural shapes.
-            mesh = self._model_mesh()
+            mesh = self._model_mesh(shape.split(":", 1)[1])
             if mesh is None:
                 return
             v, edges = mesh
             pts = self._project(v, size * 1.5, cx, cy, self._rot,
-                                tumble=False)
+                                tumble=False, pitch=nod)
             lw = 1 if len(edges) > 900 else 2
             for e0, e1 in edges:
                 cv2.line(layer, tuple(pts[e0][0]), tuple(pts[e1][0]),
                          tuple(float(x) for x in col), lw, cv2.LINE_AA)
         else:
-            mesh = self._shape_mesh().get(self.shape)
+            mesh = self._shape_mesh().get(shape)
             if mesh is None:
                 return
             v, edges = mesh
-            pts = self._project(v, size, cx, cy, self._rot)
+            pts = self._project(v, size, cx, cy, self._rot, pitch=nod)
             for e0, e1 in edges:
                 cv2.line(layer, tuple(pts[e0][0]), tuple(pts[e1][0]),
                          tuple(float(x) for x in col), 2, cv2.LINE_AA)
@@ -1199,10 +1294,10 @@ class Renderer:
 
     _MODEL_CACHE: dict = None    # class-level cache, lazy dict (dataclass-safe)
 
-    def _model_mesh(self):
+    def _model_mesh(self, spec: str):
         """Load `model:<name-or-path>` -> (verts[-1..1, y-flipped], edges).
-        Bare names resolve to assets/models3d/<name>.glb. Cached per path."""
-        spec = self.shape.split(":", 1)[1]
+        Bare names resolve to assets/models3d/<name>.glb. Cached per path, so a
+        multi-model rotation loads each mesh once and then swaps for free."""
         if Renderer._MODEL_CACHE is None:
             Renderer._MODEL_CACHE = {}
         if spec in Renderer._MODEL_CACHE:
@@ -1232,8 +1327,9 @@ class Renderer:
         return out
 
     def _project(self, v: np.ndarray, size: float, cx: int, cy: int,
-                 rot: float, tumble: bool = True) -> np.ndarray:
-        ry, rx = rot, (rot * 0.62 if tumble else 0.30)
+                 rot: float, tumble: bool = True,
+                 pitch: float = 0.0) -> np.ndarray:
+        ry, rx = rot, (rot * 0.62 if tumble else 0.30) + pitch
         cyr, syr = np.cos(ry), np.sin(ry)
         cxr, sxr = np.cos(rx), np.sin(rx)
         Ry = np.array([[cyr, 0, syr], [0, 1, 0], [-syr, 0, cyr]], np.float32)
@@ -1374,9 +1470,9 @@ class Renderer:
         self._viz(img, i, a)
         if self.deck:
             self._deck(img, i, a)
-        elif self.shape in ("none", ""):
+        elif not self._shapes:
             self._logo(img, i, a)
-        if self.shape not in ("none", ""):
+        if self._shapes:
             self._viz_shape(img, i, a)
         self._corner(img, i, a)
         self._lyrics(img, i, t, a)
@@ -1656,7 +1752,15 @@ def main() -> int:
     ap.add_argument("--shape", default="none",
                     help="rotating music-reactive 3D centerpiece: none|cube|"
                          "pyramid|cylinder|orb|logo3d|model:<name-or-glb-path>"
-                         " (bare names resolve to assets/models3d/<name>.glb)")
+                         " (bare names resolve to assets/models3d/<name>.glb). "
+                         "COMMA-LIST to cycle several, e.g. "
+                         "'model:skull_kay,model:skull_quaternius,orb,cube'")
+    ap.add_argument("--shape-every", type=int, default=8, metavar="BEATS",
+                    help="with a comma-list --shape, swap to the next one every "
+                         "N BEATS (default 8 = two bars in 4/4). 0 = never swap")
+    ap.add_argument("--nod", action="store_true",
+                    help="make the 3D shape NOD to the beat (dip-and-settle "
+                         "pitch + bob) instead of only spinning")
     ap.add_argument("--no-vocals", action="store_true",
                     help="skip transcription (instrumental track)")
     ap.add_argument("--tiktok", action="store_true",
@@ -1818,7 +1922,16 @@ def main() -> int:
     r = Renderer(W, H, style, lines, args.fps, logo=logo, title=args.title,
                  wave_env=wave_env.astype(np.float32),
                  deck=deck, deck_idx=deck_idx, corner_logo=corner,
-                 shape=args.shape, bgclips=bgclips, bgclip_idx=bgclip_idx)
+                 shape=args.shape, bgclips=bgclips, bgclip_idx=bgclip_idx,
+                 shape_every=args.shape_every, nod=args.nod)
+    if r._shapes and len(r._shapes) > 1:
+        beats_per = max(1, args.shape_every)
+        print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
+              f"({', '.join(r._shapes)}) swapping every {beats_per} beats "
+              f"~= {int(analysis.beat.sum()) // beats_per} swaps"
+              + (", nodding to the beat" if args.nod else ""))
+    elif args.nod:
+        print("[lyric_viz] nod: ON (dip-and-settle on every beat)")
 
     f0, f1 = 0, n_frames
     if args.tiktok:
