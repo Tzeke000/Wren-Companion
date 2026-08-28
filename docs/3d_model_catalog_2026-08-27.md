@@ -1,74 +1,77 @@
-# 3D model catalog for lyric_viz centerpieces (hunted 2026-08-27)
+# 3D model library — what is ACTUALLY on disk (rewritten 2026-08-28)
 
-Zeke's ask: *"find like 20 to 30 different 3-D models... free audio-visualization-reactive
-models."* All from **Poly Pizza** (poly.pizza — the Google Poly archive + living creators),
-all FREE, low-poly (perfect for the wireframe/mesh look), downloadable as **glTF/GLB**.
-URL pattern: `https://poly.pizza/m/<ID>`.
+All files live in `assets/models3d/`. Use with
+`--shape model:<name>` (comma-list to rotate several — see `--shape-every`).
 
-## License rules (matters for published videos)
-- **Public Domain (CC0)** — use freely, no credit needed. Prefer these for TikTok.
-- **CC-BY 3.0** — free but MUST credit the author in the video description/caption.
+**42 models.** All verified to load through `Renderer._model_mesh` and all inside the
+wireframe edge budget.
 
-## The catalog (34 curated of 43 found)
+## Why the edge budget exists (200–4000)
 
-### Skulls & bones (Burn It Down / dark dubstep energy)
-| Model | Author | License | ID |
-|---|---|---|---|
-| Skull | Kay Lousberg | **CC0** | 7clFQGz5jH |
-| Skull (variant 1) | Quaternius | **CC0** | YgmRBtFlcF |
-| Skull (variant 2) | Quaternius | **CC0** | ExZmhOIjka |
-| Skull (variant 3) | Quaternius | **CC0** | EAsVEJwsv7 |
-| Skull (variant 4) | Quaternius | **CC0** | DJT7N0HuVB |
-| Ghost Skull | Quaternius | **CC0** | TX8r9WBXpe |
-| Skeleton | Quaternius | **CC0** | yq5ATpujSt |
-| skull003 (realistic) | Jake K-H | CC-BY 3.0 | bjf0z6Qb9Tv |
-| Skull | CreativeTechLab | CC-BY 3.0 | oxtpAT0TaB |
-| Skull | Alex Safayan | CC-BY 3.0 | 52a7EEFzFWi |
-| Skull | Ian Wall | CC-BY 3.0 | 738EKrsYz96 |
-| Brain | Poly by Google | CC-BY 3.0 | 5mPRPZkI3qt |
+These render as **wireframes** — every mesh edge drawn as a line. Verified by eye
+2026-08-28: **low-poly reads as the object; dense meshes collapse into an unreadable ball
+of lines.** `scripts/fetch_models.py` enforces 40–4000 edges and *deletes* anything outside
+it rather than leaving it to disappoint someone later. 20+ downloads were rejected on this
+rule alone — cars, motorcycles, city scenes and realistic skulls run 8k–92k edges.
 
-### Hearts (Plastic Heart / Be My One / Love the Mirror)
-| Heart | Poly by Google | CC-BY 3.0 | 8RA5hHU5gHK |
-| Heart | Quaternius | **CC0** | 1yCRUwFnwX |
-| Heart (v2) | Poly by Google | CC-BY 3.0 | 5POtMKIT_Ze |
+## ★ The naming lesson (2026-08-28)
 
-### Fire (Burn It Down)
-| Fire | Jakob Hippe | CC-BY 3.0 | 1QpMTUO7P-G |
-| Campfire | Poly by Google | CC-BY 3.0 | 0vzzmM-t8CP |
+The first pass named files after the **search term** that found them. That produced names
+that lied: `dragon_1` was a **dragonfly**, `headphones_2` was a **phone**, `helmet_2` was a
+**top hat**, `star_2` was a **sphere**. Nothing catches this except *rendering every model
+and looking at it* — which I did, in one contact sheet, and then renamed or deleted.
+**A library whose names lie is worse than a smaller honest one.** 9 unidentifiable models
+were deleted outright.
 
-### Cars & motorcycles (Chipped White Car / the Zaro moto angle)
-| CAR Model | Ignition Labs | CC-BY 3.0 | 5zUWP5UsLg- |
-| Car | Poly by Google | CC-BY 3.0 | 75h3mi6uHuC |
-| Red Car | J-Toastie | CC-BY 3.0 | dVLJ5CjB0h |
-| Mazda RX-7 | IvOfficial | CC-BY 3.0 | SnIoWlh7S2 |
-| Motorcycle | Poly by Google | CC-BY 3.0 | dse64pqMKAR |
-| Motorcycle (v2) | Poly by Google | CC-BY 3.0 | 5_MTCnqfUTr |
+⇒ If you add models: render them face-on as wireframes and LOOK before trusting the name.
 
-### Cities & skylines (Crimson Skyline / Neon Horizon)
-| SF Street | Alan Zimmerman | CC-BY 3.0 | cnTMgkFoTS0 |
-| Rio de Janeiro | Alan Zimmerman | CC-BY 3.0 | 2binsxeOBve |
-| Vancouver, but small | Michal Minecki | CC-BY 3.0 | 5deJc9xvuzn |
+## Licensing — read before posting publicly
 
-### Gems, bolts, cosmic (drops / EDM generic)
-| diamond | smoj | CC-BY 3.0 | 5SvQ6iU_CHg |
-| Gem Green | Quaternius | **CC0** | kbgiCMzdxg |
-| Jewel | Zsky | CC-BY 3.0 | velVo80s1D |
-| Lightning Bolt | Jarlan Perez | CC-BY 3.0 | 7I1IhiE7O8s |
-| Lightning bolt | Poly by Google | CC-BY 3.0 | 8rX_fFhz6XH |
-| Planets (set) | Poly by Google | CC-BY 3.0 | 3_tN7i962hZ |
-| Planet | Quaternius | **CC0** | 18Uxrb2dIc |
-| Sun | Poly by Google | CC-BY 3.0 | 77wHkzwlpOq |
-| Rose | Erbay ÇELIK | CC-BY 3.0 | 4UQ29NSK0ir |
+Sources are **poly.pizza** (Google Poly archive + living creators). Two licenses appear:
 
-## Implementation note (the actual work, next session)
-lyric_viz's `--shape` renders procedural wireframes from vertex/edge arrays
-(`_shape_mesh`). To use these models: add a `--shape model:<file.glb>` path — load GLB
-via `trimesh` (pip, MIT) or a minimal GLB parser, decimate to ~1-3k edges, feed the same
-`_project` pipeline. Bass-reactive scale/rotation comes free from `_viz_shape`. CC0
-skull (Quaternius) is the obvious first test on Burn It Down.
+- **CC0** — public domain. No credit needed. Preferred, and what most of this library is.
+- **CC-BY 3.0** — free but **legally requires crediting the author** in the video
+  description/caption.
 
-## Sources sweep (for future hunts)
-- poly.pizza — this catalog; search + `/m/<id>` pages, license per model. ✅ works headless
-- Also known-good free sources not yet needed: Quaternius.com (CC0 packs),
-  Kenney.nl (CC0), polyhaven.com/models (CC0), OpenGameArt, Sketchfab (filter
-  downloadable+CC — needs login for some).
+**The known CC-BY authors in this set** (from the original 08-27 catalog): Jake K-H,
+CreativeTechLab, Alex Safayan, Ian Wall, Poly by Google, Jakob Hippe, Ignition Labs,
+J-Toastie, IvOfficial, Alan Zimmerman, Michal Minecki, smoj, Zsky, Jarlan Perez.
+CC0 authors: **Quaternius**, **Kay Lousberg**.
+
+⚠ The per-file license mapping was not fully preserved through the rename/prune pass.
+**Before Zeke posts anything using a non-skull model, re-check that model's page** — the
+CC0 skulls (Kay Lousberg + Quaternius) are the safe default and are what the current
+Chipped White Car render uses, so **that post is clean**.
+
+## The library
+
+| Name | Reads as |
+|---|---|
+| `skull_kay`, `skull_quaternius`, `skull_2`, `skull_3`, `skull_4`, `skull_q3`, `skull_q4` | skulls — the workhorses, all legible |
+| `heart`, `heart_2` | hearts |
+| `diamond`, `jewel`, `gem_green` | faceted gems — very low poly, very crisp |
+| `crystal_1`, `crystal_2`, `crystal_3` | crystal shards / clusters |
+| `lightning_bolt`, `lightning_bolt_2` | bolts |
+| `fire`, `campfire` | flames |
+| `moon_1`, `moon_2`, `moon_3`, `sphere_1` | spheres / planetoids |
+| `planets_set`, `sun` | planet row; spiky sun |
+| `star_1` | a real 5-point star |
+| `rocket_1`, `rocket_3` | rockets |
+| `wolf_1`, `wolf_2`, `wolf_3` | standing wolves — ⚠ read well at an angle, edge-on they vanish |
+| `dragonfly` | dragonfly |
+| `figure` | small human figure |
+| `red_car` | low-poly car |
+| `harp`, `headphones_3`, `phone` | instruments/objects |
+| `crown_1`, `crown_2`, `top_hat`, `hat_1`, `dome` | headwear / domes |
+
+## Adding more
+
+```
+py scripts/fetch_models.py --search "crystal,helmet,wolf" --limit 3
+py scripts/fetch_models.py --from-catalog
+py scripts/fetch_models.py mything:PolyPizzaShortId
+```
+★ The short ID in a poly.pizza URL is **not** the asset filename —
+`static.poly.pizza/<shortid>.glb` returns 403. The script scrapes the model page for the
+real `static.poly.pizza/<uuid>.glb`. A downloaded file starting with `<?xm` instead of
+`glTF` is an S3 error page, not a model.
