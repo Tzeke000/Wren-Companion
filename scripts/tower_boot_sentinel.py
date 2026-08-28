@@ -238,8 +238,11 @@ def main() -> int:
                     "MANUALLY RESTARTED via the force_stack_restart flag (not a "
                     "power event). Reason: " + force_reason + " — Orient: read "
                     "memory CORE + the newest handoff (it explains this restart). "
-                    "Then verify no 'Trigger: idle', re-create the hourly "
-                    "self-cron, and DM Zeke on Discord (channel "
+                    "Then verify no 'Trigger: idle', re-mint the self-cron "
+                    "FROM memory/self_cron_prompt_spec.md (that file is the "
+                    "prompt's one home — do NOT reconstruct it from handoffs, "
+                    "and do NOT trust a cadence quoted in this nudge), update "
+                    "its ID in MEMORY.md CORE, and DM Zeke on Discord (channel "
                     "1504668879220117725) one status line.")},
                 timeout=90)
             log("forced-restart orientation nudge posted to /api/v1/chat")
@@ -318,9 +321,11 @@ def main() -> int:
                     "OFF-dock is still broken (drive_on_charger hangs), so if he "
                     "is off the charger it needs Zeke's hands. Read-only checks "
                     "only; never body_park (it wedges the SDK).\n"
-                    "(5) Re-create the 3-hourly self-cron (it dies with every "
-                    "restart) and note its id in CORE (one home, the CORE "
-                    "line).\n"
+                    "(5) Re-mint the self-cron FROM "
+                    "memory/self_cron_prompt_spec.md (it dies with every "
+                    "restart; that file owns the prompt AND the cadence — do "
+                    "not reconstruct it from handoffs) and note its id in CORE "
+                    "(one home, the CORE line).\n"
                     "(6) DM Zeke on Discord (channel 1504668879220117725) ONE "
                     "status line — he got mechanical sentinel pings already and "
                     "needs YOUR confirmation that cognition is back. SKIP this "
