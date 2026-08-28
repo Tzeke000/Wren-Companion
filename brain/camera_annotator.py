@@ -150,6 +150,39 @@ def annotate_frame(frame: Any, face_results: list[dict[str, Any]] | None, g: dic
     return annotate_display(frame, face_results, g)
 
 
+_OVERLAY_FLAG = None        # (path, mtime, value) cache — see _overlay_off
+_OVERLAY_CHECKED = 0.0
+
+
+def _overlay_off() -> bool:
+    """True when `state/camera_overlay_off.json` says {"off": true}.
+
+    Zeke 2026-08-28 asked for the tracking overlay off while using the camera
+    in Discord. Both frame endpoints annotate at serve time, so the boxes are
+    baked into the pixels before anything downstream sees them — there is no
+    way to strip them later. A flag is the only live control.
+
+    Deliberately a FILE, matching `voice_deliberately_off.json`: any process
+    can toggle it, it survives restarts, and it is greppable when a future me
+    wonders why the overlay vanished. Re-read at most once a second — this runs
+    per served frame.
+    """
+    global _OVERLAY_FLAG, _OVERLAY_CHECKED
+    import time as _t
+    now = _t.time()
+    if now - _OVERLAY_CHECKED < 1.0:
+        return bool(_OVERLAY_FLAG)
+    _OVERLAY_CHECKED = now
+    try:
+        import json as _j
+        from pathlib import Path as _P
+        p = _P(__file__).resolve().parent.parent / "state" / "camera_overlay_off.json"
+        _OVERLAY_FLAG = bool(_j.loads(p.read_text(encoding="utf-8")).get("off"))
+    except Exception:
+        _OVERLAY_FLAG = False       # missing//unreadable flag = overlay ON
+    return bool(_OVERLAY_FLAG)
+
+
 def annotate_display(frame: Any, face_results: list[dict[str, Any]] | None, g: dict[str, Any]) -> Any:
     """Draw face overlays on `frame` and return the modified frame.
 
@@ -158,6 +191,28 @@ def annotate_display(frame: Any, face_results: list[dict[str, Any]] | None, g: d
     """
     if frame is None:
         return frame
+    # ── OVERLAY KILL-SWITCH (Zeke 2026-08-28: "can you take the hud off").
+    # Inlined rather than calling _overlay_off(): brain_hot_swap can REPLACE an
+    # existing function but cannot ADD one, so a helper would need a full stack
+    # restart to become reachable. Everything the switch needs lives here.
+    try:
+        import time as _t
+        _now = _t.time()
+        if _now - getattr(annotate_display, "_flag_ts", 0.0) >= 1.0:
+            annotate_display._flag_ts = _now
+            try:
+                import json as _j
+                from pathlib import Path as _P
+                _p = (_P(__file__).resolve().parent.parent / "state"
+                      / "camera_overlay_off.json")
+                annotate_display._flag = bool(
+                    _j.loads(_p.read_text(encoding="utf-8")).get("off"))
+            except Exception:
+                annotate_display._flag = False   # no flag = overlay ON
+        if getattr(annotate_display, "_flag", False):
+            return frame
+    except Exception:
+        pass                                     # never break the camera path
     if not face_results:
         _smooth_state.clear()  # returning faces snap fresh, no stale glide
         # No faces — but hands may still be up (person just off the face-detect
