@@ -699,6 +699,124 @@ LOOKS: dict[str, dict] = {
 
 BG_MODES = ("flow", "starfield", "plasma", "flat", "metal", "tunnel")
 
+# ---------------------------------------------------------------------------
+# LYRIC-DRIVEN MODELS
+# ---------------------------------------------------------------------------
+# Zeke 2026-08-28: *"you would just have to read the lyrics and then know which
+# time the lyrics say certain things is when you should change some of the
+# models to the beat of the music — so when the song says 'and the rain on the
+# roof made a soft little code' you could zoom in on the roof of one of the 3-D
+# houses, or when the song talks about a chipped white car, you change the 3-D
+# model to a car."*
+#
+# Every ingredient already existed: word-level timestamps come out of the
+# aligner, the model library is 95 named files, and the shape deck already
+# swaps on beat boundaries. This is the glue.
+#
+# WORD -> the model names to prefer. Keys are matched against the lyric as
+# whole words (and simple plurals). The first key that hits wins, so put the
+# specific things first — "police" before "car".
+LYRIC_MODELS: "list[tuple[tuple[str, ...], tuple[str, ...]]]" = [
+    (("police", "cop", "cops", "siren"), ("police_car",)),
+    (("motorcycle", "motorbike", "bike"), ("cartoony_purple_motorcycle",)),
+    (("car", "cars", "drive", "driving", "drove", "engine", "wheel",
+      "wheels", "highway", "road"), ("red_car", "sports_car", "car",
+                                     "car_hatchback", "sports_car_2")),
+    (("roof", "house", "home", "door", "window", "room", "walls", "wall"),
+     ("fantasy_house", "house", "cabin_shed", "barn")),
+    (("city", "building", "buildings", "town", "street"),
+     ("big_building", "street_lamp")),
+    (("skull", "skulls", "bone", "bones", "dead", "death", "die", "dying",
+      "grave", "ghost"), ("skull_2", "skull_6", "skull_quaternius")),
+    (("heart", "hearts", "love", "loved", "loving"), ("heart", "heart_2")),
+    (("fire", "burn", "burning", "burned", "flame", "flames", "ash"),
+     ("fire", "campfire")),
+    (("rain", "storm", "thunder", "lightning", "strike"),
+     ("lightning_bolt", "lightning_bolt_2")),
+    (("moon", "moonlight", "night", "midnight"), ("moon_1", "moon_2")),
+    (("star", "stars", "sky", "space", "galaxy"), ("star_1", "planets_set")),
+    (("sun", "sunlight", "morning", "daylight"), ("sun",)),
+    (("crown", "king", "queen", "royal"), ("crown_1", "crown_2")),
+    (("diamond", "diamonds", "jewel", "gem", "crystal", "glass", "ice"),
+     ("diamond", "jewel", "gem_green", "crystal_1")),
+    (("phone", "call", "called", "calling", "text", "texted"), ("phone",)),
+    (("music", "song", "sing", "singing", "sound", "beat", "bass", "speaker"),
+     ("rolling_music_speaker_stand", "boombox", "stereo_furniture")),
+    (("piano", "keys"), ("piano", "piano_2")),
+    (("mic", "microphone", "voice"), ("microphone",)),
+    (("headphones",), ("headphones", "headphones_2")),
+    (("wolf", "wolves", "howl"), ("wolf_1", "wolf_3")),
+    (("rocket", "fly", "flying", "flight"), ("rocket_1",)),
+    (("tree", "trees", "palm", "beach"), ("palm_tree", "palm_tree_2")),
+    (("hat", "cap"), ("top_hat", "hat_1")),
+]
+
+
+def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
+                         available: "set[str]", hold_beats: int = 8):
+    """Per-frame model spec driven by what is being SUNG, or None.
+
+    Returns an object array of length n_frames holding "model:<name>" where a
+    lyric hit is active and "" elsewhere, so the caller can fall back to the
+    normal shape deck.
+
+    TIMING IS THE WHOLE CRAFT HERE. The swap is snapped BACK to the beat at or
+    just before the word, not fired on the word's exact timestamp: a cut that
+    lands mid-word reads as a glitch, while the same cut on the downbeat reads
+    as deliberate. And the object wants to be on screen AS the word arrives,
+    not after it."""
+    sched = np.zeros(n_frames, dtype=object)
+    sched[:] = ""
+    zoom = np.ones(n_frames, np.float32)
+    if not lines:
+        return None, None
+    beat_i = np.asarray(beat_i)
+    # first frame index of each beat number, so a time can snap to a downbeat
+    beat_start = {}
+    for f, b in enumerate(beat_i):
+        beat_start.setdefault(int(b), f)
+    hits = []
+    for ln in lines:
+        for w in ln:
+            token = re.sub(r"[^a-z]", "", str(w.text).lower())
+            if len(token) < 3:
+                continue
+            for keys, models in LYRIC_MODELS:
+                if token in keys or (token.endswith("s")
+                                     and token[:-1] in keys):
+                    pick = next((m for m in models if m in available), None)
+                    if pick:
+                        hits.append((float(w.start), pick, token))
+                    break
+    if not hits:
+        return None, None
+    hits.sort()
+    used = []
+    for t, model, token in hits:
+        f = min(n_frames - 1, max(0, int(round(t * fps))))
+        b = int(beat_i[f])
+        f0 = beat_start.get(b, f)
+        if used and f0 - used[-1][0] < int(hold_beats * 0.5 * fps / 4):
+            continue                      # too close to the last swap
+        used.append((f0, model, token))
+    for k, (f0, model, token) in enumerate(used):
+        f1 = used[k + 1][0] if k + 1 < len(used) else n_frames
+        # hold for hold_beats, or until the next hit, whichever is sooner
+        b0 = int(beat_i[min(f0, n_frames - 1)])
+        f_hold = beat_start.get(b0 + hold_beats, n_frames)
+        end = min(f1, f_hold, n_frames)
+        sched[f0:end] = f"model:{model}"
+        # SLOW PUSH-IN across the cue — Zeke: "you could zoom in on the roof of
+        # one of the 3-D houses". A cut to the right object is the substance;
+        # the dolly is what makes it read as a deliberate shot rather than a
+        # slide change. Starts slightly wide so the growth is visible.
+        if end > f0:
+            zoom[f0:end] = np.linspace(0.90, 1.20, end - f0, dtype=np.float32)
+    print(f"[lyric_viz] lyric models: {len(used)} cues -> "
+          + ", ".join(f"{t}->{m}" for _, m, t in used[:8])
+          + (" ..." if len(used) > 8 else ""))
+    return sched, zoom
+
 # Metal tints. `base` in the metal shader is Schlick F0 — the colour of the
 # MIRROR — so these are real conductor reflectances, not surface paint. Zeke
 # said "shiny metallic", and the palette-tinted default renders blue chrome;
@@ -808,6 +926,8 @@ class Renderer:
     bg_every: int = 16                      # ...every N beats
     jaw: bool = False                       # hinge a skull's mandible on the kick
     lasers: bool = False                    # eye beams on the drop
+    lyric_shapes: "np.ndarray | None" = None  # per-frame model driven by words
+    lyric_zoom: "np.ndarray | None" = None    # push-in while a cue is on
     bg_layout: str = "field"                # field|tunnel placement for bg=metal
     bg_mirror: int = 0                      # >1: fold the background N ways
     bg_shape: str = "octa"                  # primitive used by bg=metal
@@ -1752,6 +1872,12 @@ class Renderer:
         """Which shape is on screen at frame i. Swaps every `shape_every` beats
         so the page changes with the music instead of one model reacting for
         the whole song (Zeke 2026-08-28)."""
+        # a sung cue outranks the deck: the whole point is that the object on
+        # screen is the thing the line is about
+        if self.lyric_shapes is not None:
+            cue = self.lyric_shapes[i]
+            if cue:
+                return str(cue)
         if not self._shapes:
             return "none"
         if len(self._shapes) == 1 or self.shape_every <= 0:
@@ -1819,6 +1945,8 @@ class Renderer:
         members = [s for s in slot_spec.split("+") if s]
         bx, by = self._logo_center()
         base = self.H * 0.14 * (1.0 + 0.22 * a.bass[i])
+        if self.lyric_zoom is not None:
+            base *= float(self.lyric_zoom[i])
         n = len(members)
         for k, shape in enumerate(members):
             if n == 1:
@@ -2951,6 +3079,15 @@ def main() -> int:
                          "skull_quaternius do; models that are one solid piece "
                          "are drawn whole, because a wrong jaw is worse than "
                          "no jaw")
+    ap.add_argument("--lyric-models", action="store_true",
+                    help="pick the 3D model from WHAT IS BEING SUNG: when the "
+                         "line mentions a car, show a car; a roof, show a "
+                         "house. Uses the aligned word timings and snaps each "
+                         "swap back to the nearest beat. Falls back to the "
+                         "--shape deck whenever no word matches")
+    ap.add_argument("--lyric-hold", type=int, default=8, metavar="BEATS",
+                    help="how long a lyric-cued model stays on screen "
+                         "(default 8 beats = two bars)")
     ap.add_argument("--lasers", action="store_true",
                     help="beams from a head model's eye sockets, on the DROP "
                          "only (not every kick - it stops meaning anything if "
@@ -3200,6 +3337,14 @@ def main() -> int:
                  bg_deck=bg_deck, bg_every=args.bg_every,
                  bg_mirror=args.bg_mirror, jaw=args.jaw,
                  lasers=args.lasers)
+    if args.lyric_models:
+        avail = {q.stem for q in (REPO / "assets" / "models3d").glob("*.glb")}
+        r.lyric_shapes, r.lyric_zoom = lyric_model_schedule(
+            lines, args.fps, analysis.beat_i, n_frames, avail,
+            hold_beats=args.lyric_hold)
+        if r.lyric_shapes is None:
+            print("[lyric_viz] lyric models: no matching words - "
+                  "falling back to the shape deck")
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
