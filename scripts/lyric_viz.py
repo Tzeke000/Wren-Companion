@@ -684,6 +684,11 @@ LOOKS: dict[str, dict] = {
     # centrepiece.
     "vortex": dict(gpu3d="metal", bg="tunnel", bg_shape="torus+nut",
                    bg_count=64, bloom=0.38),
+    # falling through a spiralling corridor of chrome rings.
+    "wormhole": dict(gpu3d="metal", bg="tunnel", bg_shape="torus",
+                     bg_count=80, bg_twist=0.12, bloom=0.40),
+    # flying through space; star streaks, no debris.
+    "universe": dict(gpu3d="metal", bg="warp", bloom=0.42),
     # jagged crystal debris — sharper and more aggressive than the octa field.
     "shards": dict(gpu3d="metal", bg="metal", bg_shape="shard+tetra",
                    bg_count=70, bloom=0.40),
@@ -697,7 +702,8 @@ LOOKS: dict[str, dict] = {
 }
 
 
-BG_MODES = ("flow", "starfield", "plasma", "flat", "metal", "tunnel")
+BG_MODES = ("flow", "starfield", "plasma", "flat", "metal", "tunnel",
+             "warp")
 
 # ---------------------------------------------------------------------------
 # LYRIC-DRIVEN MODELS
@@ -956,6 +962,8 @@ class Renderer:
     lasers: bool = False                    # eye beams on the drop
     lyric_shapes: "np.ndarray | None" = None  # per-frame model driven by words
     lyric_zoom: "np.ndarray | None" = None    # push-in while a cue is on
+    bg_twist: float = 0.0                   # spiral the tunnel with depth
+    _warp: "dict | None" = None
     bg_layout: str = "field"                # field|tunnel placement for bg=metal
     bg_mirror: int = 0                      # >1: fold the background N ways
     bg_shape: str = "octa"                  # primitive used by bg=metal
@@ -1111,6 +1119,8 @@ class Renderer:
                 (bright[near] * 0.6)[:, None]
         elif bg == "flow":
             img += self._bg_flow(t, a, i)
+        elif bg == "warp":
+            img += self._bg_warp(t, a, i)
         elif bg in ("metal", "tunnel"):
             lay = self._bg_metal(t, a, i)
             if self.bg_mirror > 1:
@@ -1223,6 +1233,60 @@ class Renderer:
         return cv2.remap(lay, mx, my, cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_REFLECT)
 
+    def _bg_warp(self, t: float, a: Analysis, i: int) -> np.ndarray:
+        """Flying through space: 3D points streaming past with motion streaks.
+
+        Zeke 2026-08-29: *"a couple of backgrounds that's like you're
+        traversing through the universe or through a wormhole."* Deliberately
+        NOT the GPU path — these are points, not solids, and a streak is just a
+        line between where a star was and where it is. Doing it in numpy keeps
+        the GPU free for the centrepiece and costs about a millisecond.
+
+        The streak length IS the speed reading: a star near the camera moves
+        further per frame, so the lines lengthen toward the edges by themselves
+        without any explicit perspective fudge. That is why this reads as
+        motion where a 2D scroll reads as wallpaper."""
+        st = self._warp
+        if st is None:
+            rng = np.random.default_rng(19)
+            n = 420
+            st = {"x": rng.uniform(-1, 1, n).astype(np.float32),
+                  "y": rng.uniform(-1, 1, n).astype(np.float32),
+                  "z": rng.uniform(0.08, 1.0, n).astype(np.float32),
+                  "c": rng.uniform(0.35, 1.0, n).astype(np.float32)}
+            self._warp = st
+        img = np.zeros((self.H, self.W, 3), np.float32)
+        speed = (0.010 + 0.045 * float(a.bass[i])
+                 + (0.05 if a.drop[i] else 0.0))
+        z0 = st["z"].copy()
+        st["z"] -= speed
+        # recycle stars that passed the camera, to fresh far positions
+        gone = st["z"] < 0.06
+        if gone.any():
+            rng = np.random.default_rng(1000 + i)
+            st["x"][gone] = rng.uniform(-1, 1, int(gone.sum()))
+            st["y"][gone] = rng.uniform(-1, 1, int(gone.sum()))
+            st["z"][gone] = 1.0
+            z0[gone] = 1.0
+        f = 0.62 * self.H
+        cx, cy = self.W / 2.0, self.H / 2.0
+        x1 = cx + st["x"] * f / st["z"]
+        y1 = cy + st["y"] * f / st["z"]
+        x0 = cx + st["x"] * f / np.maximum(z0, 1e-3)
+        y0 = cy + st["y"] * f / np.maximum(z0, 1e-3)
+        pal = self.style.palette
+        c1 = np.asarray(pal[0], np.float32)
+        c2 = np.asarray(pal[1 % len(pal)], np.float32)
+        vis = ((x1 > -50) & (x1 < self.W + 50)
+               & (y1 > -50) & (y1 < self.H + 50))
+        for k in np.nonzero(vis)[0]:
+            b = float(st["c"][k]) * (0.25 + 0.75 * (1.0 - float(st["z"][k])))
+            col = (c1 if k % 3 else c2) * b
+            cv2.line(img, (int(x0[k]), int(y0[k])), (int(x1[k]), int(y1[k])),
+                     tuple(float(v) for v in col),
+                     1 if st["z"][k] > 0.4 else 2, cv2.LINE_AA)
+        return img * (0.45 + 0.55 * float(a.rms[i])) * self._pocket()
+
     def _bg_metal(self, t: float, a: Analysis, i: int) -> np.ndarray:
         """Field of instanced metal solids streaming past the camera.
 
@@ -1291,8 +1355,12 @@ class Renderer:
             # layout — a corridor wants its near rings to survive longer than
             # scattered debris does, or all you see is the far end.
             rad = 6.5 * (0.85 + 0.30 * st["rr"])
-            offs = np.stack([np.cos(st["th"]) * rad * (self.W / self.H),
-                             np.sin(st["th"]) * rad, -d], 1).astype(np.float32)
+            # TWIST: rotate the ring with depth so the corridor spirals as it
+            # recedes. One term, and it is the difference between "a tube of
+            # objects" and "a wormhole" (Zeke asked for the second).
+            th = st["th"] + d * float(self.bg_twist)
+            offs = np.stack([np.cos(th) * rad * (self.W / self.H),
+                             np.sin(th) * rad, -d], 1).astype(np.float32)
         else:
             offs = np.stack([st["u"] * half * (self.W / self.H),
                              st["v"] * half, -d], 1).astype(np.float32)
@@ -3161,6 +3229,9 @@ def main() -> int:
                          "only (not every kick - it stops meaning anything if "
                          "it fires constantly). Eye positions come from the "
                          "cranium's own bounding box, so it lands on any skull")
+    ap.add_argument("--bg-twist", type=float, default=0.0, metavar="RAD",
+                    help="spiral the --bg tunnel with depth (try 0.12). Turns "
+                         "a straight corridor into a WORMHOLE")
     ap.add_argument("--bg-mirror", type=int, default=0, metavar="N",
                     help="fold the background into an N-way kaleidoscope "
                          "(0/1 = off; 6 or 8 read best). One polar remap of "
@@ -3404,6 +3475,7 @@ def main() -> int:
                  bg_count=args.bg_count, metal=args.metal,
                  bg_deck=bg_deck, bg_every=args.bg_every,
                  bg_mirror=args.bg_mirror, jaw=args.jaw,
+                 bg_twist=args.bg_twist,
                  lasers=args.lasers)
     if args.lyric_models:
         avail = {q.stem for q in (REPO / "assets" / "models3d").glob("*.glb")}
