@@ -676,6 +676,9 @@ LOOKS: dict[str, dict] = {
     # plainest reading of the words.
     "steel": dict(gpu3d="metal", bg="metal", bg_shape="octa+plate",
                   metal="steel", bloom=0.36),
+    # flying down a corridor of chrome rings, folded 6 ways.
+    "vortex": dict(gpu3d="metal", bg="tunnel", bg_shape="torus+nut",
+                   bg_count=64, bg_mirror=6, bloom=0.38),
     # jagged crystal debris — sharper and more aggressive than the octa field.
     "shards": dict(gpu3d="metal", bg="metal", bg_shape="shard+tetra",
                    bg_count=70, bloom=0.40),
@@ -688,6 +691,8 @@ LOOKS: dict[str, dict] = {
     "void": dict(gpu3d="metal", bg="flat", bloom=0.30, readable=True),
 }
 
+
+BG_MODES = ("flow", "starfield", "plasma", "flat", "metal", "tunnel")
 
 # Metal tints. `base` in the metal shader is Schlick F0 — the colour of the
 # MIRROR — so these are real conductor reflectances, not surface paint. Zeke
@@ -794,6 +799,10 @@ class Renderer:
     layout: str = "row"                     # multi-object arrangement: row|nested
     gpu3d: str = "off"                      # off|wire|shaded|solid_wire|metal|
                                             # metal_wire (GPU path)
+    bg_deck: "list | None" = None           # rotate the BACKGROUND on the beat
+    bg_every: int = 16                      # ...every N beats
+    bg_layout: str = "field"                # field|tunnel placement for bg=metal
+    bg_mirror: int = 0                      # >1: fold the background N ways
     bg_shape: str = "octa"                  # primitive used by bg=metal
     bg_count: int = 56                      # objects in the metal field
     metal: str = "palette"                  # metal tint: see METAL_TINTS
@@ -893,9 +902,26 @@ class Renderer:
         return self.W // 2, int(self.H * 0.30)
 
     # -- pieces -----------------------------------------------------------
+    def _bg_now(self, i: int, a: Analysis) -> str:
+        """Which background is drawn at frame i.
+
+        Zeke 2026-08-28: *"you can mix and match it with the song. It doesn't
+        have to be just one background just as long as it changes to the beat
+        of the song."* Swaps land on a BEAT BOUNDARY (slot = beat // bg_every),
+        never on a frame count — a cut that lands off the grid reads as a
+        glitch, and the same cut on the beat reads as intentional. Same
+        mechanism as the shape and viz decks."""
+        if not self.bg_deck:
+            return self.style.bg
+        if self.bg_every <= 0:
+            return self.bg_deck[0]
+        slot = int(a.beat_i[i]) // max(1, int(self.bg_every))
+        return self.bg_deck[slot % len(self.bg_deck)]
+
     def _bg(self, i: int, t: float, a: Analysis) -> np.ndarray:
         img = np.zeros((self.H, self.W, 3), np.float32)
         img[:] = (8, 8, 14)
+        bg = self._bg_now(i, a)
         if self.bgclips:
             # music-reactive VJ loop background (Beeple CC loops etc):
             # brightness rides the energy, kick flashes push it, loops cut on
@@ -915,7 +941,7 @@ class Renderer:
             # darken a pocket behind the centerpiece so it always pops
             img += up * self._pocket()
             return img
-        if self.style.bg == "starfield":
+        if bg == "starfield":
             drop = bool(a.drop[i])
             speed = 0.4 + 2.2 * a.bass[i] + (2.0 if drop else 0.0)
             self._stars[:, 0] -= speed * self._stars[:, 2]
@@ -928,14 +954,16 @@ class Renderer:
             near = self._stars[:, 2] > 0.7
             img[ys[near], np.minimum(xs[near] + 1, self.W - 1)] += \
                 (bright[near] * 0.6)[:, None]
-        elif self.style.bg == "flow":
+        elif bg == "flow":
             img += self._bg_flow(t, a, i)
-        elif self.style.bg == "metal":
+        elif bg in ("metal", "tunnel"):
             lay = self._bg_metal(t, a, i)
+            if self.bg_mirror > 1:
+                lay = self._kaleido(lay, self.bg_mirror)
             al = lay[..., 3:4]
             img *= (1.0 - al)           # solids occlude; see gpu_mesh._read
             img += lay[..., :3]
-        elif self.style.bg == "plasma":
+        elif bg == "plasma":
             xx, yy = self._plasma_xy
             e = 0.25 + 0.75 * a.rms[i]
             z = (np.sin(xx * 6.3 + t * 0.9) + np.sin(yy * 5.1 - t * 0.7)
@@ -1011,6 +1039,35 @@ class Renderer:
                 .astype(np.float32)[..., None]
         return self._center_pocket
 
+    def _kaleido(self, lay: np.ndarray, wedges: int) -> np.ndarray:
+        """Fold a background into an N-way mandala.
+
+        A verified deathstep idiom (see docs/deathstep_backdrops_research…):
+        real channels fold chrome/mechanical imagery into radial symmetry
+        rather than inventing new geometry. Cheap here because it is one
+        polar remap of an ALREADY-RENDERED layer — no extra GPU work, and it
+        composes with every background rather than being its own mode."""
+        H, W = lay.shape[:2]
+        key = ("kal", W, H, wedges)
+        if getattr(self, "_kal_key", None) != key:
+            yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+            dx, dy = xx - W / 2.0, yy - H / 2.0
+            r = np.sqrt(dx * dx + dy * dy)
+            th = np.arctan2(dy, dx)
+            seg = 2.0 * np.pi / max(2, wedges)
+            # fold the angle into ONE wedge and mirror alternate wedges, which
+            # is what makes the seams continuous instead of hard spokes
+            f = np.mod(th, seg)
+            f = np.where(f > seg / 2, seg - f, f)
+            self._kal_map = (np.clip(W / 2.0 + r * np.cos(f), 0, W - 1)
+                             .astype(np.float32),
+                             np.clip(H / 2.0 + r * np.sin(f), 0, H - 1)
+                             .astype(np.float32))
+            self._kal_key = key
+        mx, my = self._kal_map
+        return cv2.remap(lay, mx, my, cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_REFLECT)
+
     def _bg_metal(self, t: float, a: Analysis, i: int) -> np.ndarray:
         """Field of instanced metal solids streaming past the camera.
 
@@ -1038,6 +1095,12 @@ class Renderer:
             return np.zeros((self.H, self.W, 4), np.float32)
         NEAR, FAR, FOV, FADE_NEAR = 2.2, 30.0, 58.0, 7.0
         span = FAR - NEAR
+        # ⚠ LOCAL, never `self.bg_layout = ...`. Writing the layout back onto
+        # the renderer makes it STICKY: with a deck like "tunnel,metal" the
+        # first tunnel frame would latch and every later `metal` slot would
+        # silently keep drawing a corridor. Per-frame state belongs in a local.
+        layout = ("tunnel" if self._bg_now(i, a) == "tunnel"
+                  else self.bg_layout)
         st = self._field
         if st is None:
             rng = np.random.default_rng(11)
@@ -1046,6 +1109,7 @@ class Renderer:
             th = rng.uniform(0, 2 * np.pi, n)
             st = {"u": (r * np.cos(th)).astype(np.float32),
                   "v": (r * np.sin(th)).astype(np.float32),
+                  "th": th.astype(np.float32), "rr": r.astype(np.float32),
                   "d0": rng.uniform(0, 1, n).astype(np.float32),
                   "rot0": rng.uniform(0, 2 * np.pi, (n, 3)).astype(np.float32),
                   "rspd": rng.uniform(-0.9, 0.9, (n, 3)).astype(np.float32),
@@ -1058,8 +1122,19 @@ class Renderer:
                     + (4.5 if a.drop[i] else 0.0)) / max(1, self.fps)
         d = NEAR + ((st["d0"] * span - st["z"]) % span)
         half = np.tan(np.radians(FOV) / 2.0) * d
-        offs = np.stack([st["u"] * half * (self.W / self.H),
-                         st["v"] * half, -d], 1).astype(np.float32)
+        if layout == "tunnel":
+            # CORRIDOR, not confetti: objects sit on a ring of roughly fixed
+            # WORLD radius, so instead of drifting past at random screen
+            # positions they sweep outward from a vanishing point and read as
+            # walls you are flying through. Same draw call, different maths —
+            # which is the cheapest way to get a genuinely different backdrop
+            # out of geometry that already works.
+            rad = 3.4 * (0.85 + 0.30 * st["rr"])
+            offs = np.stack([np.cos(st["th"]) * rad * (self.W / self.H),
+                             np.sin(st["th"]) * rad, -d], 1).astype(np.float32)
+        else:
+            offs = np.stack([st["u"] * half * (self.W / self.H),
+                             st["v"] * half, -d], 1).astype(np.float32)
         rots = (st["rot0"] + st["rspd"] * t).astype(np.float32)
         scales = (st["sc"] * (1.0 + 0.18 * self._flash)).astype(np.float32)
         pal = self.style.palette
@@ -1766,6 +1841,23 @@ class Renderer:
         spin = (0.62 * np.sin(self._rot * 0.55) if self.is_flat(shape)
                 else self._rot)
         col = self._pal()
+        # GPU solid path for the PROCEDURAL shapes (Zeke 2026-08-28: "give it
+        # to all the other shapes as well... we can do the retro wire 3-D look
+        # or this more shiny metallic look on all the 3-D models and you can
+        # interchange them"). Falls through to the CPU wireframe if GL is
+        # unavailable or the shape has no solid stand-in — logo3d deliberately
+        # has none, it is an image warp and not geometry.
+        if self.gpu3d != "off":
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                import gpu_mesh as _gm
+                prim = _gm.SHAPE_PRIMS.get(shape)
+            except Exception:
+                prim = None
+            if prim and self._gpu_draw(img, f"prim:{prim}", size, cx, cy, spin,
+                                       nod, col,
+                                       env_spin=i / max(1, self.fps) * 0.75):
+                return
         layer = np.zeros_like(img)
         if shape == "orb":
             # glowing sphere: radial falloff core + two rotating rings
@@ -1955,6 +2047,31 @@ class Renderer:
         if spec in self._gpu_faces:
             return self._gpu_faces[spec]
         out = None
+        if spec.startswith("prim:"):
+            # procedural solid from gpu_mesh, so --gpu3d metal works on
+            # --shape cube/orb/pyramid and not only on model: GLBs
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                import gpu_mesh
+                name = spec.split(":", 1)[1]
+                v, f = gpu_mesh._PRIMS[name]()
+                if name in gpu_mesh.FLAT_PRIMS:
+                    # hard facets: smooth vertex normals turn a cube into a
+                    # rounded blob and the metal reads as wet plastic
+                    v, f = gpu_mesh._flatten(v, f)
+                # ⚠ Normalise by the bounding SPHERE, not by max coordinate.
+                # GLB models are scaled by max|coord|, and a cube scaled that
+                # way puts its corners at sqrt(3) — so at the same `size` a
+                # cube rendered ~1.7x bigger than a skull and blew past the
+                # frame (seen by eye). Radius-normalising makes every shape
+                # occupy the same screen area at the same `size`.
+                v = np.asarray(v, np.float32)
+                v = v / max(1e-6, float(np.linalg.norm(v, axis=1).max()))
+                out = (np.asarray(v, np.float32), np.asarray(f, np.int64))
+            except Exception as ex:
+                print(f"[lyric_viz] gpu prim load FAILED ({spec}): {ex!r}")
+            self._gpu_faces[spec] = out
+            return out
         try:
             p = Path(spec)
             if not p.is_file():
@@ -2070,12 +2187,26 @@ class Renderer:
     def _project(self, v: np.ndarray, size: float, cx: int, cy: int,
                  rot: float, tumble: bool = True,
                  pitch: float = 0.0) -> np.ndarray:
-        ry, rx = rot, (rot * 0.62 if tumble else 0.30) + pitch
-        cyr, syr = np.cos(ry), np.sin(ry)
-        cxr, sxr = np.cos(rx), np.sin(rx)
+        # ⚠ TWO SEPARATE X-ROTATIONS, and which side of the yaw they sit on is
+        # the whole point (Zeke 2026-08-28, matching gpu_mesh._model_rot).
+        #   cam_tilt (tumble / the 0.30 framing lean) stays OUTSIDE the yaw —
+        #     it is a camera-space presentation angle and should not travel
+        #     with the model.
+        #   pitch (THE NOD) goes INSIDE the yaw, so it happens about the
+        #     model's own ear-to-ear axis. Before this it was summed into the
+        #     camera-space term, so a yawed head "nodded" about whatever axis
+        #     happened to be horizontal on screen — at 90 degrees that is the
+        #     nose, and the nod came out as a head TILT. Zeke caught it by
+        #     watching the render, not from any number.
+        cam_tilt = (rot * 0.62 if tumble else 0.30)
+        cyr, syr = np.cos(rot), np.sin(rot)
+        cc, sc = np.cos(cam_tilt), np.sin(cam_tilt)
+        cn, sn = np.cos(pitch), np.sin(pitch)
         Ry = np.array([[cyr, 0, syr], [0, 1, 0], [-syr, 0, cyr]], np.float32)
-        Rx = np.array([[1, 0, 0], [0, cxr, -sxr], [0, sxr, cxr]], np.float32)
-        p = v @ Ry.T @ Rx.T
+        Rcam = np.array([[1, 0, 0], [0, cc, -sc], [0, sc, cc]], np.float32)
+        Rnod = np.array([[1, 0, 0], [0, cn, -sn], [0, sn, cn]], np.float32)
+        # p' = Rcam @ Ry @ Rnod @ v   (row-vector form reverses the order)
+        p = v @ Rnod.T @ Ry.T @ Rcam.T
         z = p[:, 2] + 4.0
         f = 3.2 / z
         out = np.stack([cx + p[:, 0] * f * size, cy + p[:, 1] * f * size], 1)
@@ -2610,13 +2741,17 @@ def main() -> int:
                     help="with a comma-list --viz, rotate the centrepiece "
                          "visualization every N BEATS (default 16 = four bars). "
                          "0 = never rotate")
-    ap.add_argument("--bg", default="", choices=["", "flow", "starfield",
-                                                 "plasma", "flat", "metal"],
-                    help="override the style's background. 'flow' = "
+    ap.add_argument("--bg", default="",
+                    help="override the style's background: flow|starfield|"
+                         "plasma|flat|metal, or a COMMA LIST to rotate them "
+                         "on the beat (e.g. 'metal,flow,starfield'). 'flow' = "
                          "domain-warped FBM gradient in the style palette — "
                          "the fix for flat black. 'metal' = a field of "
                          "chrome geometric solids streaming past the camera "
                          "(GPU, ~5ms/frame, one draw call)")
+    ap.add_argument("--bg-every", type=int, default=16, metavar="BEATS",
+                    help="with a comma-list --bg, swap background every N "
+                         "BEATS (default 16 = four bars in 4/4). 0 = never")
     ap.add_argument("--bg-shape", default="octa",
                     help="which primitive(s) the --bg metal field is made of: "
                          "octa|box|tetra|prism|torus|gear|ibeam|nut|plate|"
@@ -2632,6 +2767,11 @@ def main() -> int:
                          "on --style edm); 'steel' is neutral polished chrome, "
                          "and 'gunmetal' is dark enough that the lyrics always "
                          "win")
+    ap.add_argument("--bg-mirror", type=int, default=0, metavar="N",
+                    help="fold the background into an N-way kaleidoscope "
+                         "(0/1 = off; 6 or 8 read best). One polar remap of "
+                         "the already-rendered layer, so it is nearly free and "
+                         "works on any background")
     ap.add_argument("--bg-count", type=int, default=56, metavar="N",
                     help="objects in the --bg metal field (default 56). They "
                          "are instanced, so this is close to free")
@@ -2719,9 +2859,19 @@ def main() -> int:
                   f"beats; layout pinned to '{viz_deck[0]}'")
         else:
             print(f"[lyric_viz] centerpiece OVERRIDE: viz={viz_deck[0]}")
+    bg_deck = None
     if args.bg:
-        style = _dc_replace(style, bg=args.bg)
-        print(f"[lyric_viz] background OVERRIDE: bg={args.bg}")
+        bg_deck = [b.strip() for b in args.bg.split(",") if b.strip()]
+        bad = [b for b in bg_deck if b not in BG_MODES]
+        if bad:
+            ap.error(f"unknown --bg mode(s) {bad} — pick from {sorted(BG_MODES)}")
+        style = _dc_replace(style, bg=bg_deck[0])
+        if len(bg_deck) > 1:
+            print(f"[lyric_viz] background deck: {len(bg_deck)} modes "
+                  f"({', '.join(bg_deck)}) rotating every {args.bg_every} beats")
+        else:
+            bg_deck = None
+            print(f"[lyric_viz] background OVERRIDE: bg={args.bg}")
     if args.readable:
         print("[lyric_viz] READABLE mode: scramble off, glitch/rgb-split/shake "
               "reduced, contrast scrim behind lyrics")
@@ -2857,7 +3007,9 @@ def main() -> int:
                  readable=args.readable, bloom=args.bloom, layout=args.layout,
                  safe_margins=bool(args.tiktok), safe_overlay=args.safe_overlay,
                  gpu3d=args.gpu3d, bg_shape=args.bg_shape,
-                 bg_count=args.bg_count, metal=args.metal)
+                 bg_count=args.bg_count, metal=args.metal,
+                 bg_deck=bg_deck, bg_every=args.bg_every,
+                 bg_mirror=args.bg_mirror)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
