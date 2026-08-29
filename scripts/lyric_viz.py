@@ -721,6 +721,8 @@ class Renderer:
     readable: bool = False                  # lyrics-first: fewer FX + contrast scrim
     bloom: float = 0.45                     # whole-frame glow amount (0 = off)
     layout: str = "row"                     # multi-object arrangement: row|nested
+    gpu3d: str = "off"                      # off|wire|shaded|solid_wire (GPU path)
+    _gpu_faces: dict = field(default_factory=dict)
     safe_margins: bool = False              # keep clear of TikTok's UI overlays
     safe_overlay: bool = False              # draw the safe box to verify on a phone
     _viz_last: int = -1                     # last viz slot, for transition flash
@@ -1652,6 +1654,13 @@ class Renderer:
                                     np.ones((3, 3), np.uint8))
             layer += cv2.GaussianBlur(edge, (0, 0), 3)[..., None] * col
         elif shape.startswith("model:"):
+            # GPU path first (Zeke 08-28 greenlit): shaded/lit geometry, and
+            # density stops mattering. Falls through to the CPU line loop if GL
+            # is unavailable — a missing centrepiece would be worse than a
+            # slower one.
+            if self.gpu3d != "off" and self._gpu_draw(
+                    img, shape.split(":", 1)[1], size, cx, cy, spin, nod, col):
+                return
             # GLB wireframe centerpiece (Zeke 08-27: "adding some 3-D reactive
             # shapes... like a skull"). Mesh from assets/models3d via trimesh,
             # same projection pipeline as the procedural shapes.
@@ -1774,6 +1783,96 @@ class Renderer:
             out = None
         Renderer._MODEL_CACHE[spec] = out
         return out
+
+    def _model_faces(self, spec: str):
+        """(verts, faces) for the GPU path. The CPU path only ever needed
+        EDGES, but shaded rendering needs triangles and per-vertex normals, so
+        this keeps faces separately rather than widening the existing tuple
+        (which several call sites unpack)."""
+        if spec in self._gpu_faces:
+            return self._gpu_faces[spec]
+        out = None
+        try:
+            p = Path(spec)
+            if not p.is_file():
+                p = (Path(__file__).resolve().parent.parent / "assets"
+                     / "models3d" / f"{spec}.glb")
+            import trimesh
+            m = trimesh.load(str(p), force="mesh")
+            v = np.asarray(m.vertices, np.float32)
+            v -= v.mean(axis=0)
+            v /= max(1e-6, float(np.abs(v).max()))
+            v[:, 1] *= -1.0                      # glTF Y-up -> screen Y-down
+            pose = self.poses().get(spec, {})
+            rot = pose.get("rot")
+            if rot:
+                for axis, deg in enumerate(rot):
+                    a = np.radians(float(deg))
+                    if abs(a) < 1e-9:
+                        continue
+                    c, s = np.cos(a), np.sin(a)
+                    R = ([[1, 0, 0], [0, c, -s], [0, s, c]] if axis == 0 else
+                         [[c, 0, s], [0, 1, 0], [-s, 0, c]] if axis == 1 else
+                         [[c, -s, 0], [s, c, 0], [0, 0, 1]])
+                    v = v @ np.array(R, np.float32).T
+                v /= max(1e-6, float(np.abs(v).max()))
+            out = (v, np.asarray(m.faces, np.int64))
+        except Exception as ex:
+            print(f"[lyric_viz] gpu mesh load FAILED ({spec}): {ex!r}")
+        self._gpu_faces[spec] = out
+        return out
+
+    def _gpu_draw(self, img, spec: str, size: float, cx: int, cy: int,
+                  spin: float, pitch: float, col) -> bool:
+        """Render a model on the GPU into `img`. Returns False if unavailable
+        so the caller falls back to the CPU line loop rather than dropping the
+        centrepiece."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import gpu_mesh
+        except Exception:
+            return False
+        g = gpu_mesh.get_renderer(self.W, self.H)
+        if g is None:
+            return False
+        vf = self._model_faces(spec)
+        if vf is None:
+            return False
+        v, f = vf
+        # ⚠ Both of these were wrong on the first pass and the render came back
+        # as a white blob filling the frame (seen by eye). base*0.55 + rim*1.15
+        # saturated BEFORE the bloom pass ran on top of it; and a 0.87 scale
+        # factor put the model at ~50% of frame height where the CPU path sits
+        # near 20%. Shaded geometry covers area that wireframe leaves empty, so
+        # it needs to be SMALLER and DIMMER than the outline version, not equal.
+        # Surface DARK, edges BRIGHT. v2 scaled both down together and the
+        # models came back as pale grey patches — flatter and less legible than
+        # the CPU wireframe they were meant to improve on. A low-poly skull lit
+        # diffusely is nearly uniform, so the contrast has to come from the
+        # edges, not the shading.
+        # ★ Tuned to sit UNDER the bloom threshold (190). The bloom pass runs
+        # AFTER this layer, so anything brighter gets re-brightened and washes
+        # to a pale blob — which is exactly what happened twice while I tuned
+        # against a black test background instead of a real frame. base 0.55 of
+        # a palette colour lands near 140: solid and readable, and the bloom
+        # then haloes the silhouette instead of flooding the interior.
+        base = np.clip(np.asarray(col, np.float32) / 255.0 * 0.55, 0, 1)
+        rim = np.clip(np.asarray(col, np.float32) / 255.0 * 0.75, 0, 1)
+        gs = 0.62 * (size / max(1e-6, self.H * 0.14))
+        try:
+            lay = g.render((spec, self.gpu3d), v, f, rot=spin, pitch=-pitch,
+                           scale=gs, mode=self.gpu3d,
+                           base=tuple(base), rim=tuple(rim))
+        except Exception as ex:
+            print(f"[lyric_viz] gpu render failed ({spec}): {ex!r}")
+            return False
+        # GL renders centred; shift to the requested centre without re-rendering
+        dx, dy = int(cx - self.W // 2), int(cy - self.H // 2)
+        if dx or dy:
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            lay = cv2.warpAffine(lay, M, (self.W, self.H))
+        img += lay
+        return True
 
     def _project(self, v: np.ndarray, size: float, cx: int, cy: int,
                  rot: float, tumble: bool = True,
@@ -2295,6 +2394,13 @@ def main() -> int:
                          "(head:true in assets/models3d/poses.json) tilt "
                          "chin-down on the beat; everything else gets a size "
                          "pulse instead — a torus knot has no chin")
+    ap.add_argument("--gpu3d", default="off",
+                    choices=["off", "wire", "shaded", "solid_wire"],
+                    help="render model: centrepieces on the GPU instead of the "
+                         "CPU line loop. 'shaded' = lit surfaces, 'solid_wire' "
+                         "= lit surface with its wireframe over it. Removes the "
+                         "edge budget: dense meshes cost the same as sparse "
+                         "ones. Falls back to CPU if GL is unavailable")
     ap.add_argument("--safe-overlay", action="store_true",
                     help="draw the claimed TikTok safe box over the frame so "
                          "it can be checked against a real phone (the "
@@ -2519,7 +2625,8 @@ def main() -> int:
                  shape_every=args.shape_every, nod=args.nod,
                  viz_deck=viz_deck, viz_every=args.viz_every,
                  readable=args.readable, bloom=args.bloom, layout=args.layout,
-                 safe_margins=bool(args.tiktok), safe_overlay=args.safe_overlay)
+                 safe_margins=bool(args.tiktok), safe_overlay=args.safe_overlay,
+                 gpu3d=args.gpu3d)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
