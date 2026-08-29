@@ -676,9 +676,14 @@ LOOKS: dict[str, dict] = {
     # plainest reading of the words.
     "steel": dict(gpu3d="metal", bg="metal", bg_shape="octa+plate",
                   metal="steel", bloom=0.36),
-    # flying down a corridor of chrome rings, folded 6 ways.
+    # flying down a corridor of chrome rings and nuts.
+    # ⚠ NO bg_mirror here on purpose: v1 of this preset folded it 6 ways and
+    # the kaleidoscope dragged the whole corridor into a tight ring around the
+    # centre — exactly where the skull and the lyrics are. The fold is still
+    # available as --bg-mirror, it just does not belong on a look that has a
+    # centrepiece.
     "vortex": dict(gpu3d="metal", bg="tunnel", bg_shape="torus+nut",
-                   bg_count=64, bg_mirror=6, bloom=0.38),
+                   bg_count=64, bloom=0.38),
     # jagged crystal debris — sharper and more aggressive than the octa field.
     "shards": dict(gpu3d="metal", bg="metal", bg_shape="shard+tetra",
                    bg_count=70, bloom=0.40),
@@ -1129,7 +1134,13 @@ class Renderer:
             # walls you are flying through. Same draw call, different maths —
             # which is the cheapest way to get a genuinely different backdrop
             # out of geometry that already works.
-            rad = 3.4 * (0.85 + 0.30 * st["rr"])
+            # ⚠ RADIUS TUNED BY EYE (2026-08-28). 3.4 put the corridor wall
+            # right where the centrepiece and the lyrics live; 6.5 opens a
+            # clear hole down the middle so the tunnel FRAMES the subject
+            # instead of crowding it. The near-fade is also pulled in for this
+            # layout — a corridor wants its near rings to survive longer than
+            # scattered debris does, or all you see is the far end.
+            rad = 6.5 * (0.85 + 0.30 * st["rr"])
             offs = np.stack([np.cos(st["th"]) * rad * (self.W / self.H),
                              np.sin(st["th"]) * rad, -d], 1).astype(np.float32)
         else:
@@ -1151,8 +1162,9 @@ class Renderer:
             lay = g.render_field(offs=offs, rots=rots, scales=scales,
                                  kind=self.bg_shape, base=tuple(tint),
                                  rim=tuple(np.clip(accent, 0, 1)),
-                                 spin_env=t * 0.55, polish=1.0,
-                                 fade_far=FAR, fade_near=FADE_NEAR, fov=FOV)
+                                 spin_env=t * 0.55, polish=1.0, fade_far=FAR,
+                                 fade_near=(2.8 if layout == "tunnel"
+                                            else FADE_NEAR), fov=FOV)
         except Exception as ex:
             print(f"[lyric_viz] metal bg failed: {ex!r}")
             self.style = _dc_replace(self.style, bg="flow")
