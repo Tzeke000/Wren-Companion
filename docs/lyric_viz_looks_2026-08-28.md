@@ -20,6 +20,7 @@ This doc is the operator's page for what that turned into. Implementation lives 
 --look rings         # chrome torus field. cleanest behind lyrics
 --look hologram      # lit surface with its own wireframe over it (scanned look)
 --look retro         # what every render looked like before tonight: wire on flow bg
+--look vortex        # flying down a corridor of chrome rings, folded 6 ways
 --look void          # metal model, nothing moving behind the words. lyrics-first
 ```
 
@@ -37,6 +38,10 @@ the one flag you bothered to override is a preset nobody trusts.
 | `--bg metal` | field of chrome solids streaming past the camera |
 | `--bg-shape` | `octa\|box\|tetra\|prism\|torus\|gear\|ibeam\|nut\|plate\|shard`, or a `+` list to mix (`gear+nut+ibeam`) |
 | `--bg-count N` | objects in the field (default 56; instanced, so this is close to free) |
+| `--bg a,b,c` + `--bg-every N` | rotate the BACKGROUND on the beat, like the shape/viz decks. Swaps land on a beat boundary — off-grid cuts read as glitches, on-grid ones read as intentional |
+| `--gpu3d metal` + `--shape cube\|orb\|pyramid\|cylinder` | the metal look on the PROCEDURAL shapes too, not just `model:` GLBs, so retro-wire and chrome are interchangeable on everything. (`logo3d` has no solid form — it is an image warp, not geometry.) |
+| `--bg tunnel` | same solids, placed on a ring of fixed WORLD radius instead of scattered — they sweep outward from a vanishing point and read as a corridor you fly through rather than confetti. Same draw call, different maths. |
+| `--bg-mirror N` | fold the background into an N-way kaleidoscope (6 or 8 read best). One polar remap of the already-rendered layer, so it is nearly free and composes with ANY background, not just metal. |
 | `--metal` | `palette` (default, tints the chrome with the style colours — reads blue on `--style edm`), `steel`, `gold`, `copper`, `gunmetal`. These are Schlick F0 values: the colour of the MIRROR, not surface paint. |
 
 ## Why "metal" is a different material, not a recolour
@@ -81,6 +86,30 @@ wins.**
    objects dissolve as they pass (`fade_near`), which also removed the near-plane pop.
 4. **Alpha has to fade with the colour.** A faded-out object whose alpha stayed at 1 still
    punched an opaque hole in whatever was behind it.
+
+## The nod bug — an order-of-rotation error Zeke caught by watching
+
+*"As the head is rotating, the head is nodding forward to the viewer, not forward to the
+skull... when the skull has turned 90 degrees it is basically tilting its head."*
+
+Both renderers built the model matrix as **`Rx(nod) @ Ry(yaw)`** — the nod applied about
+the **camera's** left-right axis. That is only correct while the model faces the camera.
+After 90 degrees of yaw the camera's X axis runs through the skull's nose, so the "nod"
+spun it about its own nose and came out as a head TILT.
+
+Fix: the nod moves **inside** the yaw — `Ry(yaw) @ Rx(nod)` — so it happens in the model's
+own frame, about its own ear-to-ear axis, and the chin drops toward the chest whichever way
+the head is facing. Anything that should stay locked to the camera (the CPU path's tumble,
+and its 0.30 framing lean) stays **outside** the yaw; those two X-rotations used to be
+summed into one term, which is what hid the bug.
+
+Sanity check for anyone re-testing this: at a PROFILE view a correct nod looks like an
+**in-plane rotation**, not a foreshortening pitch — that is what a nod looks like from the
+side, and it is not a regression.
+
+⇒ **A rotation bug is a bug about a FRAME OF REFERENCE, and no single still frame shows
+it.** It only appears across a spin, which is why it survived every previous render and why
+he found it and I did not.
 
 ## A research claim that was wrong — check before you act on it
 

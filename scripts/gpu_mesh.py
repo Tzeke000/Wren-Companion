@@ -393,13 +393,63 @@ def _shard():
     return v, np.array(f, np.int32)
 
 
+def _pyramid():
+    """Square-based pyramid — `--shape pyramid`'s solid form. `tetra` is a
+    triangular pyramid and reads differently, so both exist."""
+    v = np.array([[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1],
+                  [0, 1.15, 0]], np.float32)
+    f = np.array([[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4],
+                  [0, 3, 2], [0, 2, 1]], np.int32)
+    return v, f
+
+
+def _sphere(nu: int = 48, nv: int = 26):
+    """UV sphere for `--shape orb`. Left SMOOTH (not exploded to facets) —
+    a faceted sphere is just a bad polyhedron, and the point of the orb is
+    that it is the one round thing in the set.
+
+    ⚠ MISDIAGNOSIS ON RECORD (2026-08-28): the chrome orb shows bright meridian
+    stripes, and I read them as visible tessellation and raised this from 24x14
+    to 48x26 to "fix" it. The stripes did not change, because they are not mesh
+    at all — they are `envmap()`'s azimuthal wall-panel terms (`sin(az*3)` and
+    `sin(az*9)`) reflected in a smooth mirror. On a faceted solid those terms
+    read as facet-to-facet variation, which is what they are for; on a sphere
+    they read as painted stripes. It looks good, so it stays — but the higher
+    resolution is NOT what made it look that way, and if someone wants the
+    stripes gone the knob is the shader, not this number."""
+    u = (np.arange(nu) * 2 * np.pi / nu)[:, None]
+    vv = (np.arange(nv) * np.pi / (nv - 1))[None, :]
+    x, y, z = np.sin(vv) * np.cos(u), np.cos(vv) * np.ones_like(u), np.sin(vv) * np.sin(u)
+    v = np.stack([x, y, z], -1).reshape(-1, 3).astype(np.float32)
+    f = []
+    for i in range(nu):
+        for j in range(nv - 1):
+            a = i * nv + j
+            b = ((i + 1) % nu) * nv + j
+            f += [[a, b, b + 1], [a, b + 1, a + 1]]
+    return v, np.array(f, np.int32)
+
+
 FIELD_KINDS = ("octa", "box", "tetra", "prism", "torus", "gear", "ibeam",
                "nut", "plate", "shard")
+
+# Solid stand-ins for lyric_viz's procedural wireframe shapes, so `--gpu3d
+# metal` works on `--shape cube` and friends and not only on `model:` GLBs
+# (Zeke 2026-08-28: "give it to all the other shapes as well... sometimes we
+# can do the retro wire 3-D look or we can do this more shiny metallic look on
+# all the 3-D models and you can interchange them").
+SHAPE_PRIMS = {"cube": "box", "pyramid": "pyramid", "cylinder": "cylinder",
+               "orb": "sphere", "octa": "octa", "torus": "torus"}
+# these read better with hard facets; the sphere and torus stay smooth
+FLAT_PRIMS = {"box", "tetra", "prism", "gear", "ibeam", "nut", "plate",
+              "shard", "pyramid", "octa", "cylinder"}
 
 _PRIMS = {"octa": _octa, "box": _box, "tetra": _tetra,
           "prism": lambda: _prism(6), "torus": lambda: _torus(),
           "gear": lambda: _gear(9), "ibeam": _ibeam, "nut": _nut,
-          "plate": _plate, "shard": _shard}
+          "plate": _plate, "shard": _shard,
+          "pyramid": _pyramid, "cylinder": lambda: _prism(16),
+          "sphere": lambda: _sphere()}
 
 
 def _flatten(v: np.ndarray, f: np.ndarray):
@@ -422,14 +472,36 @@ def _perspective(fov_y: float, aspect: float, near: float, far: float):
     return m
 
 
-def _rot_xy(ry: float, rx: float):
-    cy, sy = np.cos(ry), np.sin(ry)
-    cx, sx = np.cos(rx), np.sin(rx)
-    Ry = np.array([[cy, 0, sy, 0], [0, 1, 0, 0], [-sy, 0, cy, 0], [0, 0, 0, 1]],
-                  np.float32)
-    Rx = np.array([[1, 0, 0, 0], [0, cx, -sx, 0], [0, sx, cx, 0], [0, 0, 0, 1]],
-                  np.float32)
-    return Rx @ Ry
+def _rx4(a: float):
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[1, 0, 0, 0], [0, c, -s, 0], [0, s, c, 0], [0, 0, 0, 1]],
+                    np.float32)
+
+
+def _ry4(a: float):
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, 0, s, 0], [0, 1, 0, 0], [-s, 0, c, 0], [0, 0, 0, 1]],
+                    np.float32)
+
+
+def _model_rot(yaw: float, nod: float, cam_tilt: float = 0.0):
+    """Rx(cam_tilt) @ Ry(yaw) @ Rx(nod) — NOD INSIDE THE SPIN.
+
+    ⚠ THE ORDER IS THE ENTIRE POINT (Zeke 2026-08-28). v1 was Rx(nod) @ Ry(yaw),
+    which pitches about the CAMERA's left-right axis. That is only correct while
+    the model faces the camera: once it has yawed 90 degrees the camera's X axis
+    runs straight through the skull's nose, so the "nod" spins it about its own
+    nose and reads as a HEAD TILT. Zeke, who caught it by watching: *"the head
+    should always nod from the back of the skull rotating down towards where the
+    eyes were... when the skull has turned 90 degrees it is basically tilting its
+    head."*
+
+    Putting Rx(nod) INSIDE Ry(yaw) performs the nod in the MODEL's own frame,
+    about its own ear-to-ear axis, so the chin drops toward the chest whichever
+    way the head is facing. Anything that should stay locked to the camera —
+    framing tilt, a tumble — goes OUTSIDE, in cam_tilt.
+    """
+    return _rx4(cam_tilt) @ _ry4(yaw) @ _rx4(nod)
 
 
 def _translate(z: float):
@@ -521,7 +593,7 @@ class GpuMeshRenderer:
                                     ibo if solid else lbo,
                                     index_element_size=4)
         proj = _perspective(np.radians(38.0), self.W / self.H, 0.1, 50.0)
-        model = _rot_xy(rot, pitch)
+        model = _model_rot(rot, pitch)
         model[:3, :3] *= float(scale)
         mv = _translate(-3.2) @ model
         mvp = proj @ mv
