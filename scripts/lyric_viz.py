@@ -672,6 +672,10 @@ LOOKS: dict[str, dict] = {
     # and the direct answer to "3-D metallic moving parts".
     "forge": dict(gpu3d="metal", bg="metal", bg_shape="gear+nut+ibeam",
                   bg_count=60, bloom=0.36),
+    # neutral silver chrome, no palette tint anywhere. "Shiny metallic" in the
+    # plainest reading of the words.
+    "steel": dict(gpu3d="metal", bg="metal", bg_shape="octa+plate",
+                  metal="steel", bloom=0.36),
     # jagged crystal debris — sharper and more aggressive than the octa field.
     "shards": dict(gpu3d="metal", bg="metal", bg_shape="shard+tetra",
                    bg_count=70, bloom=0.40),
@@ -682,6 +686,19 @@ LOOKS: dict[str, dict] = {
     "hologram": dict(gpu3d="solid_wire", bg="flow", bloom=0.50),
     # lyrics-first: metal centrepiece, nothing else moving behind the words.
     "void": dict(gpu3d="metal", bg="flat", bloom=0.30, readable=True),
+}
+
+
+# Metal tints. `base` in the metal shader is Schlick F0 — the colour of the
+# MIRROR — so these are real conductor reflectances, not surface paint. Zeke
+# said "shiny metallic", and the palette-tinted default renders blue chrome;
+# "steel" is what most people mean by the word.
+METAL_TINTS: dict[str, tuple] = {
+    "palette": (),                       # tint from the style palette (default)
+    "steel":   (0.94, 0.95, 0.97),       # neutral polished chrome
+    "gold":    (1.00, 0.79, 0.34),
+    "copper":  (0.96, 0.64, 0.49),
+    "gunmetal": (0.55, 0.58, 0.63),      # dark, matte-reading, lets lyrics win
 }
 
 
@@ -779,6 +796,7 @@ class Renderer:
                                             # metal_wire (GPU path)
     bg_shape: str = "octa"                  # primitive used by bg=metal
     bg_count: int = 56                      # objects in the metal field
+    metal: str = "palette"                  # metal tint: see METAL_TINTS
     _gpu_faces: dict = field(default_factory=dict)
     _field: "dict | None" = None            # bg=metal instance state
     safe_margins: bool = False              # keep clear of TikTok's UI overlays
@@ -1051,6 +1069,9 @@ class Renderer:
         # turns into a coloured plastic bead.
         tint = np.clip(0.58 + 0.42 * np.asarray(pal[0], np.float32) / 255.0,
                        0, 1)
+        fixed = METAL_TINTS.get(self.metal) or ()
+        if fixed:
+            tint = np.asarray(fixed, np.float32)
         try:
             lay = g.render_field(offs=offs, rots=rots, scales=scales,
                                  kind=self.bg_shape, base=tuple(tint),
@@ -2016,6 +2037,9 @@ class Renderer:
             # spend the headroom on glints.
             base = np.clip(0.55 + 0.45 * np.asarray(col, np.float32) / 255.0,
                            0, 1)
+            fixed = METAL_TINTS.get(self.metal) or ()
+            if fixed:
+                base = np.asarray(fixed, np.float32)
             rim = np.clip(np.asarray(col, np.float32) / 255.0, 0, 1)
         gs = 0.62 * (size / max(1e-6, self.H * 0.14))
         try:
@@ -2601,6 +2625,13 @@ def main() -> int:
                          "round-robin between the shapes and each shape is one "
                          "instanced draw, so a mixed field costs about what a "
                          "single-shape field costs")
+    ap.add_argument("--metal", default="palette",
+                    choices=sorted(METAL_TINTS),
+                    help="what the metal is made of. 'palette' tints the "
+                         "chrome with the style colours (default, reads blue "
+                         "on --style edm); 'steel' is neutral polished chrome, "
+                         "and 'gunmetal' is dark enough that the lyrics always "
+                         "win")
     ap.add_argument("--bg-count", type=int, default=56, metavar="N",
                     help="objects in the --bg metal field (default 56). They "
                          "are instanced, so this is close to free")
@@ -2826,7 +2857,7 @@ def main() -> int:
                  readable=args.readable, bloom=args.bloom, layout=args.layout,
                  safe_margins=bool(args.tiktok), safe_overlay=args.safe_overlay,
                  gpu3d=args.gpu3d, bg_shape=args.bg_shape,
-                 bg_count=args.bg_count)
+                 bg_count=args.bg_count, metal=args.metal)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
