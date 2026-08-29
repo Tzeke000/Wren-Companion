@@ -806,6 +806,7 @@ class Renderer:
                                             # metal_wire (GPU path)
     bg_deck: "list | None" = None           # rotate the BACKGROUND on the beat
     bg_every: int = 16                      # ...every N beats
+    jaw: bool = False                       # hinge a skull's mandible on the kick
     bg_layout: str = "field"                # field|tunnel placement for bg=metal
     bg_mirror: int = 0                      # >1: fold the background N ways
     bg_shape: str = "octa"                  # primitive used by bg=metal
@@ -1926,7 +1927,12 @@ class Renderer:
             # slower one.
             if self.gpu3d != "off" and self._gpu_draw(
                     img, shape.split(":", 1)[1], size, cx, cy, spin, nod, col,
-                    env_spin=i / max(1, self.fps) * 0.75):
+                    env_spin=i / max(1, self.fps) * 0.75,
+                    # 0.28 rad at full kick-flash. Checked by eye across the
+                    # three jawed skulls: past ~0.35 the mandible visibly
+                    # separates from the joint on skull_6 and quaternius,
+                    # because these are decorative meshes with no real condyle.
+                    jaw_open=0.28 * float(self._flash)):
                 return
             # GLB wireframe centerpiece (Zeke 08-27: "adding some 3-D reactive
             # shapes... like a skull"). Mesh from assets/models3d via trimesh,
@@ -2118,9 +2124,67 @@ class Renderer:
         self._gpu_faces[spec] = out
         return out
 
+    def _model_jaw(self, spec: str):
+        """Split a skull into (cranium, mandible, pivot) or return None.
+
+        Zeke 2026-08-28: *"maybe if we had a more in depth skull that we could
+        like move the lower jaw."* None of these GLBs carries a named jaw node,
+        so the split is GEOMETRIC — but not by guessing a cut plane, which
+        would saw through the wrong place on every model with a different
+        proportion. Instead: weld coincident vertices (`merge_vertices` —
+        without it these meshes are unwelded and `split` returns hundreds of
+        2-triangle fragments), take connected components, and call the LOWEST
+        substantial component the jaw. A mandible is modelled as its own shell
+        in most low-poly skulls, so this finds a real part boundary rather than
+        inventing one.
+
+        Returns None when there is no such component, and the caller just draws
+        the skull whole — a wrong jaw is far worse than no jaw."""
+        key = f"__jaw__{spec}"
+        if key in self._gpu_faces:
+            return self._gpu_faces[key]
+        out = None
+        try:
+            import trimesh
+            p = Path(spec)
+            if not p.is_file():
+                p = (Path(__file__).resolve().parent.parent / "assets"
+                     / "models3d" / f"{spec}.glb")
+            m = trimesh.load(str(p), force="mesh")
+            m.merge_vertices()
+            ctr = np.asarray(m.vertices, np.float32).mean(axis=0)
+            scl = max(1e-6, float(np.abs(np.asarray(m.vertices, np.float32)
+                                         - ctr).max()))
+            parts = [c for c in m.split(only_watertight=False)
+                     if len(c.faces) >= 24]
+            if len(parts) >= 2:
+                lo, hi = float(m.bounds[0][1]), float(m.bounds[1][1])
+                span = max(1e-6, hi - lo)
+                rel = [(float(c.centroid[1]) - lo) / span for c in parts]
+                j = int(np.argmin(rel))
+                # only believe it if the candidate really is LOW on the skull
+                # and not just the smaller half of a two-piece model
+                if rel[j] < 0.34 and len(parts[j].faces) >= 40:
+                    jaw = parts[j]
+                    head = trimesh.util.concatenate(
+                        [c for k, c in enumerate(parts) if k != j])
+                    hv = (np.asarray(head.vertices, np.float32) - ctr) / scl
+                    jv = (np.asarray(jaw.vertices, np.float32) - ctr) / scl
+                    # hinge at the TOP-REAR of the mandible: that is where a
+                    # real jaw joint sits, and hinging at the centroid instead
+                    # makes the chin swing forward as it opens
+                    pivot = np.array([0.0, float(jv[:, 1].max()),
+                                      float(jv[:, 2].min())], np.float32)
+                    out = (hv, np.asarray(head.faces, np.int64),
+                           jv, np.asarray(jaw.faces, np.int64), pivot)
+        except Exception as ex:
+            print(f"[lyric_viz] jaw split failed ({spec}): {ex!r}")
+        self._gpu_faces[key] = out
+        return out
+
     def _gpu_draw(self, img, spec: str, size: float, cx: int, cy: int,
                   spin: float, pitch: float, col,
-                  env_spin: float = 0.0) -> bool:
+                  env_spin: float = 0.0, jaw_open: float = 0.0) -> bool:
         """Render a model on the GPU into `img`. Returns False if unavailable
         so the caller falls back to the CPU line loop rather than dropping the
         centrepiece."""
@@ -2136,6 +2200,9 @@ class Renderer:
         if vf is None:
             return False
         v, f = vf
+        parts = (self._model_jaw(spec)
+                 if (self.jaw and jaw_open > 0.001
+                     and not spec.startswith("prim:")) else None)
         # ⚠ Both of these were wrong on the first pass and the render came back
         # as a white blob filling the frame (seen by eye). base*0.55 + rim*1.15
         # saturated BEFORE the bloom pass ran on top of it; and a 0.87 scale
@@ -2172,10 +2239,22 @@ class Renderer:
             rim = np.clip(np.asarray(col, np.float32) / 255.0, 0, 1)
         gs = 0.62 * (size / max(1e-6, self.H * 0.14))
         try:
-            lay = g.render((spec, self.gpu3d), v, f, rot=spin, pitch=-pitch,
-                           scale=gs, mode=self.gpu3d,
-                           base=tuple(base), rim=tuple(rim),
-                           spin_env=env_spin, polish=1.0)
+            if parts is not None:
+                hv, hf, jv, jf, pivot = parts
+                kw = dict(rot=spin, pitch=-pitch, scale=gs, mode=self.gpu3d,
+                          base=tuple(base), rim=tuple(rim),
+                          spin_env=env_spin, polish=1.0)
+                # cranium first (clears), jaw second WITHOUT clearing — the
+                # depth test composes them, so this stays two draws and one
+                # readback rather than two full render passes
+                g.render((spec, self.gpu3d, "head"), hv, hf, read=False, **kw)
+                lay = g.render((spec, self.gpu3d, "jaw"), jv, jf, clear=False,
+                               pre=gpu_mesh.hinge(jaw_open, pivot), **kw)
+            else:
+                lay = g.render((spec, self.gpu3d), v, f, rot=spin, pitch=-pitch,
+                               scale=gs, mode=self.gpu3d,
+                               base=tuple(base), rim=tuple(rim),
+                               spin_env=env_spin, polish=1.0)
         except Exception as ex:
             print(f"[lyric_viz] gpu render failed ({spec}): {ex!r}")
             return False
@@ -2779,6 +2858,13 @@ def main() -> int:
                          "on --style edm); 'steel' is neutral polished chrome, "
                          "and 'gunmetal' is dark enough that the lyrics always "
                          "win")
+    ap.add_argument("--jaw", action="store_true",
+                    help="hinge a skull's LOWER JAW open on every kick (GPU "
+                         "path only). Works on models whose mandible is a "
+                         "separate connected component - skull_2, skull_6 and "
+                         "skull_quaternius do; models that are one solid piece "
+                         "are drawn whole, because a wrong jaw is worse than "
+                         "no jaw")
     ap.add_argument("--bg-mirror", type=int, default=0, metavar="N",
                     help="fold the background into an N-way kaleidoscope "
                          "(0/1 = off; 6 or 8 read best). One polar remap of "
@@ -3021,7 +3107,7 @@ def main() -> int:
                  gpu3d=args.gpu3d, bg_shape=args.bg_shape,
                  bg_count=args.bg_count, metal=args.metal,
                  bg_deck=bg_deck, bg_every=args.bg_every,
-                 bg_mirror=args.bg_mirror)
+                 bg_mirror=args.bg_mirror, jaw=args.jaw)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "

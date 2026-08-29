@@ -484,6 +484,20 @@ def _ry4(a: float):
                     np.float32)
 
 
+def hinge(angle: float, pivot) -> np.ndarray:
+    """Rotate about a horizontal axis through `pivot` — a jaw joint.
+
+    translate(p) @ Rx(angle) @ translate(-p). Written out because doing it by
+    rotating the vertices on the CPU each frame would defeat the VBO cache,
+    which is the entire reason the GPU path is fast."""
+    p = np.asarray(pivot, np.float32)
+    T = np.eye(4, dtype=np.float32)
+    T[:3, 3] = p
+    Ti = np.eye(4, dtype=np.float32)
+    Ti[:3, 3] = -p
+    return T @ _rx4(float(angle)) @ Ti
+
+
 def _model_rot(yaw: float, nod: float, cam_tilt: float = 0.0):
     """Rx(cam_tilt) @ Ry(yaw) @ Rx(nod) — NOD INSIDE THE SPIN.
 
@@ -575,7 +589,8 @@ class GpuMeshRenderer:
                mode: str = "shaded",
                base=(0.55, 0.75, 1.0), rim=(1.0, 0.45, 0.85),
                spin_env: float = 0.0, polish: float = 1.0,
-               clear: bool = True) -> np.ndarray:
+               clear: bool = True, pre: "np.ndarray | None" = None,
+               read: bool = True) -> "np.ndarray | None":
         """-> HxWx4 float32 RGBA (0-255). Alpha = coverage; composite solids
         with it and add wireframe modes directly."""
         moderngl = self.mgl
@@ -595,6 +610,11 @@ class GpuMeshRenderer:
         proj = _perspective(np.radians(38.0), self.W / self.H, 0.1, 50.0)
         model = _model_rot(rot, pitch)
         model[:3, :3] *= float(scale)
+        if pre is not None:
+            # an extra transform applied in MODEL space, before the spin. This
+            # is how an articulated part (a hinged jaw) rides along with the
+            # head: same outer matrix, one extra rotation about its own pivot.
+            model = model @ np.asarray(pre, np.float32)
         mv = _translate(-3.2) @ model
         mvp = proj @ mv
         prog["mvp"].write(np.ascontiguousarray(mvp.T, np.float32).tobytes())
@@ -631,7 +651,7 @@ class GpuMeshRenderer:
             self.ctx.vertex_array(
                 wprog, [(vbo, "3f 12x", "in_pos")], lbo,
                 index_element_size=4).render(moderngl.LINES)
-        return self._read()
+        return self._read() if read else None
 
     def _read(self) -> np.ndarray:
         """-> HxWx4 float32 RGBA (0-255). Alpha is coverage: 255 where geometry
