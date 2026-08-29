@@ -1802,7 +1802,11 @@ class Renderer:
             v = np.asarray(m.vertices, np.float32)
             v -= v.mean(axis=0)
             v /= max(1e-6, float(np.abs(v).max()))
-            v[:, 1] *= -1.0                      # glTF Y-up -> screen Y-down
+            # ⚠ NO Y-FLIP HERE (Zeke 2026-08-28: "the skulls are upside down").
+            # The CPU path needs `v[:,1] *= -1` because _project maps +y to
+            # DOWN the screen. The GPU path must NOT: GL clip space is +y UP and
+            # gpu_mesh already flips the read-back image. Doing both flips it
+            # twice and every model renders inverted.
             pose = self.poses().get(spec, {})
             rot = pose.get("rot")
             if rot:
