@@ -653,6 +653,17 @@ class GpuMeshRenderer:
                 index_element_size=4).render(moderngl.LINES)
         return self._read() if read else None
 
+    def facing(self, normal, *, rot: float = 0.0, pitch: float = 0.0):
+        """Is a model-space normal pointing at the camera after the spin?
+
+        The camera looks down -Z, so a surface faces us when its rotated normal
+        has a positive Z. Needed because `project_points` only tells you a
+        point is in front of the CAMERA, which stays true for a feature on the
+        far side of a solid object."""
+        n = np.asarray(normal, np.float32).reshape(3)
+        R = _model_rot(rot, pitch)[:3, :3]
+        return float((R @ n)[2])
+
     def project_points(self, pts, *, rot: float = 0.0, pitch: float = 0.0,
                        scale: float = 1.0):
         """Model-space points -> (screen_xy, in_front) using EXACTLY the same

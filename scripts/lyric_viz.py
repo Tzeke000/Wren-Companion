@@ -752,6 +752,13 @@ LYRIC_MODELS: "list[tuple[tuple[str, ...], tuple[str, ...]]]" = [
 ]
 
 
+# Words that mean "move the camera", not "change the object". Zeke 2026-08-29:
+# *"when it says like come a little closer, you can have the skull come closer
+# to the camera."* These push the CURRENT model in rather than swapping it —
+# swapping on "closer" would throw away the thing the line is talking about.
+LYRIC_PUSH_WORDS = ("closer", "close", "nearer", "near", "inside", "deeper")
+
+
 def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
                          available: "set[str]", hold_beats: int = 8):
     """Per-frame model spec driven by what is being SUNG, or None.
@@ -788,7 +795,15 @@ def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
                     if pick:
                         hits.append((float(w.start), pick, token))
                     break
-    if not hits:
+    # camera pushes are collected separately and applied on top of whatever
+    # model is on screen at the time
+    pushes = []
+    for ln in lines:
+        for w in ln:
+            token = re.sub(r"[^a-z]", "", str(w.text).lower())
+            if token in LYRIC_PUSH_WORDS:
+                pushes.append(float(w.start))
+    if not hits and not pushes:
         return None, None
     hits.sort()
     used = []
@@ -812,6 +827,19 @@ def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
         # slide change. Starts slightly wide so the growth is visible.
         if end > f0:
             zoom[f0:end] = np.linspace(0.90, 1.20, end - f0, dtype=np.float32)
+    for t in pushes:
+        f = min(n_frames - 1, max(0, int(round(t * fps))))
+        f0 = beat_start.get(int(beat_i[f]), f)
+        f1 = min(n_frames, f0 + int(fps * 2.2))
+        if f1 > f0:
+            # a real dolly-in: further than a cue push, because the LINE is
+            # asking for it. Multiplies whatever the cue zoom already is.
+            zoom[f0:f1] *= np.linspace(1.0, 1.55, f1 - f0, dtype=np.float32)
+    if pushes:
+        print(f"[lyric_viz] lyric camera pushes: {len(pushes)} "
+              f"(\"closer\"-type words)")
+    if not used:
+        return (sched if hits else None), zoom
     print(f"[lyric_viz] lyric models: {len(used)} cues -> "
           + ", ".join(f"{t}->{m}" for _, m, t in used[:8])
           + (" ..." if len(used) > 8 else ""))
@@ -2347,11 +2375,34 @@ class Renderer:
         vf = self._model_faces(spec)
         v = parts[0] if parts is not None else (vf[0] if vf else None)
         if v is not None and len(v):
-            lo, hi = v.min(axis=0), v.max(axis=0)
-            ex = 0.30 * (hi[0] - lo[0]) / 2.0
-            ey = lo[1] + 0.62 * (hi[1] - lo[1])
-            ez = lo[2] + 0.86 * (hi[2] - lo[2])
-            out = np.array([[-ex, ey, ez], [ex, ey, ez]], np.float32)
+            # ⚠ WHICH WAY DOES THIS SKULL FACE? v1 assumed +Z for every model
+            # and that is simply not true of downloaded GLBs — so on some of
+            # them the computed "eyes" sat on the BACK of the head and the
+            # beams came out of the back of the skull. Zeke saw it at once.
+            # Note I first "fixed" this at the wrong layer (testing whether the
+            # eye faced the camera) and it still misfired, which is what
+            # exposed the assumption underneath.
+            #
+            # THE JAW IS THE TELL: a mandible protrudes toward the FACE. So the
+            # cranium->jaw offset in the horizontal plane gives the forward
+            # direction, per model, derived instead of assumed.
+            fwd = np.array([0.0, 0.0, 1.0], np.float32)
+            if parts is not None:
+                hv, _hf, jv, _jf, _piv = parts
+                d = jv.mean(axis=0) - hv.mean(axis=0)
+                d[1] = 0.0
+                if float(np.linalg.norm(d)) > 1e-3:
+                    fwd = (d / np.linalg.norm(d)).astype(np.float32)
+            right = np.array([fwd[2], 0.0, -fwd[0]], np.float32)
+            up = np.array([0.0, 1.0, 0.0], np.float32)
+            ctr = v.mean(axis=0)
+            pf = (v - ctr) @ fwd
+            pr = (v - ctr) @ right
+            pu = (v - ctr) @ up
+            eye = (ctr + fwd * (float(pf.max()) * 0.62)
+                   + up * (float(pu.max()) * 0.30))
+            off = right * (float(pr.max()) * 0.34)
+            out = (np.stack([eye - off, eye + off]).astype(np.float32), fwd)
         self._gpu_faces[key] = out
         return out
 
@@ -2364,30 +2415,47 @@ class Renderer:
         except Exception:
             return
         g = gpu_mesh.get_renderer(self.W, self.H)
-        eyes = self._eye_points(spec)
-        if g is None or eyes is None:
+        got = self._eye_points(spec)
+        if g is None or got is None:
             return
+        eyes, fwd = got
         gs = 0.62 * (size / max(1e-6, self.H * 0.14))
-        xy, front = g.project_points(eyes, rot=spin, pitch=-pitch, scale=gs)
+        aim = np.vstack([eyes, eyes + fwd * 1.6]).astype(np.float32)
+        pxy, pfront = g.project_points(aim, rot=spin, pitch=-pitch, scale=gs)
+        xy, front = pxy[:len(eyes)], pfront[:len(eyes)]
+        tip = pxy[len(eyes):]
         dx, dy = cx - self.W // 2, cy - self.H // 2
         hot = np.array([255.0, 255.0, 255.0], np.float32)
+        # ⚠ `front` only says the point is in front of the CAMERA, which stays
+        # true when the eye is on the far side of a solid skull — so v1 fired
+        # beams out of the BACK of the head and Zeke saw it immediately
+        # (2026-08-29: "they ended up coming out of the back of the skull's
+        # head"). The eye socket faces +Z in model space; test whether that
+        # normal still points at us after the spin.
+        face_z = g.facing(fwd, rot=spin, pitch=-pitch)
+        if face_z <= 0.12:
+            return                       # head is turned away: no beams at all
         for k in range(len(xy)):
             if not front[k]:
-                continue        # eye is round the back; no beam through a skull
+                continue
             ex, ey = float(xy[k][0]) + dx, float(xy[k][1]) + dy
-            # aim outward from the model's centre so the pair diverges as the
-            # head turns, which is what makes it read as 3D rather than as two
-            # stickers on the frame
-            vx, vy = ex - cx, ey - cy
+            # aim along the model's OWN forward axis, so the beams point
+            # where the skull is looking and swing with it — radial-from-centre
+            # looked fine head-on but detached from the head as it turned
+            vx = float(tip[k][0]) + dx - ex
+            vy = float(tip[k][1]) + dy - ey
             n = max(1e-3, (vx * vx + vy * vy) ** 0.5)
             vx, vy = vx / n, vy / n
             far = (int(ex + vx * self.W), int(ey + vy * self.W))
-            w = max(2, int(3 + 7 * strength))
+            strength_k = strength * min(1.0, (face_z - 0.12) / 0.35)
+            if strength_k <= 0.02:
+                continue
+            w = max(2, int(3 + 7 * strength_k))
             cv2.line(layer, (int(ex), int(ey)), far,
-                     tuple(float(c) for c in col * (0.5 + 0.5 * strength)),
+                     tuple(float(c) for c in col * (0.5 + 0.5 * strength_k)),
                      w, cv2.LINE_AA)
             cv2.line(layer, (int(ex), int(ey)), far,
-                     tuple(float(c) for c in hot * strength),
+                     tuple(float(c) for c in hot * strength_k),
                      max(1, w // 3), cv2.LINE_AA)
 
     def _gpu_draw(self, img, spec: str, size: float, cx: int, cy: int,
