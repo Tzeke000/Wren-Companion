@@ -44,6 +44,39 @@ the one flag you bothered to override is a preset nobody trusts.
 | `--bg-mirror N` | fold the background into an N-way kaleidoscope (6 or 8 read best). One polar remap of the already-rendered layer, so it is nearly free and composes with ANY background, not just metal. |
 | `--metal` | `palette` (default, tints the chrome with the style colours — reads blue on `--style edm`), `steel`, `gold`, `copper`, `gunmetal`. These are Schlick F0 values: the colour of the MIRROR, not surface paint. |
 
+## Distance and the lyric dolly (added 2026-08-29)
+
+Zeke: *"everything needs to be kind of far away so that way in comparison when it says
+come a little closer, the skull comes closer and then goes back away. It's more of a
+dramatic effect."*
+
+| Flag | What it does |
+|---|---|
+| `--far 0.5` | STANDING size of the centrepiece. This is the "from" end of the move — without it the subject already fills the frame and a push-in can only clip it. Applies to every centrepiece, model or procedural, and is NOT gated on `--lyric-models` |
+| `--bg-scale 0.72` | same idea for the `--bg metal` debris. Pull only the subject back and the background wins the frame by default |
+| `--push-peak 0.95` | size at the top of a `closer`-type dolly, measured against NORMAL framing rather than against `--far`, so sitting further back doesn't shrink the payoff. `--far 0.5 --push-peak 0.95` is a ~1.9x swing |
+| `--push-secs 2.6` | length of one dolly: eased in, held at the near point, eased back OUT |
+
+The words that trigger it are `LYRIC_PUSH_WORDS` (closer/close/nearer/near/inside/deeper).
+They move the CAMERA rather than swapping the model, and if a lyric cue (a house, a moon)
+is still being held when the line lands, the frame hands back to the shape deck — *the
+skull* comes closer, not whichever noun was on screen two bars ago.
+
+**Three things this got wrong first, all found by looking at renders:**
+
+1. **No contrast.** The push existed but the standing framing was already full-frame, so
+   the only visible result was the model clipping the left edge. The effect is the
+   *ratio*, not the zoom number.
+2. **It never came back.** v1 ramped to the peak and then snapped to baseline on the next
+   frame. A 1/30 s retreat is a cut, not a move — and "goes back away" was half of what
+   was asked for. Envelope now eases out.
+3. **★★ It arrived facing away.** The spin is free-running at ~0.08 rad/frame, which is
+   about **180° over a 2.6 s dolly** — so the chorus push peaked on the OCCIPUT every
+   time and delivered a smooth blob to the camera. `PUSH_SPIN = 0.15` damps the spin for
+   the duration and the start frame re-zeros it. ⇒ **A push-in is a HELD shot. Anything
+   that animates freely will out-run a 2-second window** — check what else is moving
+   before deciding a camera move is done.
+
 ## Why "metal" is a different material, not a recolour
 
 A recolour of the diffuse shader was the obvious move and it does not work. What makes
