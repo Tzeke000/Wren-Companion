@@ -1,18 +1,74 @@
 {
+  "barn": {
+    "author": "CreativeTrio",
+    "edges": 7644,
+    "id": "A6UkPq33aZ",
+    "license": "CC0",
+    "verts": 6265,
+    "wireframe_safe": false
+  },
+  "big_building": {
+    "author": "Quaternius",
+    "edges": 16830,
+    "id": "AVCS8jUd2l",
+    "license": "CC0",
+    "verts": 12707,
+    "wireframe_safe": false
+  },
   "boombox": {
     "author": "Poly by Google",
     "id": "4hZk7Fg8KiP",
     "license": "CC-BY 3.0"
+  },
+  "cabin_shed": {
+    "author": "CreativeTrio",
+    "edges": 7045,
+    "id": "HTx7PZt6Zm",
+    "license": "CC0",
+    "verts": 5854,
+    "wireframe_safe": false
   },
   "campfire": {
     "author": "Poly by Google",
     "id": "0vzzmM-t8CP",
     "license": "CC-BY 3.0"
   },
+  "car": {
+    "author": "Quaternius",
+    "edges": 7281,
+    "id": "Cz6yDaUcM9",
+    "license": "CC0",
+    "verts": 5662,
+    "wireframe_safe": false
+  },
+  "car_hatchback": {
+    "author": "Kay Lousberg",
+    "edges": 2536,
+    "id": "BG0KAhmGDt",
+    "license": "CC0",
+    "verts": 1504,
+    "wireframe_safe": true
+  },
+  "cartoony_purple_motorcycle": {
+    "author": "AliceCassie",
+    "edges": 3435,
+    "id": "j20srJUjpB",
+    "license": "CC0",
+    "verts": 2444,
+    "wireframe_safe": true
+  },
   "cd": {
     "author": "Poly by Google",
     "id": "0_wu0ngYEQl",
     "license": "CC-BY 3.0"
+  },
+  "character_hazmat": {
+    "author": "Quaternius",
+    "edges": 39545,
+    "id": "z3TSQYx1Kn",
+    "license": "CC0",
+    "verts": 21091,
+    "wireframe_safe": false
   },
   "crown_1": {
     "author": "Poly by Google",
@@ -63,6 +119,14 @@
     "author": "Poly by Google",
     "id": "0myA_BOcZrD",
     "license": "CC-BY 3.0"
+  },
+  "fantasy_house": {
+    "author": "Quaternius",
+    "edges": 14323,
+    "id": "BH2XHWUNmF",
+    "license": "CC0",
+    "verts": 11372,
+    "wireframe_safe": false
   },
   "figure": {
     "author": "joney_lol",
@@ -118,6 +182,14 @@
     "author": "Quaternius",
     "id": "1yCRUwFnwX",
     "license": "CC0"
+  },
+  "house": {
+    "author": "Kenney",
+    "edges": 910,
+    "id": "7VSVwAg2T3",
+    "license": "CC0",
+    "verts": 619,
+    "wireframe_safe": true
   },
   "iris_crystal": {
     "author": "Iris (procedural)",
@@ -299,6 +371,14 @@
     "id": "3_tN7i962hZ",
     "license": "CC-BY 3.0"
   },
+  "police_car": {
+    "author": "Quaternius",
+    "edges": 7957,
+    "id": "BwwnUrWGmV",
+    "license": "CC0",
+    "verts": 6184,
+    "wireframe_safe": false
+  },
   "red_car": {
     "author": "J-Toastie",
     "id": "dVLJ5CjB0h",
@@ -314,6 +394,14 @@
     "id": "2QYyKRb68QD",
     "license": "CC-BY 3.0"
   },
+  "skull": {
+    "author": "Kay Lousberg",
+    "edges": 643,
+    "id": "7clFQGz5jH",
+    "license": "CC0",
+    "verts": 328,
+    "wireframe_safe": true
+  },
   "skull_2": {
     "author": "CreativeTechLab",
     "id": "oxtpAT0TaB",
@@ -328,6 +416,38 @@
     "author": "Ian Wall",
     "id": "738EKrsYz96",
     "license": "CC-BY 3.0"
+  },
+  "skull_5": {
+    "author": "Quaternius",
+    "edges": 1365,
+    "id": "DJT7N0HuVB",
+    "license": "CC0",
+    "verts": 666,
+    "wireframe_safe": true
+  },
+  "skull_6": {
+    "author": "Quaternius",
+    "edges": 3480,
+    "id": "EAsVEJwsv7",
+    "license": "CC0",
+    "verts": 2784,
+    "wireframe_safe": true
+  },
+  "skull_candle": {
+    "author": "Kay Lousberg",
+    "edges": 1123,
+    "id": "94tuTO5eJv",
+    "license": "CC0",
+    "verts": 636,
+    "wireframe_safe": true
+  },
+  "skull_enemy": {
+    "author": "Quaternius",
+    "edges": 3112,
+    "id": "EHHwZ17lWD",
+    "license": "CC0",
+    "verts": 1358,
+    "wireframe_safe": true
   },
   "skull_kay": {
     "author": "Kay Lousberg",
@@ -348,6 +468,22 @@
     "author": "Quaternius",
     "id": "YgmRBtFlcF",
     "license": "CC0"
+  },
+  "sports_car": {
+    "author": "Quaternius",
+    "edges": 7777,
+    "id": "1mkmFkAz5v",
+    "license": "CC0",
+    "verts": 6072,
+    "wireframe_safe": false
+  },
+  "sports_car_2": {
+    "author": "Quaternius",
+    "edges": 7559,
+    "id": "OyqKvX9xNh",
+    "license": "CC0",
+    "verts": 5898,
+    "wireframe_safe": false
   },
   "star_1": {
     "author": "Poly by Google",

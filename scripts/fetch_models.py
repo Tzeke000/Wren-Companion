@@ -25,7 +25,18 @@ ROOT = Path(__file__).resolve().parent.parent
 DEST = ROOT / "assets" / "models3d"
 CATALOG = ROOT / "docs" / "3d_model_catalog_2026-08-27.md"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-MIN_EDGES, MAX_EDGES = 40, 4000
+MIN_EDGES, MAX_EDGES = 40, 4000          # WIREFRAME-safe band (CPU line loop)
+# ⚠ THE UPPER BOUND STOPPED BEING A HARD LIMIT ON 2026-08-28. It exists because
+# the CPU renderer draws every edge with cv2.line, where 40k edges = 850 ms and
+# the result is an unreadable ball of lines. The GPU path (gpu_mesh, same day)
+# draws 200k edges sub-millisecond AND renders solid shaded/metal surfaces,
+# where density is a VIRTUE — a detailed model is exactly what you want in
+# chrome. So a dense model is no longer garbage to be deleted; it is a model
+# that only the GPU path should use. We now KEEP it and record the density, and
+# the renderer decides. (Zeke asked for "a more in-depth skull" and vehicles —
+# precisely the class the old rule threw away: ~25 downloads were rejected as
+# "too dense" before the GPU path existed.)
+GPU_MAX_EDGES = 150_000
 _UUID = re.compile(r"static\.poly\.pizza/([0-9a-f-]{36})\.glb")
 
 
@@ -87,7 +98,28 @@ def record(name: str, sid: str, lic: str, author: "str | None") -> None:
             data = json.loads(mf.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    data[name] = {"id": sid, "author": author, "license": lic}
+    prev = data.get(name) or {}
+    data[name] = {"id": sid, "author": author, "license": lic,
+                  **{k: v for k, v in prev.items()
+                     if k in ("edges", "verts", "wireframe_safe")}}
+    mf.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def record_mesh(name: str, verts: int, edges: int, wire_safe: bool) -> None:
+    """Persist DENSITY next to the licence. Without this the only way to know
+    whether a model is safe for the CPU wireframe path is to load every GLB
+    and count, which is exactly the kind of thing that gets skipped and then
+    guessed at."""
+    import json
+    mf = DEST / "manifest.json"
+    data = {}
+    if mf.exists():
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    e = data.setdefault(name, {})
+    e.update({"verts": verts, "edges": edges, "wireframe_safe": bool(wire_safe)})
     mf.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -131,14 +163,20 @@ def fetch(name: str, short_id: str) -> bool:
         print(f"  {name}: unloadable — deleted")
         return False
     verts, edges = vc
-    if not (MIN_EDGES <= edges <= MAX_EDGES):
+    if edges < MIN_EDGES or edges > GPU_MAX_EDGES:
         out.unlink(missing_ok=True)
-        print(f"  {name}: {edges} edges outside {MIN_EDGES}-{MAX_EDGES} "
-              f"(would render as mush/nothing) — deleted")
+        print(f"  {name}: {edges} edges outside {MIN_EDGES}-{GPU_MAX_EDGES} "
+              f"(too sparse to read, or too heavy even for the GPU) - deleted")
         return False
+    wire_safe = MIN_EDGES <= edges <= MAX_EDGES
+    if not wire_safe:
+        print(f"  {name}: {edges} edges - KEPT as GPU-only "
+              f"(too dense for the CPU wireframe path; use --gpu3d)")
     # ASCII only: this repo's stdout is cp1252 and a tick mark raises
     # UnicodeEncodeError mid-run (the documented cp1252 trap — hit it here).
+    record_mesh(name, verts, edges, wire_safe)
     print(f"  OK {name}: {verts} verts, {edges} edges, "
+          f"{'wire+gpu' if wire_safe else 'GPU-only'}, "
           f"{len(r.content) // 1024}KB")
     return True
 
