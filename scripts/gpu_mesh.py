@@ -653,6 +653,28 @@ class GpuMeshRenderer:
                 index_element_size=4).render(moderngl.LINES)
         return self._read() if read else None
 
+    def project_points(self, pts, *, rot: float = 0.0, pitch: float = 0.0,
+                       scale: float = 1.0):
+        """Model-space points -> (screen_xy, in_front) using EXACTLY the same
+        matrices as `render`.
+
+        ⚠ It reuses `_model_rot`/`_perspective` rather than re-deriving the
+        transform, and that is the point. The 08-28 upside-down-skull bug came
+        from two code paths each owning their own idea of the model transform
+        and disagreeing by one Y-flip. Anything that needs to know where a
+        model feature LANDS on screen must ask the renderer, not recompute."""
+        p = np.asarray(pts, np.float32).reshape(-1, 3)
+        model = _model_rot(rot, pitch)
+        model[:3, :3] *= float(scale)
+        mvp = _perspective(np.radians(38.0), self.W / self.H, 0.1, 50.0)             @ _translate(-3.2) @ model
+        h = np.hstack([p, np.ones((len(p), 1), np.float32)])
+        clip = h @ mvp.T
+        w = np.where(np.abs(clip[:, 3]) < 1e-6, 1e-6, clip[:, 3])
+        ndc = clip[:, :3] / w[:, None]
+        xy = np.stack([(ndc[:, 0] * 0.5 + 0.5) * self.W,
+                       (0.5 - ndc[:, 1] * 0.5) * self.H], 1)
+        return xy.astype(np.float32), (clip[:, 3] > 0)
+
     def _read(self) -> np.ndarray:
         """-> HxWx4 float32 RGBA (0-255). Alpha is coverage: 255 where geometry
         was drawn, 0 where nothing was. Callers composite solids with it and

@@ -807,6 +807,7 @@ class Renderer:
     bg_deck: "list | None" = None           # rotate the BACKGROUND on the beat
     bg_every: int = 16                      # ...every N beats
     jaw: bool = False                       # hinge a skull's mandible on the kick
+    lasers: bool = False                    # eye beams on the drop
     bg_layout: str = "field"                # field|tunnel placement for bg=metal
     bg_mirror: int = 0                      # >1: fold the background N ways
     bg_shape: str = "octa"                  # primitive used by bg=metal
@@ -1933,6 +1934,16 @@ class Renderer:
                     # separates from the joint on skull_6 and quaternius,
                     # because these are decorative meshes with no real condyle.
                     jaw_open=0.28 * float(self._flash)):
+                if self.lasers and self.is_head(shape):
+                    # drop threshold: he asked for this "in case we really had
+                    # a really good dubstep track", so it fires on the DROP,
+                    # not on every kick, or it stops meaning anything
+                    st = float(self._flash) * (1.0 if drop else 0.0)
+                    if st > 0.02:
+                        lay = np.zeros_like(img)
+                        self._draw_lasers(lay, shape.split(":", 1)[1], size,
+                                          cx, cy, spin, nod, col, st)
+                        img += lay + cv2.GaussianBlur(lay, (0, 0), 9) * 0.8
                 return
             # GLB wireframe centerpiece (Zeke 08-27: "adding some 3-D reactive
             # shapes... like a skull"). Mesh from assets/models3d via trimesh,
@@ -2155,13 +2166,21 @@ class Renderer:
             ctr = np.asarray(m.vertices, np.float32).mean(axis=0)
             scl = max(1e-6, float(np.abs(np.asarray(m.vertices, np.float32)
                                          - ctr).max()))
-            parts = [c for c in m.split(only_watertight=False)
-                     if len(c.faces) >= 24]
-            if len(parts) >= 2:
+            parts = list(m.split(only_watertight=False))
+            # ⚠ CANDIDACY IS NOT A GEOMETRY FILTER. v1 filtered `parts` to
+            # >=24 faces to pick the jaw and then rebuilt the head from that
+            # SAME filtered list, silently deleting every small component.
+            # On fantasy_house it dropped most of the building and rendered a
+            # scattered frame with the walls missing (seen by eye). Pick the
+            # candidate from the big components; rebuild the head from ALL of
+            # the others.
+            big = [k for k, c in enumerate(parts) if len(c.faces) >= 24]
+            if len(big) >= 2:
                 lo, hi = float(m.bounds[0][1]), float(m.bounds[1][1])
                 span = max(1e-6, hi - lo)
-                rel = [(float(c.centroid[1]) - lo) / span for c in parts]
-                j = int(np.argmin(rel))
+                rel = {k: (float(parts[k].centroid[1]) - lo) / span
+                       for k in big}
+                j = min(big, key=lambda k: rel[k])
                 # only believe it if the candidate really is LOW on the skull
                 # and not just the smaller half of a two-piece model
                 if rel[j] < 0.34 and len(parts[j].faces) >= 40:
@@ -2182,6 +2201,67 @@ class Renderer:
         self._gpu_faces[key] = out
         return out
 
+    def _eye_points(self, spec: str):
+        """Two eye-socket positions in normalised model space, or None.
+
+        Zeke 2026-08-28: *"add stuff to it like lasers coming out of the eyes
+        in case we really had a really good dubstep track."* Derived from the
+        CRANIUM's own bounding box (not the whole model — including the jaw
+        drags the centre down and the beams come out of the cheekbones), at
+        the front face, upper-middle height, either side of the midline.
+        Proportional rather than absolute, so it lands on any skull instead of
+        being tuned to one."""
+        key = f"__eyes__{spec}"
+        if key in self._gpu_faces:
+            return self._gpu_faces[key]
+        out = None
+        parts = self._model_jaw(spec)
+        vf = self._model_faces(spec)
+        v = parts[0] if parts is not None else (vf[0] if vf else None)
+        if v is not None and len(v):
+            lo, hi = v.min(axis=0), v.max(axis=0)
+            ex = 0.30 * (hi[0] - lo[0]) / 2.0
+            ey = lo[1] + 0.62 * (hi[1] - lo[1])
+            ez = lo[2] + 0.86 * (hi[2] - lo[2])
+            out = np.array([[-ex, ey, ez], [ex, ey, ez]], np.float32)
+        self._gpu_faces[key] = out
+        return out
+
+    def _draw_lasers(self, layer, spec, size, cx, cy, spin, pitch, col,
+                     strength: float) -> None:
+        """Beams from the eye sockets, straight out at the viewer."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import gpu_mesh
+        except Exception:
+            return
+        g = gpu_mesh.get_renderer(self.W, self.H)
+        eyes = self._eye_points(spec)
+        if g is None or eyes is None:
+            return
+        gs = 0.62 * (size / max(1e-6, self.H * 0.14))
+        xy, front = g.project_points(eyes, rot=spin, pitch=-pitch, scale=gs)
+        dx, dy = cx - self.W // 2, cy - self.H // 2
+        hot = np.array([255.0, 255.0, 255.0], np.float32)
+        for k in range(len(xy)):
+            if not front[k]:
+                continue        # eye is round the back; no beam through a skull
+            ex, ey = float(xy[k][0]) + dx, float(xy[k][1]) + dy
+            # aim outward from the model's centre so the pair diverges as the
+            # head turns, which is what makes it read as 3D rather than as two
+            # stickers on the frame
+            vx, vy = ex - cx, ey - cy
+            n = max(1e-3, (vx * vx + vy * vy) ** 0.5)
+            vx, vy = vx / n, vy / n
+            far = (int(ex + vx * self.W), int(ey + vy * self.W))
+            w = max(2, int(3 + 7 * strength))
+            cv2.line(layer, (int(ex), int(ey)), far,
+                     tuple(float(c) for c in col * (0.5 + 0.5 * strength)),
+                     w, cv2.LINE_AA)
+            cv2.line(layer, (int(ex), int(ey)), far,
+                     tuple(float(c) for c in hot * strength),
+                     max(1, w // 3), cv2.LINE_AA)
+
     def _gpu_draw(self, img, spec: str, size: float, cx: int, cy: int,
                   spin: float, pitch: float, col,
                   env_spin: float = 0.0, jaw_open: float = 0.0) -> bool:
@@ -2200,9 +2280,15 @@ class Renderer:
         if vf is None:
             return False
         v, f = vf
+        # ⚠ HEADS ONLY. Without the is_head gate this hinged a chunk off
+        # whatever it was given — it took the lowest component of a HOUSE and
+        # swung it open. `--nod` already had this gate ("if it's not head
+        # shaped it doesn't need a head nod", Zeke 08-28); the jaw needs the
+        # same one, and I did not copy it across.
         parts = (self._model_jaw(spec)
                  if (self.jaw and jaw_open > 0.001
-                     and not spec.startswith("prim:")) else None)
+                     and not spec.startswith("prim:")
+                     and self.is_head(f"model:{spec}")) else None)
         # ⚠ Both of these were wrong on the first pass and the render came back
         # as a white blob filling the frame (seen by eye). base*0.55 + rim*1.15
         # saturated BEFORE the bloom pass ran on top of it; and a 0.87 scale
@@ -2865,6 +2951,11 @@ def main() -> int:
                          "skull_quaternius do; models that are one solid piece "
                          "are drawn whole, because a wrong jaw is worse than "
                          "no jaw")
+    ap.add_argument("--lasers", action="store_true",
+                    help="beams from a head model's eye sockets, on the DROP "
+                         "only (not every kick - it stops meaning anything if "
+                         "it fires constantly). Eye positions come from the "
+                         "cranium's own bounding box, so it lands on any skull")
     ap.add_argument("--bg-mirror", type=int, default=0, metavar="N",
                     help="fold the background into an N-way kaleidoscope "
                          "(0/1 = off; 6 or 8 read best). One polar remap of "
@@ -3107,7 +3198,8 @@ def main() -> int:
                  gpu3d=args.gpu3d, bg_shape=args.bg_shape,
                  bg_count=args.bg_count, metal=args.metal,
                  bg_deck=bg_deck, bg_every=args.bg_every,
-                 bg_mirror=args.bg_mirror, jaw=args.jaw)
+                 bg_mirror=args.bg_mirror, jaw=args.jaw,
+                 lasers=args.lasers)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
