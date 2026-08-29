@@ -13,6 +13,7 @@ This doc is the operator's page for what that turned into. Implementation lives 
 
 ```
 --look chrome        # polished chrome model + chrome debris field   <- the headline look
+--look steel         # NEUTRAL silver chrome, no palette tint. "shiny metallic", plainly read
 --look machine       # girders and plate tumbling, model edges drawn
 --look forge         # cogs + hex nuts + I-beams. the most "complicated" of the set
 --look shards        # jagged crystal debris, sharper/more aggressive
@@ -36,6 +37,7 @@ the one flag you bothered to override is a preset nobody trusts.
 | `--bg metal` | field of chrome solids streaming past the camera |
 | `--bg-shape` | `octa\|box\|tetra\|prism\|torus\|gear\|ibeam\|nut\|plate\|shard`, or a `+` list to mix (`gear+nut+ibeam`) |
 | `--bg-count N` | objects in the field (default 56; instanced, so this is close to free) |
+| `--metal` | `palette` (default, tints the chrome with the style colours — reads blue on `--style edm`), `steel`, `gold`, `copper`, `gunmetal`. These are Schlick F0 values: the colour of the MIRROR, not surface paint. |
 
 ## Why "metal" is a different material, not a recolour
 
