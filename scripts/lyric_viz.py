@@ -766,7 +766,9 @@ LYRIC_PUSH_WORDS = ("closer", "close", "nearer", "near", "inside", "deeper")
 
 
 def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
-                         available: "set[str]", hold_beats: int = 8):
+                         available: "set[str]", hold_beats: int = 8,
+                         far: float = 1.0, push_peak: float = 1.55,
+                         push_secs: float = 2.4):
     """Per-frame model spec driven by what is being SUNG, or None.
 
     Returns an object array of length n_frames holding "model:<name>" where a
@@ -777,12 +779,20 @@ def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
     just before the word, not fired on the word's exact timestamp: a cut that
     lands mid-word reads as a glitch, while the same cut on the downbeat reads
     as deliberate. And the object wants to be on screen AS the word arrives,
-    not after it."""
+    not after it.
+
+    `far` is the renderer's standing distance (applied by the Renderer, not
+    here) and is passed in ONLY so the push can be aimed at an absolute size:
+    `push_peak` is measured against NORMAL framing, so `--far 0.5 --push-peak
+    1.6` means the object sits at half size and comes to 1.6x — a 3.2x swing —
+    no matter what `far` is set to. Aiming the push relatively instead would
+    mean pulling the camera back also shrank the payoff, which is the opposite
+    of what the effect is for."""
     sched = np.zeros(n_frames, dtype=object)
     sched[:] = ""
     zoom = np.ones(n_frames, np.float32)
     if not lines:
-        return None, None
+        return None, None, None
     beat_i = np.asarray(beat_i)
     # first frame index of each beat number, so a time can snap to a downbeat
     beat_start = {}
@@ -810,7 +820,7 @@ def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
             if token in LYRIC_PUSH_WORDS:
                 pushes.append(float(w.start))
     if not hits and not pushes:
-        return None, None
+        return None, None, None
     hits.sort()
     used = []
     for t, model, token in hits:
@@ -833,23 +843,80 @@ def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
         # slide change. Starts slightly wide so the growth is visible.
         if end > f0:
             zoom[f0:end] = np.linspace(0.90, 1.20, end - f0, dtype=np.float32)
-    for t in pushes:
+    # ---- the "come a little closer" dolly ---------------------------------
+    # Zeke 2026-08-29: *"everything needs to be kind of far away so that way in
+    # comparison when it says come a little closer the skull comes closer and
+    # THEN GOES BACK AWAY. It's more of a dramatic effect."*
+    #
+    # Two changes over v1, both of which are the whole effect:
+    #   1. It RETURNS. v1 ramped up and then snapped back to baseline on the
+    #      next frame, so the retreat happened in 1/30th of a second and read
+    #      as a cut, not as a movement. The envelope now eases in, HOLDS at
+    #      the near point long enough to register, and eases back out.
+    #   2. It is aimed at an ABSOLUTE size (see the docstring), so the effect
+    #      is `far` -> `push_peak` -> `far`. The contrast, not the zoom number,
+    #      is what makes it dramatic — which is exactly why the standing
+    #      framing has to sit back.
+    peak_ratio = float(push_peak) / max(float(far), 1e-3)
+    push_n = max(6, int(fps * float(push_secs)))
+    fired = []
+    # 0 = no dolly, 1 = dolly in progress, 2 = the frame one STARTS on. The
+    # renderer needs both facts and one array carries them without a second
+    # return value.
+    push_mask = np.zeros(n_frames, np.int8)
+    for t in sorted(pushes):
         f = min(n_frames - 1, max(0, int(round(t * fps))))
         f0 = beat_start.get(int(beat_i[f]), f)
-        f1 = min(n_frames, f0 + int(fps * 2.2))
-        if f1 > f0:
-            # a real dolly-in: further than a cue push, because the LINE is
-            # asking for it. Multiplies whatever the cue zoom already is.
-            zoom[f0:f1] *= np.linspace(1.0, 1.55, f1 - f0, dtype=np.float32)
-    if pushes:
-        print(f"[lyric_viz] lyric camera pushes: {len(pushes)} "
-              f"(\"closer\"-type words)")
+        # don't stack two dollies on top of each other — "closer" lands twice
+        # in a chorus and overlapping pushes read as one long slow creep
+        # instead of two distinct moves.
+        if fired and f0 - fired[-1] < int(push_n * 0.8):
+            continue
+        f1 = min(n_frames, f0 + push_n)
+        n = f1 - f0
+        if n < 6:
+            continue
+        fired.append(f0)
+        push_mask[f0:f1] = 1
+        push_mask[f0] = 2
+        u = np.linspace(0.0, 1.0, n, dtype=np.float32)
+        f_in, f_hold = 0.34, 0.20          # ease-in / hold, rest is ease-out
+        f_out = max(1e-3, 1.0 - f_in - f_hold)
+        env = np.where(
+            u < f_in,
+            0.5 - 0.5 * np.cos(np.pi * np.clip(u / f_in, 0.0, 1.0)),
+            np.where(u < f_in + f_hold, 1.0,
+                     0.5 - 0.5 * np.cos(np.pi * np.clip((1.0 - u) / f_out,
+                                                        0.0, 1.0))),
+        ).astype(np.float32)
+        cur = zoom[f0:f1]
+        zoom[f0:f1] = cur + env * (peak_ratio - cur)   # lerp out and back
+        # THE SKULL COMES CLOSER — his words. If a lyric cue (a house, a moon)
+        # is still being held when the line lands, hand the frame back to the
+        # shape deck for the duration so the thing that dollies in is the
+        # hero object, not whatever noun happened to be on screen two bars
+        # ago. Clearing to the end of that cue's run, not just to f1, stops
+        # the old model popping back mid-retreat.
+        if sched[f0]:
+            tag = sched[f0]
+            e = f0
+            while e < n_frames and sched[e] == tag:
+                e += 1
+            sched[f0:e] = ""
+    if fired:
+        print(f"[lyric_viz] lyric camera pushes: {len(fired)} dollies "
+              f"(\"closer\"-type words), {far:.2f}x -> {push_peak:.2f}x -> "
+              f"{far:.2f}x over {push_secs:.1f}s "
+              f"= a {peak_ratio:.1f}x swing")
+        if len(fired) < len(pushes):
+            print(f"[lyric_viz]   ({len(pushes) - len(fired)} skipped as too "
+                  f"close to the previous dolly)")
     if not used:
-        return (sched if hits else None), zoom
+        return (sched if hits else None), zoom, push_mask
     print(f"[lyric_viz] lyric models: {len(used)} cues -> "
           + ", ".join(f"{t}->{m}" for _, m, t in used[:8])
           + (" ..." if len(used) > 8 else ""))
-    return sched, zoom
+    return sched, zoom, push_mask
 
 # Metal tints. `base` in the metal shader is Schlick F0 — the colour of the
 # MIRROR — so these are real conductor reflectances, not surface paint. Zeke
@@ -962,6 +1029,12 @@ class Renderer:
     lasers: bool = False                    # eye beams on the drop
     lyric_shapes: "np.ndarray | None" = None  # per-frame model driven by words
     lyric_zoom: "np.ndarray | None" = None    # push-in while a cue is on
+    far: float = 1.0                        # STANDING distance of the centrepiece.
+                                            # <1 sits it back so a lyric dolly has
+                                            # somewhere to come FROM (Zeke 08-29)
+    bg_scale: float = 1.0                   # size of the --bg metal debris; <1
+                                            # sits the whole field further out
+    push_mask: "np.ndarray | None" = None    # 0 none / 1 dolly / 2 dolly starts
     bg_twist: float = 0.0                   # spiral the tunnel with depth
     _warp: "dict | None" = None
     bg_layout: str = "field"                # field|tunnel placement for bg=metal
@@ -1365,7 +1438,12 @@ class Renderer:
             offs = np.stack([st["u"] * half * (self.W / self.H),
                              st["v"] * half, -d], 1).astype(np.float32)
         rots = (st["rot0"] + st["rspd"] * t).astype(np.float32)
-        scales = (st["sc"] * (1.0 + 0.18 * self._flash)).astype(np.float32)
+        # bg_scale < 1 pushes the debris APPARENTLY further out. Zeke 08-29
+        # said "EVERYTHING needs to be kind of far away" — if only the
+        # centrepiece retreats, the background wins the frame by default and
+        # the skull reads as small rather than as distant.
+        scales = (st["sc"] * float(self.bg_scale)
+                  * (1.0 + 0.18 * self._flash)).astype(np.float32)
         pal = self.style.palette
         accent = np.asarray(pal[1 % len(pal)], np.float32) / 255.0
         # A metal is a TINTED MIRROR: keep the tint mostly neutral and let the
@@ -1984,6 +2062,7 @@ class Renderer:
     # nod shape constants — see _nod_pitch
     NOD_LIFT = 0.45      # how far it rides UP between beats, x the down peak
     NOD_SWING = 0.25     # fraction of a beat spent swinging down into the hit
+    PUSH_SPIN = 0.15     # spin rate multiplier while a lyric dolly is running
 
     def _nod_pitch(self, i: int, a: Analysis) -> float:
         """Beat-synced NOD: a real head tilt whose **peak downward angle lands
@@ -2037,10 +2116,32 @@ class Renderer:
                 # a swap resets the spin so each model enters facing forward
                 self._rot = 0.0
         drop = bool(a.drop[i])
-        self._rot += (0.012 + 0.05 * a.bass[i] + (0.03 if drop else 0.0))
+        # A DOLLY SHOULD LAND ON A FACE. The spin is free-running, so a push
+        # that starts mid-rotation brings the BACK of the cranium at the
+        # camera — which is a blob, not a skull, and throws away the whole
+        # point of "the skull comes closer". Re-zero the spin on the frame the
+        # push starts, exactly as a shape swap already does: the object is at
+        # its smallest and furthest at that instant and the cut is on a beat,
+        # so the reset is invisible where a mid-shot one would not be.
+        spin = 0.012 + 0.05 * a.bass[i] + (0.03 if drop else 0.0)
+        if self.push_mask is not None and self.push_mask[i]:
+            if self.push_mask[i] == 2:
+                self._rot = 0.0
+            # AND HOLD THE POSE. Free-running, the spin covers ~180 degrees in
+            # a 2.6s dolly, so re-zeroing at the start is not enough — the
+            # object arrives at the camera showing the BACK of its cranium,
+            # which is a blob rather than a skull. Measured on the 08-29 test
+            # render: the chorus push peaked on the occiput every time. A
+            # push-in is a HELD shot; the subject should turn slowly through
+            # it, not whip around.
+            spin *= self.PUSH_SPIN
+        self._rot += spin
         members = [s for s in slot_spec.split("+") if s]
         bx, by = self._logo_center()
-        base = self.H * 0.14 * (1.0 + 0.22 * a.bass[i])
+        # `far` is the STANDING framing and applies unconditionally — it is not
+        # gated on --lyric-models, because a flag that silently does nothing
+        # unless a second flag is also present is the worst kind of knob.
+        base = self.H * 0.14 * self.far * (1.0 + 0.22 * a.bass[i])
         if self.lyric_zoom is not None:
             base *= float(self.lyric_zoom[i])
         n = len(members)
@@ -3224,6 +3325,29 @@ def main() -> int:
     ap.add_argument("--lyric-hold", type=int, default=8, metavar="BEATS",
                     help="how long a lyric-cued model stays on screen "
                          "(default 8 beats = two bars)")
+    ap.add_argument("--far", type=float, default=1.0, metavar="SCALE",
+                    help="STANDING size of the centrepiece (1.0 = as before, "
+                         "0.5 = sits at half size, further away). Zeke "
+                         "2026-08-29: 'everything needs to be kind of far "
+                         "away so that in comparison, when it says come a "
+                         "little closer, the skull comes closer'. This is the "
+                         "'from' end of that move — without it there is "
+                         "nowhere for the dolly to come from. Applies to every "
+                         "centrepiece, model or procedural shape")
+    ap.add_argument("--push-peak", type=float, default=1.55, metavar="SCALE",
+                    help="how big the centrepiece gets at the top of a "
+                         "'closer'-type lyric dolly, measured against NORMAL "
+                         "framing rather than against --far — so --far 0.5 "
+                         "--push-peak 1.6 is a 3.2x swing")
+    ap.add_argument("--bg-scale", type=float, default=1.0, metavar="SCALE",
+                    help="size of the --bg metal debris (1.0 = as before, "
+                         "0.7 = a smaller, further-away field). The companion "
+                         "to --far: pulling only the centrepiece back lets the "
+                         "background win the frame")
+    ap.add_argument("--push-secs", type=float, default=2.4, metavar="SECONDS",
+                    help="length of one lyric dolly: eased in, held at the "
+                         "near point, then eased back OUT to the standing "
+                         "framing (default 2.4s)")
     ap.add_argument("--lasers", action="store_true",
                     help="beams from a head model's eye sockets, on the DROP "
                          "only (not every kick - it stops meaning anything if "
@@ -3476,12 +3600,16 @@ def main() -> int:
                  bg_deck=bg_deck, bg_every=args.bg_every,
                  bg_mirror=args.bg_mirror, jaw=args.jaw,
                  bg_twist=args.bg_twist,
-                 lasers=args.lasers)
+                 lasers=args.lasers, far=args.far, bg_scale=args.bg_scale)
+    if args.far != 1.0:
+        print(f"[lyric_viz] standing framing: {args.far:.2f}x "
+              f"(centrepiece sits back)")
     if args.lyric_models:
         avail = {q.stem for q in (REPO / "assets" / "models3d").glob("*.glb")}
-        r.lyric_shapes, r.lyric_zoom = lyric_model_schedule(
+        r.lyric_shapes, r.lyric_zoom, r.push_mask = lyric_model_schedule(
             lines, args.fps, analysis.beat_i, n_frames, avail,
-            hold_beats=args.lyric_hold)
+            hold_beats=args.lyric_hold, far=args.far,
+            push_peak=args.push_peak, push_secs=args.push_secs)
         if r.lyric_shapes is None:
             print("[lyric_viz] lyric models: no matching words - "
                   "falling back to the shape deck")
