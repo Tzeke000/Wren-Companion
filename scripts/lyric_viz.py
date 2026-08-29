@@ -651,6 +651,60 @@ STYLES: dict[str, Style] = {
 
 
 # ---------------------------------------------------------------------------
+# 3b. LOOK PRESETS
+# ---------------------------------------------------------------------------
+# Zeke 2026-08-28: he wanted "retro wireframe" and "polished metal" to be ONE
+# FLAG APART instead of me re-deriving six flags per render and getting a
+# slightly different result each time. A preset is just a bundle of defaults —
+# anything passed explicitly on the command line still wins (see _apply_look),
+# so `--look chrome --bg flow` is a chrome model on the flow background.
+#
+# ⚠ Keys must match argparse dest names exactly (underscores, not dashes).
+LOOKS: dict[str, dict] = {
+    # what every render looked like before 08-28: glowing wireframe on black.
+    "retro": dict(gpu3d="wire", bg="flow", bloom=0.45),
+    # polished chrome centrepiece against chrome debris. The headline look.
+    "chrome": dict(gpu3d="metal", bg="metal", bg_shape="octa", bloom=0.38),
+    # heavier and more mechanical: girders and plate tumbling past, edges drawn.
+    "machine": dict(gpu3d="metal_wire", bg="metal", bg_shape="box+ibeam+plate",
+                    bg_count=64, bloom=0.34),
+    # the junkyard: cogs, nuts and girders. The most "complicated" of the set,
+    # and the direct answer to "3-D metallic moving parts".
+    "forge": dict(gpu3d="metal", bg="metal", bg_shape="gear+nut+ibeam",
+                  bg_count=60, bloom=0.36),
+    # jagged crystal debris — sharper and more aggressive than the octa field.
+    "shards": dict(gpu3d="metal", bg="metal", bg_shape="shard+tetra",
+                   bg_count=70, bloom=0.40),
+    # chrome rings — the cleanest of the three, reads well behind lyrics.
+    "rings": dict(gpu3d="metal", bg="metal", bg_shape="torus", bg_count=48,
+                  bloom=0.40),
+    # lit surface with its own wireframe over it: the scanned/hologram look.
+    "hologram": dict(gpu3d="solid_wire", bg="flow", bloom=0.50),
+    # lyrics-first: metal centrepiece, nothing else moving behind the words.
+    "void": dict(gpu3d="metal", bg="flat", bloom=0.30, readable=True),
+}
+
+
+def _apply_look(args, argv) -> list[str]:
+    """Fill in a preset's flags, skipping any the user typed themselves.
+
+    Explicit beats preset — otherwise a preset would silently eat the one flag
+    someone bothered to override, which is the failure mode that makes preset
+    systems untrustworthy."""
+    if not getattr(args, "look", ""):
+        return []
+    given = {tok.split("=", 1)[0].lstrip("-").replace("-", "_")
+             for tok in argv if tok.startswith("--")}
+    applied = []
+    for k, v in LOOKS[args.look].items():
+        if k in given:
+            continue
+        setattr(args, k, v)
+        applied.append(f"{k}={v}")
+    return applied
+
+
+# ---------------------------------------------------------------------------
 # 4. Renderer
 # ---------------------------------------------------------------------------
 
@@ -721,8 +775,12 @@ class Renderer:
     readable: bool = False                  # lyrics-first: fewer FX + contrast scrim
     bloom: float = 0.45                     # whole-frame glow amount (0 = off)
     layout: str = "row"                     # multi-object arrangement: row|nested
-    gpu3d: str = "off"                      # off|wire|shaded|solid_wire (GPU path)
+    gpu3d: str = "off"                      # off|wire|shaded|solid_wire|metal|
+                                            # metal_wire (GPU path)
+    bg_shape: str = "octa"                  # primitive used by bg=metal
+    bg_count: int = 56                      # objects in the metal field
     _gpu_faces: dict = field(default_factory=dict)
+    _field: "dict | None" = None            # bg=metal instance state
     safe_margins: bool = False              # keep clear of TikTok's UI overlays
     safe_overlay: bool = False              # draw the safe box to verify on a phone
     _viz_last: int = -1                     # last viz slot, for transition flash
@@ -837,14 +895,7 @@ class Renderer:
                               + (0.20 if a.kick[i] else 0.0)) * norm)
             up *= gain
             # darken a pocket behind the centerpiece so it always pops
-            if self._center_pocket is None:
-                cx, cy = self._logo_center()
-                Y, X = np.ogrid[0:self.H, 0:self.W]
-                d2 = ((X - cx) / (self.H * 0.36)) ** 2 + \
-                     ((Y - cy) / (self.H * 0.36)) ** 2
-                self._center_pocket = (1.0 - 0.45 * np.exp(-d2)) \
-                    .astype(np.float32)[..., None]
-            img += up * self._center_pocket
+            img += up * self._pocket()
             return img
         if self.style.bg == "starfield":
             drop = bool(a.drop[i])
@@ -861,6 +912,11 @@ class Renderer:
                 (bright[near] * 0.6)[:, None]
         elif self.style.bg == "flow":
             img += self._bg_flow(t, a, i)
+        elif self.style.bg == "metal":
+            lay = self._bg_metal(t, a, i)
+            al = lay[..., 3:4]
+            img *= (1.0 - al)           # solids occlude; see gpu_mesh._read
+            img += lay[..., :3]
         elif self.style.bg == "plasma":
             xx, yy = self._plasma_xy
             e = 0.25 + 0.75 * a.rms[i]
@@ -924,6 +980,91 @@ class Renderer:
         small = self._fbm_lut[(wv * 255).astype(np.uint8), 0]
         big = cv2.resize(small, (self.W, self.H), interpolation=cv2.INTER_CUBIC)
         return big * (0.40 + 0.60 * float(a.rms[i]))
+
+    def _pocket(self) -> np.ndarray:
+        """Radial darkening behind the centrepiece so a busy background never
+        competes with the model or the lyrics. Built once."""
+        if self._center_pocket is None:
+            cx, cy = self._logo_center()
+            Y, X = np.ogrid[0:self.H, 0:self.W]
+            d2 = ((X - cx) / (self.H * 0.36)) ** 2 + \
+                 ((Y - cy) / (self.H * 0.36)) ** 2
+            self._center_pocket = (1.0 - 0.45 * np.exp(-d2)) \
+                .astype(np.float32)[..., None]
+        return self._center_pocket
+
+    def _bg_metal(self, t: float, a: Analysis, i: int) -> np.ndarray:
+        """Field of instanced metal solids streaming past the camera.
+
+        Zeke 2026-08-28: *"we should get the backgrounds to be a lot more
+        complicated and like geometric shapes and what not, kind of like 3-D
+        metallic moving parts."* This is that, and it is only affordable
+        because the GPU path landed the same day — 56 lit, depth-tested,
+        environment-mapped solids cost ONE draw call and ~5 ms.
+
+        THE PLACEMENT IS ANGULAR, NOT CARTESIAN, and that is the whole trick.
+        Each object holds a fixed direction in SCREEN space and its world x/y
+        are derived from its current depth, so as it approaches it streams
+        OUTWARD from the centre — which is what reads as flying forward. A
+        fixed world-space x/y instead gives objects that merely grow in place,
+        which looks like a slideshow. The centre is also kept empty (radius
+        biased away from 0) so the field frames the lyrics instead of crossing
+        them."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import gpu_mesh
+        except Exception:
+            return np.zeros((self.H, self.W, 4), np.float32)
+        g = gpu_mesh.get_renderer(self.W, self.H)
+        if g is None:
+            return np.zeros((self.H, self.W, 4), np.float32)
+        NEAR, FAR, FOV, FADE_NEAR = 2.2, 30.0, 58.0, 7.0
+        span = FAR - NEAR
+        st = self._field
+        if st is None:
+            rng = np.random.default_rng(11)
+            n = max(4, int(self.bg_count))
+            r = np.sqrt(rng.uniform(0.20, 1.15, n))   # sqrt = even area density
+            th = rng.uniform(0, 2 * np.pi, n)
+            st = {"u": (r * np.cos(th)).astype(np.float32),
+                  "v": (r * np.sin(th)).astype(np.float32),
+                  "d0": rng.uniform(0, 1, n).astype(np.float32),
+                  "rot0": rng.uniform(0, 2 * np.pi, (n, 3)).astype(np.float32),
+                  "rspd": rng.uniform(-0.9, 0.9, (n, 3)).astype(np.float32),
+                  "sc": rng.uniform(0.20, 0.78, n).astype(np.float32),
+                  "z": 0.0}
+            self._field = st
+        # depth is INTEGRATED, not a function of t, so the flight can speed up
+        # on the bass without the whole field teleporting when the rate changes
+        st["z"] += (0.9 + 3.4 * float(a.bass[i])
+                    + (4.5 if a.drop[i] else 0.0)) / max(1, self.fps)
+        d = NEAR + ((st["d0"] * span - st["z"]) % span)
+        half = np.tan(np.radians(FOV) / 2.0) * d
+        offs = np.stack([st["u"] * half * (self.W / self.H),
+                         st["v"] * half, -d], 1).astype(np.float32)
+        rots = (st["rot0"] + st["rspd"] * t).astype(np.float32)
+        scales = (st["sc"] * (1.0 + 0.18 * self._flash)).astype(np.float32)
+        pal = self.style.palette
+        accent = np.asarray(pal[1 % len(pal)], np.float32) / 255.0
+        # A metal is a TINTED MIRROR: keep the tint mostly neutral and let the
+        # palette colour arrive through the reflected room, or every object
+        # turns into a coloured plastic bead.
+        tint = np.clip(0.58 + 0.42 * np.asarray(pal[0], np.float32) / 255.0,
+                       0, 1)
+        try:
+            lay = g.render_field(offs=offs, rots=rots, scales=scales,
+                                 kind=self.bg_shape, base=tuple(tint),
+                                 rim=tuple(np.clip(accent, 0, 1)),
+                                 spin_env=t * 0.55, polish=1.0,
+                                 fade_far=FAR, fade_near=FADE_NEAR, fov=FOV)
+        except Exception as ex:
+            print(f"[lyric_viz] metal bg failed: {ex!r}")
+            self.style = _dc_replace(self.style, bg="flow")
+            return np.zeros((self.H, self.W, 4), np.float32)
+        # dim the COLOUR with the energy, but keep ALPHA as true coverage — a
+        # dim metal panel is still an opaque object, not a transparent one
+        rgb = lay[..., :3] * (0.42 + 0.52 * float(a.rms[i])) * self._pocket()
+        return np.dstack([rgb, lay[..., 3:4] / 255.0]).astype(np.float32)
 
     def _bloom(self, img: np.ndarray, i: int, a: Analysis) -> None:
         """Quarter-res two-octave bloom over the WHOLE frame.
@@ -1659,7 +1800,8 @@ class Renderer:
             # is unavailable — a missing centrepiece would be worse than a
             # slower one.
             if self.gpu3d != "off" and self._gpu_draw(
-                    img, shape.split(":", 1)[1], size, cx, cy, spin, nod, col):
+                    img, shape.split(":", 1)[1], size, cx, cy, spin, nod, col,
+                    env_spin=i / max(1, self.fps) * 0.75):
                 return
             # GLB wireframe centerpiece (Zeke 08-27: "adding some 3-D reactive
             # shapes... like a skull"). Mesh from assets/models3d via trimesh,
@@ -1827,7 +1969,8 @@ class Renderer:
         return out
 
     def _gpu_draw(self, img, spec: str, size: float, cx: int, cy: int,
-                  spin: float, pitch: float, col) -> bool:
+                  spin: float, pitch: float, col,
+                  env_spin: float = 0.0) -> bool:
         """Render a model on the GPU into `img`. Returns False if unavailable
         so the caller falls back to the CPU line loop rather than dropping the
         centrepiece."""
@@ -1862,11 +2005,24 @@ class Renderer:
         # then haloes the silhouette instead of flooding the interior.
         base = np.clip(np.asarray(col, np.float32) / 255.0 * 0.55, 0, 1)
         rim = np.clip(np.asarray(col, np.float32) / 255.0 * 0.75, 0, 1)
+        if self.gpu3d.startswith("metal"):
+            # ⚠ DIFFERENT CONVENTION FROM THE DIFFUSE MODES, on purpose. There
+            # `base` is the surface colour and 0.55 keeps it under the bloom
+            # threshold. Here `base` is Schlick F0 — the colour of the MIRROR —
+            # and dimming it does not dim the object, it just makes the metal
+            # darker-tinted and MORE reflective at grazing angles. Brightness is
+            # controlled by the environment inside the shader instead, which is
+            # already tuned to leave the body under the bloom threshold and
+            # spend the headroom on glints.
+            base = np.clip(0.55 + 0.45 * np.asarray(col, np.float32) / 255.0,
+                           0, 1)
+            rim = np.clip(np.asarray(col, np.float32) / 255.0, 0, 1)
         gs = 0.62 * (size / max(1e-6, self.H * 0.14))
         try:
             lay = g.render((spec, self.gpu3d), v, f, rot=spin, pitch=-pitch,
                            scale=gs, mode=self.gpu3d,
-                           base=tuple(base), rim=tuple(rim))
+                           base=tuple(base), rim=tuple(rim),
+                           spin_env=env_spin, polish=1.0)
         except Exception as ex:
             print(f"[lyric_viz] gpu render failed ({spec}): {ex!r}")
             return False
@@ -1875,7 +2031,16 @@ class Renderer:
         if dx or dy:
             M = np.float32([[1, 0, dx], [0, 1, dy]])
             lay = cv2.warpAffine(lay, M, (self.W, self.H))
-        img += lay
+        if self.gpu3d == "wire":
+            img += lay[..., :3]          # glowing lines really are additive
+        else:
+            # ⚠ OCCLUDE, don't add. A solid is opaque; adding it lets whatever
+            # is behind show straight through, and on the first chrome render
+            # the background debris was plainly visible through the skull's
+            # cranium (seen by eye — every brightness stat looked fine).
+            a = lay[..., 3:4] / 255.0
+            img *= (1.0 - a)
+            img += lay[..., :3]
         return True
 
     def _project(self, v: np.ndarray, size: float, cx: int, cy: int,
@@ -2399,12 +2564,16 @@ def main() -> int:
                          "chin-down on the beat; everything else gets a size "
                          "pulse instead — a torus knot has no chin")
     ap.add_argument("--gpu3d", default="off",
-                    choices=["off", "wire", "shaded", "solid_wire"],
+                    choices=["off", "wire", "shaded", "solid_wire",
+                             "metal", "metal_wire"],
                     help="render model: centrepieces on the GPU instead of the "
                          "CPU line loop. 'shaded' = lit surfaces, 'solid_wire' "
-                         "= lit surface with its wireframe over it. Removes the "
-                         "edge budget: dense meshes cost the same as sparse "
-                         "ones. Falls back to CPU if GL is unavailable")
+                         "= lit surface with its wireframe over it, 'metal' = "
+                         "polished chrome (environment-mapped, tinted-mirror "
+                         "shading — a different material, not a recolour), "
+                         "'metal_wire' = chrome with its edges drawn. Removes "
+                         "the edge budget: dense meshes cost the same as "
+                         "sparse ones. Falls back to CPU if GL is unavailable")
     ap.add_argument("--safe-overlay", action="store_true",
                     help="draw the claimed TikTok safe box over the frame so "
                          "it can be checked against a real phone (the "
@@ -2418,10 +2587,28 @@ def main() -> int:
                          "visualization every N BEATS (default 16 = four bars). "
                          "0 = never rotate")
     ap.add_argument("--bg", default="", choices=["", "flow", "starfield",
-                                                 "plasma", "flat"],
+                                                 "plasma", "flat", "metal"],
                     help="override the style's background. 'flow' = "
                          "domain-warped FBM gradient in the style palette — "
-                         "the fix for flat black")
+                         "the fix for flat black. 'metal' = a field of "
+                         "chrome geometric solids streaming past the camera "
+                         "(GPU, ~5ms/frame, one draw call)")
+    ap.add_argument("--bg-shape", default="octa",
+                    help="which primitive(s) the --bg metal field is made of: "
+                         "octa|box|tetra|prism|torus|gear|ibeam|nut|plate|"
+                         "shard, or a '+' LIST to mix them "
+                         "(e.g. 'gear+nut+ibeam'). Instances are dealt "
+                         "round-robin between the shapes and each shape is one "
+                         "instanced draw, so a mixed field costs about what a "
+                         "single-shape field costs")
+    ap.add_argument("--bg-count", type=int, default=56, metavar="N",
+                    help="objects in the --bg metal field (default 56). They "
+                         "are instanced, so this is close to free")
+    ap.add_argument("--look", default="",
+                    choices=sorted(LOOKS),
+                    help="named look preset — a whole bundle of flags at once "
+                         "(e.g. 'chrome', 'retro', 'hologram'). Any flag you "
+                         "pass EXPLICITLY still wins over the preset")
     ap.add_argument("--bloom", type=float, default=0.45, metavar="AMOUNT",
                     help="whole-frame halo glow amount (default 0.45, 0 = off). "
                          "Quarter-res two-octave halo-only bloom. Textbook "
@@ -2451,6 +2638,14 @@ def main() -> int:
                     help="render only START:END seconds (e.g. 55:85) — "
                          "cheap test renders")
     args = ap.parse_args()
+    _look_applied = _apply_look(args, sys.argv[1:])
+    if _look_applied:
+        print(f"[lyric_viz] LOOK '{args.look}': "
+              f"{', '.join(_look_applied)}")
+        skipped = [k for k in LOOKS[args.look]
+                   if f"{k}={getattr(args, k)}" not in _look_applied]
+        if skipped:
+            print(f"[lyric_viz]   (kept your explicit {', '.join(skipped)})")
     if args.tiktok:
         args.aspect = "9:16"
         if args.shape == "none":
@@ -2630,7 +2825,8 @@ def main() -> int:
                  viz_deck=viz_deck, viz_every=args.viz_every,
                  readable=args.readable, bloom=args.bloom, layout=args.layout,
                  safe_margins=bool(args.tiktok), safe_overlay=args.safe_overlay,
-                 gpu3d=args.gpu3d)
+                 gpu3d=args.gpu3d, bg_shape=args.bg_shape,
+                 bg_count=args.bg_count)
     if r._shapes and len(r._shapes) > 1:
         beats_per = max(1, args.shape_every)
         print(f"[lyric_viz] shape deck: {len(r._shapes)} shapes "
