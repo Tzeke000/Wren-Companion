@@ -38,6 +38,7 @@ context (so it will not work from a Session-0 scheduled task).
 """
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 _VERT = """
@@ -528,10 +529,27 @@ class GpuMeshRenderer:
     """Holds one GL context + FBO and reuses them. Creating a context per frame
     would cost far more than the draw."""
 
-    def __init__(self, width: int, height: int):
+    def __init__(self, width: int, height: int, ss: int = 1):
         import moderngl
         self.mgl = moderngl
         self.W, self.H = int(width), int(height)
+        # SUPERSAMPLING. Everything is drawn at ss x resolution and box-filtered
+        # down on readback. Zeke 2026-08-29 wants these to look "like they were
+        # rendered in Unity or Blender", and the single most visible difference
+        # was not the material or the motion -- it was that every silhouette had
+        # hard stair-stepped edges. An offline renderer antialiases; we were the
+        # only thing in the frame that did not (the CPU line path already used
+        # cv2.LINE_AA, so the GPU models actually looked ROUGHER than the
+        # wireframes they replaced).
+        # ⚠ DEFAULT 1, WITH MSAA DOING THE WORK. Measured at 640x640:
+        #   ss=1 no AA        6.0 ms   hard stair-stepped silhouettes
+        #   ss=1 + MSAA 4x    7.8 ms   silhouette clean  <- default
+        #   ss=2 + MSAA 4x   26.1 ms   marginally better interior edges
+        # Supersampling shades every sub-pixel; multisampling only takes extra
+        # coverage samples at edges, which is where all the visible aliasing on
+        # a solid model actually is. ~90% of the benefit for +30% instead of
+        # +400%. Raise ss only for a deliberate high-quality pass.
+        self.ss = max(1, int(ss))
         self.ctx = moderngl.create_standalone_context()
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.prog_shaded = self.ctx.program(vertex_shader=_VERT,
@@ -551,7 +569,25 @@ class GpuMeshRenderer:
         # first chrome render had background debris clearly visible through the
         # skull's cranium (seen by eye; the brightness stats were all fine).
         # Chrome that you can see through is not chrome.
-        self.fbo = self.ctx.simple_framebuffer((self.W, self.H), components=4)
+        self.SW, self.SH = self.W * self.ss, self.H * self.ss
+        self.fbo = self.ctx.simple_framebuffer((self.SW, self.SH), components=4)
+        # MSAA is the cheap half of this. Full supersampling shades every
+        # sub-pixel (measured 6.0 -> 29.3 ms at 640x640, ~5x); multisampling
+        # only takes extra COVERAGE samples at edges, which is where all the
+        # visible aliasing lives on a solid model. Draw into a multisample
+        # renderbuffer, then blit-resolve into the readable FBO. Falls back to
+        # plain rendering if the driver refuses, because a slightly jaggy
+        # centrepiece beats no centrepiece.
+        self.ms_fbo = None
+        try:
+            self.ms_fbo = self.ctx.framebuffer(
+                color_attachments=[self.ctx.renderbuffer(
+                    (self.SW, self.SH), 4, samples=4)],
+                depth_attachment=self.ctx.depth_renderbuffer(
+                    (self.SW, self.SH), samples=4))
+        except Exception as e:
+            print(f"[gpu_mesh] MSAA unavailable ({e!r}) - drawing unsampled")
+            self.ms_fbo = None
         self._cache: dict = {}
         self._field: dict = {}
         self._ibuf = None
@@ -634,9 +670,10 @@ class GpuMeshRenderer:
             prog["fade_far"].value = 0.0
         if "fade_near" in prog:
             prog["fade_near"].value = 0.0
-        self.fbo.use()
+        target = self.ms_fbo or self.fbo
+        target.use()
         if clear:
-            self.fbo.clear(0.0, 0.0, 0.0, 0.0)
+            target.clear(0.0, 0.0, 0.0, 0.0)
         self.ctx.line_width = 1.0
         vao.render(moderngl.TRIANGLES if solid else moderngl.LINES)
         if mode in ("solid_wire", "metal_wire"):
@@ -687,13 +724,21 @@ class GpuMeshRenderer:
         return xy.astype(np.float32), (clip[:, 3] > 0)
 
     def _read(self) -> np.ndarray:
+        if self.ms_fbo is not None:
+            self.ctx.copy_framebuffer(dst=self.fbo, src=self.ms_fbo)
         """-> HxWx4 float32 RGBA (0-255). Alpha is coverage: 255 where geometry
         was drawn, 0 where nothing was. Callers composite solids with it and
         may ignore it for wireframe (which is genuinely additive glow)."""
         buf = self.fbo.read(components=4, dtype="f1")
-        img = np.frombuffer(buf, np.uint8).reshape(self.H, self.W, 4)
+        img = np.frombuffer(buf, np.uint8).reshape(self.SH, self.SW, 4)
         # GL origin is bottom-left; image origin is top-left
-        return np.flipud(img).astype(np.float32)
+        img = np.flipud(img).astype(np.float32)
+        if self.ss > 1:
+            # INTER_AREA is a true box filter, which is what a downsample wants;
+            # INTER_LINEAR would leave the aliasing it is meant to remove.
+            img = cv2.resize(img, (self.W, self.H),
+                             interpolation=cv2.INTER_AREA)
+        return img
 
     # -- background field ------------------------------------------------
     def _field_geo(self, kind: str):
@@ -743,8 +788,9 @@ class GpuMeshRenderer:
             self._ibuf = self.ctx.buffer(reserve=max(64, n_all) * 7 * 4,
                                          dynamic=True)
             self._ibuf_n = max(64, n_all)
-        self.fbo.use()
-        self.fbo.clear(0.0, 0.0, 0.0, 0.0)
+        target = self.ms_fbo or self.fbo
+        target.use()
+        target.clear(0.0, 0.0, 0.0, 0.0)
         slot = np.arange(n_all) % len(kinds)
         for ki, k in enumerate(kinds):
             sel = slot == ki
@@ -773,16 +819,18 @@ class GpuMeshRenderer:
 _RENDERER: "GpuMeshRenderer | None" = None
 
 
-def get_renderer(width: int, height: int) -> "GpuMeshRenderer | None":
+def get_renderer(width: int, height: int,
+                 ss: int = 1) -> "GpuMeshRenderer | None":
     """Process-wide singleton. Returns None if GL is unavailable, so callers
     can fall back to the CPU path rather than crash a render."""
     global _RENDERER
-    if _RENDERER is not None and (_RENDERER.W, _RENDERER.H) == (width, height):
+    if _RENDERER is not None and (_RENDERER.W, _RENDERER.H,
+                                  _RENDERER.ss) == (width, height, ss):
         return _RENDERER
     try:
         if _RENDERER is not None:
             _RENDERER.release()
-        _RENDERER = GpuMeshRenderer(width, height)
+        _RENDERER = GpuMeshRenderer(width, height, ss=ss)
         return _RENDERER
     except Exception as e:
         print(f"[gpu_mesh] GPU unavailable ({e!r}) - CPU fallback")
