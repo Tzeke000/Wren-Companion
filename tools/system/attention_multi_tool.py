@@ -1,15 +1,29 @@
-"""attention_multi — hold locks on SEVERAL things at once (fixed gaze, v1).
+"""attention_multi — hold locks on SEVERAL things at once (v2, panning-safe).
 
 Built 2026-08-21 night. Zeke's queued want after single-object tracking
 landed: "then he wants MULTI-object." TrackerVit costs ~10ms CPU per update,
 so N simultaneous locks are cheap; the expensive part (OWL-ViT) runs once per
 target at acquire + staggered revalidation.
 
-V1 scope (deliberate): the HEAD DOES NOT MOVE. Multi-lock is a fixed-gaze
-skill — every tracker assumes frame-to-frame appearance continuity, and a
-panning head invalidates all of them at once. Follow-one-while-knowing-others
-is a v2 problem (needs bearing-compensated box prediction). If a pursuit loop
-is running, start() refuses.
+**V2 IS WHAT RUNS.** Visual-odometry compensation (phaseCorrelate, same maths
+as the smooth servo) measures the scene shift each tick and pre-shifts every
+box by it, re-seating a tracker when the jump exceeds its search window and
+PARKING a lock that goes off-frame rather than killing it. That is the piece
+v1 lacked, so the old fixed-gaze restriction is gone: this runs alongside a
+pursuit loop. Follow one thing, know where the others are.
+
+⚠ HISTORY, so nobody re-derives it: v1 was fixed-gaze and start() refused
+while a pursuit loop ran. Both of those stopped being true on 2026-08-21, but
+this docstring and the start() return note went on ASSERTING them until
+2026-08-29 — a runtime message claiming "locks die if the head moves" sat 200
+lines below the code written to stop exactly that. `_pursuit_running()` below
+is the dead sentinel from that era, kept only because the signal name is
+referenced elsewhere.
+
+⚠ WHAT THIS DOES *NOT* DO: identity. Targets are OWL-ViT text prompts, so two
+people give you two boxes labelled "person", not "Zeke" and "Q". Binding a
+face-recognised name to a lock at acquire time and letting the odometry carry
+it is the unbuilt piece — see the 2026-08-29 note on holding two people.
 
 Lifecycle per target: OWL-ViT acquire (current view!) → TrackerVit update at
 loop rate on fresh frames → staggered reval every _REVAL_S (detector agree →
@@ -298,8 +312,13 @@ def _attention_multi(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any
         st["thread"] = th
         th.start()
         return {"ok": True, "running": True, "targets": wants,
-                "note": "fixed-gaze v1: locks die if the head moves; "
-                        "acquire happens from the CURRENT view"}
+                "note": "v2 panning-safe: odometry pre-shifts boxes, so locks "
+                        "SURVIVE head motion and run alongside pursuit; "
+                        "off-frame targets park and re-find. Acquire still "
+                        "happens from the CURRENT view — a target that is not "
+                        "visible right now cannot be locked yet. No identity: "
+                        "targets are OWL-ViT prompts, so 'person' is a box, "
+                        "not a name."}
 
     return {"ok": False,
             "error": f"unknown action {action!r} — start|stop|status|snapshot"}
