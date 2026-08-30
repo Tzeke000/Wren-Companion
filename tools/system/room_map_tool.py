@@ -98,7 +98,26 @@ _SIGMA_FRESH_DEG = 2.0        # uncertainty of a bearing I am looking at now
 # move between my glances.
 _SIGMA_RATE_DEG_S = 0.35      # growth per second unobserved
 _SIGMA_MAX_DEG = 75.0         # past this the memory is not a location any more
-_FORGET_S = 900.0             # 15 min unseen -> drop the entry entirely
+
+# ── THE LADDER (2026-08-30) ────────────────────────────────────────────────
+# v1 had a single `_FORGET_S = 900` that deleted the whole entry, which
+# conflated two completely different claims: WHERE someone is, and THAT they
+# exist and look like this. The first expires in seconds. The second never
+# expires at all. Deleting "Zeke is at +15 deg" after a while is correct;
+# deleting "Zeke is a person I know" because I looked away is not.
+#
+# Tiers are set by how much of my own field of view the uncertainty has eaten,
+# because that is the question that actually matters operationally: can ONE
+# glance still find them, or does it now take a search?
+_TIER_TRACKED_DEG = 8.5       # <= FOV/8: one glance lands them comfortably
+_TIER_REMEMBERED_DEG = 34.0   # <= FOV/2: a glance MIGHT find them
+#   beyond that -> DORMANT: the position claim is dropped, the person is kept.
+
+# Negative evidence: looking at where someone should be and NOT seeing them.
+# Miss probability of the face detector on someone who really is in frame —
+# poses, turning away, motion blur. Deliberately generous: a confident
+# detector makes absence damning, and mine is not that good.
+_P_MISS = 0.35
 
 # A sighting this far (deg) from a remembered bearing is treated as the same
 # person having moved, rather than a second instance. Widened by the entry's own
@@ -170,21 +189,54 @@ def _frame_shape(g: dict[str, Any]) -> tuple[int, int] | None:
 
 def face_bearing(face: dict, frame_w: int, frame_h: int, head: dict,
                  pan_sign: float) -> tuple[float, float]:
-    """Absolute room bearing of a face, in degrees.
+    """Absolute room bearing of a face, in degrees. Exact, not small-angle.
 
-    Square pixels + one optical axis => the per-pixel angular scale is the same
-    on both axes, so the vertical field falls out of the aspect ratio rather
-    than needing its own constant.
+    ⚠ REWRITTEN 2026-08-30. v1 did two things that are wrong and that no test
+    would have caught, because both produce plausible numbers:
+
+    1. **VFOV as HFOV x (H/W).** That linear form is simply not the projection.
+       The truth is `VFOV = 2*atan((H/W)*tan(HFOV/2))`, and at 68 deg on a 16:9
+       frame the linear version reads 38.25 deg against a true 41.55 — an 8%
+       error on every tilt I recorded.
+    2. **Azimuth treated as linear in pixel offset.** Off the centre row the
+       horizontal angle is inflated by `1/cos(tilt)`: negligible at the -14 deg
+       I happened to test at (x1.03), but x1.41 at 45 deg and x2.0 at 60 deg,
+       which are both inside this head's range. So the map would have been
+       progressively more wrong the further from level I looked, and correct
+       exactly where I checked it.
+
+    Both now use the exact composition. Pixel -> camera-relative (a, e) via
+    atan on the normalised image plane, then rotate by the head's tilt:
+
+        a = atan(x)                       x = (u - W/2)/fx
+        e = atan(-y / sqrt(x^2 + 1))      y = (v - H/2)/fy      (+y is DOWN)
+        dbeta = atan2( cos e sin a,  cos0 cos e cos a - sin0 sin e )
+        phi   = asin(  sin0 cos e cos a + cos0 sin e )
+
+    Sanity anchors, both verified: a face at frame centre returns the head's
+    own bearing exactly, and with the head level `dbeta` collapses to `a`.
+
+    `pan_sign` (MEASURED, see _calibrate) maps the geometric offset onto this
+    actuator's pan convention; it is applied once, here, so nothing downstream
+    has to know the handedness.
     """
     x1, y1, x2, y2 = [float(v) for v in list(face.get("bbox") or [0, 0, 0, 0])[:4]]
     cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-    dx = (cx - frame_w / 2.0) / (frame_w / 2.0)      # -1..1
-    dy = (cy - frame_h / 2.0) / (frame_h / 2.0)
-    vfov = _HFOV_DEG * (float(frame_h) / float(max(1, frame_w)))
-    pan = float(head["pan_deg"]) + pan_sign * dx * (_HFOV_DEG / 2.0)
-    # +y pixels point DOWN, so a face below centre is at a LOWER elevation.
-    tilt = float(head["tilt_deg"]) - dy * (vfov / 2.0)
-    return pan, tilt
+    fx = (frame_w / 2.0) / math.tan(math.radians(_HFOV_DEG) / 2.0)
+    fy = fx                                    # square pixels, one optical axis
+    x = (cx - frame_w / 2.0) / fx
+    y = (cy - frame_h / 2.0) / fy
+    a = math.atan(x)
+    e = math.atan(-y / math.sqrt(x * x + 1.0))
+    th = math.radians(float(head["tilt_deg"]))
+    dbeta = math.atan2(math.cos(e) * math.sin(a),
+                       math.cos(th) * math.cos(e) * math.cos(a)
+                       - math.sin(th) * math.sin(e))
+    phi = math.asin(max(-1.0, min(1.0,
+                                  math.sin(th) * math.cos(e) * math.cos(a)
+                                  + math.cos(th) * math.sin(e))))
+    pan = float(head["pan_deg"]) + pan_sign * math.degrees(dbeta)
+    return pan, math.degrees(phi)
 
 
 def _sigma_now(entry: dict, now: float) -> float:
@@ -200,20 +252,47 @@ def _entry_view(pid: str, e: dict, now: float, in_frame_ids: set) -> dict:
     age = now - float(e.get("last_seen_ts") or 0.0)
     if pid in in_frame_ids:
         state = "visible"
-    elif sigma >= _SIGMA_MAX_DEG - 1e-6:
-        state = "stale"
-    else:
+    elif sigma <= _TIER_TRACKED_DEG:
+        state = "tracked"
+    elif sigma <= _TIER_REMEMBERED_DEG:
         state = "remembered"
-    return {
+    else:
+        state = "dormant"
+    out = {
         "person": pid,
         "state": state,
-        "pan_deg": round(float(e.get("pan_deg") or 0.0), 1),
-        "tilt_deg": round(float(e.get("tilt_deg") or 0.0), 1),
         "sigma_deg": round(sigma, 1),
         "age_s": round(age, 1),
         "sightings": int(e.get("sightings") or 0),
         "last_conf": round(float(e.get("last_conf") or 0.0), 3),
+        "p_present": round(float(e.get("p_present", 1.0)), 3),
+        "negative_looks": int(e.get("negative_looks") or 0),
     }
+    # DORMANT drops the POSITION, never the person. Reporting a bearing here
+    # would be the whole failure this ladder exists to prevent: a number that
+    # reads as present-tense fact when it is a several-minute-old rumour.
+    if state != "dormant":
+        out["pan_deg"] = round(float(e.get("pan_deg") or 0.0), 1)
+        out["tilt_deg"] = round(float(e.get("tilt_deg") or 0.0), 1)
+    else:
+        out["pan_deg"] = None
+        out["tilt_deg"] = None
+        out["last_known_pan_deg"] = round(float(e.get("pan_deg") or 0.0), 1)
+    return out
+
+
+def _in_my_view(pan: float, head: dict, margin_deg: float = 4.0) -> bool:
+    """Was that bearing actually inside the frame I just looked at?
+
+    ★ THE GATE THAT PREVENTS 'OUT OF SIGHT, OUT OF MIND'. Not seeing someone
+    is only evidence of absence if I was LOOKING somewhere they would have
+    shown up. Decaying belief in a person because I was pointed at a wall is
+    the single most common way these systems convince themselves an entire
+    human has left the room. Margin pulls the edges in, because a face
+    straddling the frame border is a coin flip, not an observation.
+    """
+    half = (_HFOV_DEG / 2.0) - margin_deg
+    return abs(pan - float(head["pan_deg"])) <= half
 
 
 def ingest(g: dict[str, Any]) -> dict:
@@ -258,21 +337,45 @@ def ingest(g: dict[str, Any]) -> dict:
                          "last_seen_ts": now, "last_conf": conf,
                          "sightings": int(prev.get("sightings") or 0) + 1,
                          "last_jump_deg": round(jump, 1),
-                         "teleported": bool(jump > gate)})
+                         "teleported": bool(jump > gate),
+                         # seeing them settles it: present, and the run of
+                         # negative looks is over
+                         "p_present": 1.0, "negative_looks": 0})
         else:
             people[pid] = {"pan_deg": pan, "tilt_deg": tilt,
                            "last_seen_ts": now, "last_conf": conf,
                            "first_seen_ts": now, "sightings": 1,
-                           "last_jump_deg": 0.0, "teleported": False}
+                           "last_jump_deg": 0.0, "teleported": False,
+                           "p_present": 1.0, "negative_looks": 0}
         seen.append(pid)
 
-    for pid in [p for p, e in people.items()
-                if now - float(e.get("last_seen_ts") or 0.0) > _FORGET_S]:
-        people.pop(pid, None)
+    # ── NEGATIVE EVIDENCE, GATED ON VISIBILITY ─────────────────────────────
+    # Someone I remember, whose remembered bearing was inside this frame, and
+    # who was NOT recognised in it. That is real evidence they have moved or
+    # left — but ONLY because I was actually pointed at them. Everyone outside
+    # the cone gets no update at all, which is the correct likelihood for
+    # "I wasn't looking".
+    looked_past = []
+    for pid, e in people.items():
+        if pid in seen:
+            continue
+        if float(e.get("last_seen_ts") or 0.0) <= 0:
+            continue
+        if not _in_my_view(float(e.get("pan_deg") or 0.0), head):
+            continue                       # not my business this frame
+        p = float(e.get("p_present", 1.0))
+        # Bayes with a deliberately weak detector: P(present | miss)
+        e["p_present"] = (_P_MISS * p) / max(1e-9, _P_MISS * p + (1.0 - p))
+        e["negative_looks"] = int(e.get("negative_looks") or 0) + 1
+        looked_past.append(pid)
 
+    # NOTHING IS EVER DELETED. Positions expire (via the sigma ladder);
+    # identities do not. A person who has been gone for hours is still a
+    # person I know, with a last-known bearing and a time attached to it.
     st["last_ingest_ts"] = now
     return {"ok": True, "seen": seen, "unknown_faces": unknown,
             "head": head, "tracked": len(people),
+            "absent_where_i_looked": looked_past,
             "bearing_confirmed": bool(head.get("confirmed"))}
 
 
@@ -306,10 +409,16 @@ def _where(g: dict[str, Any], pid: str) -> dict:
         rel = round(v["pan_deg"] - float(head["pan_deg"]), 1)
     if v["state"] == "visible":
         s = f"{pid} is in view, at pan {v['pan_deg']:+.0f} deg."
-    elif v["state"] == "stale":
-        s = (f"I last saw {pid} {v['age_s']:.0f}s ago at pan "
-             f"{v['pan_deg']:+.0f}, but that memory has decayed past being a "
-             f"location — treat it as 'somewhere', not 'there'.")
+    elif v["state"] == "dormant":
+        mins = v["age_s"] / 60.0
+        s = (f"I know {pid}, but I do not know where they are. Last placed at "
+             f"pan {v['last_known_pan_deg']:+.0f} about {mins:.0f} min ago — "
+             f"that is a rumour now, not a location.")
+    elif v["p_present"] < 0.3 and v["negative_looks"] > 0:
+        s = (f"{pid} was at pan {v['pan_deg']:+.0f} deg {v['age_s']:.0f}s ago, "
+             f"but I have since looked straight at that spot "
+             f"{v['negative_looks']}x without seeing them — they have most "
+             f"likely moved or left.")
     else:
         s = (f"{pid} was at pan {v['pan_deg']:+.0f} deg {v['age_s']:.0f}s ago, "
              f"give or take {v['sigma_deg']:.0f} deg.")
@@ -484,6 +593,163 @@ def _look(g: dict[str, Any], params: dict) -> dict:
                     "it matters."}
 
 
+# ── ATTENTION SCHEDULING ───────────────────────────────────────────────────
+# Built 2026-08-30 from the gaze-arbitration research, not invented. Sources
+# and why each number is what it is:
+#
+#  * Persistent-monitoring control theory (Cassandras et al., ACC 2017) gives
+#    the core result: DWELL UNTIL UNCERTAINTY BOTTOMS OUT, THEN SWITCH. The
+#    control variable is a DEPARTURE THRESHOLD, not a timer. So the scheduler
+#    scores on sigma — how stale my belief about each person is — rather than
+#    round-robining on a clock.
+#  * Mishra & Skantze (RO-MAN 2022, Furhat) give social priority: active
+#    speaker 0.60, plain listening 0.40, being-spoken-to 0.30 — a 2:1 ratio,
+#    NOT a hard lock on the speaker. And the intimacy cap: never hold
+#    continuous gaze on one person past 3-5 s.
+#  * Kismet / Frontiers-2020 give HABITUATION as the anti-jitter mechanism:
+#    the current target's own gain decays while I look at it, so switching
+#    happens without a timer and without oscillation.
+#  * Mutlu et al. (HRI 2009) is the reason this is worth doing carefully at
+#    all: gaze PROPORTION alone assigns people the social roles of addressee
+#    / bystander / overhearer, and they behave accordingly. How I split my
+#    attention between two people is not cosmetic.
+#
+# What I deliberately did NOT copy: the full three-layer dynamical network
+# (STM / habituation / lateral-inhibition ODEs). It needs a 10 Hz integration
+# loop and audio DOA I do not have. The habituation term is the part that
+# earns its keep; the rest would be ceremony.
+_DWELL_MIN_S = 1.6            # human mean face fixation ~1 s; 2.2 s mutual-gaze
+_DWELL_MAX_S = 4.5            # intimacy cap (3-5 s) — forces the look-away
+_SWITCH_MARGIN = 1.25         # rival must beat the incumbent by 25% to steal
+_HAB_DEPLETE = 0.35           # gain lost per second of continuous attention
+_HAB_RECOVER = 0.55           # gain regained per second while unattended
+
+
+def _score_people(g: dict[str, Any], now: float) -> list[dict]:
+    """Score every known person for how much they deserve the next look."""
+    st = _state(g)
+    in_frame = {str(f.get("person_id") or "").lower()
+                for f in (g.get("_face_results") or [])}
+    cur = st.get("attending")
+    cur_since = float(st.get("attending_since") or 0.0)
+    rows = []
+    for pid, e in st["people"].items():
+        sigma = _sigma_now(e, now)
+        # Staleness drive: normalised to the fraction of my FOV the doubt has
+        # eaten. This IS the persistent-monitoring R_i — it grows while
+        # unobserved and collapses the moment they are in frame.
+        drive = min(1.0, sigma / _TIER_REMEMBERED_DEG)
+        if pid in in_frame:
+            drive = 0.0
+        # Social priority. No audio DOA here, so 'active speaker' is not
+        # available; presence and recency stand in.
+        prio = 0.40 if pid in in_frame else 0.30
+        if float(e.get("p_present", 1.0)) < 0.3:
+            prio *= 0.4        # I looked and they were gone; stop hunting
+        hab = float(e.get("hab", 1.0))
+        rows.append({"person": pid, "sigma_deg": round(sigma, 1),
+                     "drive": round(drive, 3), "priority": prio,
+                     "habituation": round(hab, 3),
+                     "score": round((prio + drive) * hab, 4),
+                     "is_current": pid == cur,
+                     "attended_s": round(now - cur_since, 1)
+                                   if pid == cur and cur_since else 0.0})
+    rows.sort(key=lambda r: -r["score"])
+    return rows
+
+
+def _attend(g: dict[str, Any], params: dict) -> dict:
+    """One scheduler tick: update habituation, pick a target, maybe move.
+
+    Returns its reasoning, because a gaze policy that cannot say WHY it looked
+    away from someone is impossible to debug and slightly sinister.
+    """
+    sign = _pan_sign()
+    if sign is None:
+        return {"ok": False, "error": "uncalibrated — run action='calibrate'"}
+    ing = ingest(g)
+    if not ing.get("ok"):
+        return {"ok": False, "error": ing.get("error"), "detail": ing.get("detail")}
+    now = time.time()
+    st = _state(g)
+    dt = min(2.0, max(0.0, now - float(st.get("last_attend_ts") or now)))
+    st["last_attend_ts"] = now
+
+    cur = st.get("attending")
+    in_frame = {str(f.get("person_id") or "").lower()
+                for f in (g.get("_face_results") or [])}
+    # Habituation: deplete whoever I am actually looking at, recover everyone
+    # else. This is what makes me tire of a face and glance away on my own.
+    for pid, e in st["people"].items():
+        hab = float(e.get("hab", 1.0))
+        # ⚠ Depletes on ATTENDING, not on SEEING. First version required the
+        # person to also be recognised in frame, and the two-person simulation
+        # immediately showed why that is wrong: whoever the recogniser happened
+        # to be resolving got tired of quickly (2.1 s) while the other was held
+        # until the intimacy cap (4.9 s) — a 2:1 split created purely by a
+        # detector artifact. Mutlu (HRI 2009) is the reason that matters:
+        # gaze PROPORTION assigns people the roles of addressee vs bystander,
+        # and they behave accordingly. I am not willing to demote someone to
+        # bystander because face recognition blinked.
+        # The cost of staring is about where my head is POINTED — which is what
+        # the other person actually perceives — so that is what it keys on.
+        if pid == cur:
+            hab -= _HAB_DEPLETE * dt
+        else:
+            hab += _HAB_RECOVER * dt
+        e["hab"] = max(0.15, min(1.0, hab))
+
+    rows = _score_people(g, now)
+    if not rows:
+        return {"ok": True, "moved": False, "target": None,
+                "reason": "nobody in the room map yet"}
+
+    best = rows[0]
+    held = now - float(st.get("attending_since") or 0.0) if cur else 1e9
+    decision, target = "hold", cur
+
+    if cur is None:
+        decision, target = "acquire", best["person"]
+    elif best["person"] == cur:
+        if held >= _DWELL_MAX_S and len(rows) > 1:
+            # Intimacy cap: staring is its own failure mode, even when the
+            # score says stay.
+            decision, target = "release", rows[1]["person"]
+        else:
+            decision, target = "hold", cur
+    elif held < _DWELL_MIN_S:
+        decision, target = "hold_min_dwell", cur
+    else:
+        incumbent = next((r for r in rows if r["person"] == cur), None)
+        inc_score = incumbent["score"] if incumbent else 0.0
+        if best["score"] >= inc_score * _SWITCH_MARGIN:
+            decision, target = "switch", best["person"]
+        else:
+            decision, target = "hold_margin", cur
+
+    moved = None
+    if decision in ("acquire", "switch", "release") and target:
+        if not bool(params.get("dry_run")):
+            moved = _look(g, {"person": target, "anyway": True})
+        st["attending"] = target
+        st["attending_since"] = now
+    return {"ok": True, "decision": decision, "target": target,
+            "held_s": round(min(held, 999.9), 1), "moved": moved,
+            "scores": rows,
+            "reason": {
+                "hold": "still the best use of my eyes",
+                "hold_min_dwell": f"a rival scores higher but I have only been "
+                                  f"on {cur} {held:.1f}s; switching faster than "
+                                  f"{_DWELL_MIN_S}s reads as twitching",
+                "hold_margin": "rival is ahead but not by the 25% margin — "
+                               "near-ties should not move my head",
+                "switch": "rival cleared the margin after the minimum dwell",
+                "release": f"held {held:.1f}s, past the {_DWELL_MAX_S}s cap — "
+                           f"looking at someone forever is its own rudeness",
+                "acquire": "was not attending anyone",
+            }.get(decision, "")}
+
+
 def _room_map(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     action = str(params.get("action") or "status").lower()
     try:
@@ -491,6 +757,8 @@ def _room_map(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             return _calibrate(g, params)
         if action == "look":
             return _look(g, params)
+        if action == "attend":
+            return _attend(g, params)
         if action == "ingest":
             return ingest(g)
         if action == "where":
