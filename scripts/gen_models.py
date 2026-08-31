@@ -280,6 +280,80 @@ def diamond_lattice(n=3):
     return v, np.array(f, np.int64)
 
 
+def spartan_helm(seg_lon=26, seg_lat=12, crest=True):
+    """Corinthian ('Spartan') helmet, facing +Z, Y-up — the lyric_viz forward
+    convention (see the WHICH-WAY-DOES-THIS-SKULL-FACE scar in lyric_viz.py).
+
+    Built for Zeke's Tzeke000 persona (2026-08-31: the Spartan helm IS the
+    faceless-artist brand, like Marshmello's mask). Silhouette carries the
+    read: dome + T-shaped face opening (eye slit split by a nasal bar, gap
+    between cheek guards) + the mohawk crest. All original geometry — no
+    downloaded mesh read, measured, or derived from.
+    """
+    import math
+    v, f = [], []
+    idx = {}
+
+    def P(i_lat, i_lon):
+        key = (i_lat, i_lon % seg_lon)
+        if key in idx:
+            return idx[key]
+        phi = math.radians(4 + (118 - 4) * i_lat / seg_lat)   # top -> below jaw
+        lam = TAU * (key[1]) / seg_lon                        # 0 == +Z front
+        r = math.sin(phi)
+        if i_lat == seg_lat:
+            r *= 1.06                                          # bottom flare
+        y = math.cos(phi)
+        idx[key] = len(v)
+        v.append((r * math.sin(lam), y, r * math.cos(lam)))
+        return idx[key]
+
+    def _lam_deg(i_lon):
+        d = (360.0 * (i_lon + 0.5) / seg_lon) % 360.0
+        return d - 360.0 if d > 180.0 else d
+
+    for i in range(seg_lat):
+        for j in range(seg_lon):
+            phi_c = 4 + (118 - 4) * (i + 0.5) / seg_lat
+            lam_c = abs(_lam_deg(j))
+            if 52 <= phi_c <= 74 and 8 <= lam_c <= 44:
+                continue                                       # eye slits
+            if phi_c > 74 and lam_c < 18:
+                continue                                       # cheek-guard gap
+            a, b = P(i, j), P(i + 1, j)
+            c, d = P(i, j + 1), P(i + 1, j + 1)
+            f.append((a, b, d))
+            f.append((a, d, c))
+
+    if crest:
+        n, t = 14, 0.028
+        rim = []
+        for k in range(n + 1):
+            a = math.radians(-58 + (115 - (-58)) * k / n)
+            dy, dz = math.cos(a), -math.sin(a)   # a=-58 -> +Z (brow), a=115 -> -Z (nape)
+            h = 0.30 + 0.14 * math.sin(math.pi * k / n)        # taller mid-arc
+            rim.append(((0, dy * 1.02, dz * 1.02), (0, dy * (1.02 + h), dz * (1.02 + h))))
+        for sx in (-t, t):
+            base = len(v)
+            for (pi, po) in rim:
+                v.append((sx, pi[1], pi[2]))
+                v.append((sx, po[1], po[2]))
+            for k in range(n):
+                a, b = base + 2 * k, base + 2 * k + 1
+                c, d = base + 2 * k + 2, base + 2 * k + 3
+                f.append((a, b, d) if sx > 0 else (a, d, b))
+                f.append((a, d, c) if sx > 0 else (a, c, d))
+        # cap the outer edge so the fin has thickness instead of two loose sheets
+        left0 = len(v) - 4 * (n + 1)
+        right0 = len(v) - 2 * (n + 1)
+        for k in range(n):
+            a, b = left0 + 2 * k + 1, left0 + 2 * k + 3
+            c, d = right0 + 2 * k + 1, right0 + 2 * k + 3
+            f.append((a, b, d))
+            f.append((a, d, c))
+    return np.array(v, np.float32), np.array(f, np.int64)
+
+
 # ★ THE READABLE CEILING IS ~900 EDGES, not the 4000 the download filter allows.
 # Verified by eye 2026-08-28: rendered as wireframes at phone scale, everything
 # above ~900 filled in solid — the torus knots, helix, supershapes, spike balls
@@ -312,6 +386,8 @@ SHAPES = {
     "iris_prism": lambda: prism(8, 0.55),
     "iris_prism_12": lambda: prism(12, 0.30),
     "iris_lattice": lambda: diamond_lattice(3),
+    "iris_spartan_helm": lambda: spartan_helm(26, 12, crest=True),
+    "iris_corinthian": lambda: spartan_helm(26, 12, crest=False),
 }
 
 

@@ -755,6 +755,12 @@ LYRIC_MODELS: "list[tuple[tuple[str, ...], tuple[str, ...]]]" = [
     (("rocket", "fly", "flying", "flight"), ("rocket_1",)),
     (("tree", "trees", "palm", "beach"), ("palm_tree", "palm_tree_2")),
     (("hat", "cap"), ("top_hat", "hat_1")),
+    # Tzeke000 persona helm (2026-08-31, his ask: "a spartan helmet nodding
+    # and or spinning"). iris_spartan_helm/iris_corinthian are PROCEDURAL
+    # (gen_models.py) — original geometry, zero attribution, brand-safe.
+    (("spartan", "warrior", "warriors", "soldier", "soldiers", "battle",
+      "fight", "fighting", "war", "sword", "shield", "armor", "helmet"),
+     ("iris_spartan_helm", "iris_corinthian")),
 ]
 
 
