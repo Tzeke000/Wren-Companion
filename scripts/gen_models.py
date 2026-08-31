@@ -280,32 +280,59 @@ def diamond_lattice(n=3):
     return v, np.array(f, np.int64)
 
 
-def spartan_helm(seg_lon=26, seg_lat=12, crest=True):
+def spartan_helm(seg_lon=36, seg_lat=18, crest=True, crest_h=0.34):
     """Corinthian ('Spartan') helmet, facing +Z, Y-up — the lyric_viz forward
     convention (see the WHICH-WAY-DOES-THIS-SKULL-FACE scar in lyric_viz.py).
 
     Built for Zeke's Tzeke000 persona (2026-08-31: the Spartan helm IS the
-    faceless-artist brand, like Marshmello's mask). Silhouette carries the
-    read: dome + T-shaped face opening (eye slit split by a nasal bar, gap
-    between cheek guards) + the mohawk crest. All original geometry — no
-    downloaded mesh read, measured, or derived from.
+    faceless-artist brand, like Marshmello's mask). v2 same day after his
+    'looks robotic' note — proportions re-derived from PHOTOS of the Munich
+    (Denda) and Getty museum helmets (photos as reference only; no mesh read,
+    measured, or derived from — original geometry throughout):
+      - tall ovoid (height ~1.35x width), face mask is over half the height
+      - carinated brow step where the dome overhangs the mask
+      - ALMOND eye holes with pointed corners, not a slit band
+      - nasal bar ends free; cheek guards nearly meet, splitting into a
+        narrowing V toward the chin points
+      - bottom edge sweeps up from long cheek guards to short sides, back
+        down into a FLARED neck guard at the nape
     """
     import math
     v, f = [], []
     idx = {}
 
+    def phi_max(lam_deg):
+        """Bottom edge per column: long cheek guards front, short sides,
+        flared skirt at the nape."""
+        al = abs(lam_deg)
+        if al <= 55:
+            return 150.0                                   # cheek guards
+        if al <= 95:
+            return 150.0 + (118.0 - 150.0) * (al - 55) / 40   # rise to sides
+        return 118.0 + (136.0 - 118.0) * (al - 95) / 85       # down to nape
+
+    def pos(i_lat, i_lon):
+        j = i_lon % seg_lon
+        lam = TAU * j / seg_lon                            # 0 == +Z front
+        ld = math.degrees(lam)
+        ld = ld - 360.0 if ld > 180.0 else ld
+        pm = phi_max(ld)
+        phi_d = 4 + (pm - 4) * i_lat / seg_lat
+        phi = math.radians(phi_d)
+        r = math.sin(phi)
+        if phi_d < 60:
+            r *= 1.035                                     # carinated brow step
+        back = max(0.0, -math.cos(lam))                    # 1 at the nape
+        if phi_d > 106:
+            r *= 1.0 + 0.24 * back * (phi_d - 106) / 30    # neck-guard flare
+        y = math.cos(phi) * 1.30                           # tall ovoid
+        return (r * math.sin(lam), y, r * math.cos(lam))
+
     def P(i_lat, i_lon):
         key = (i_lat, i_lon % seg_lon)
-        if key in idx:
-            return idx[key]
-        phi = math.radians(4 + (118 - 4) * i_lat / seg_lat)   # top -> below jaw
-        lam = TAU * (key[1]) / seg_lon                        # 0 == +Z front
-        r = math.sin(phi)
-        if i_lat == seg_lat:
-            r *= 1.06                                          # bottom flare
-        y = math.cos(phi)
-        idx[key] = len(v)
-        v.append((r * math.sin(lam), y, r * math.cos(lam)))
+        if key not in idx:
+            idx[key] = len(v)
+            v.append(pos(i_lat, i_lon))
         return idx[key]
 
     def _lam_deg(i_lon):
@@ -314,12 +341,22 @@ def spartan_helm(seg_lon=26, seg_lat=12, crest=True):
 
     for i in range(seg_lat):
         for j in range(seg_lon):
-            phi_c = 4 + (118 - 4) * (i + 0.5) / seg_lat
             lam_c = abs(_lam_deg(j))
-            if 52 <= phi_c <= 74 and 8 <= lam_c <= 44:
-                continue                                       # eye slits
-            if phi_c > 74 and lam_c < 18:
-                continue                                       # cheek-guard gap
+            pm = phi_max(_lam_deg(j))
+            phi_c = 4 + (pm - 4) * (i + 0.5) / seg_lat
+            # almond eyes: pointed corners, widest mid-eye. Sized for LEGIBILITY
+            # at visualizer scale, not archaeology — v2's museum-accurate small
+            # eyes vanished under chrome bloom (the opening is the LOW end of
+            # the contrast and the low end defines the effect).
+            if 10 <= lam_c <= 48:
+                half = 12.0 * math.sin(math.pi * (lam_c - 10) / 38)
+                if abs(phi_c - 66) < half:
+                    continue
+            # cheek-guard split: nasal ends free at ~82, V narrows the guards
+            if phi_c > 82:
+                half_gap = 5.0 + 15.0 * (phi_c - 82) / 68
+                if lam_c < half_gap:
+                    continue
             a, b = P(i, j), P(i + 1, j)
             c, d = P(i, j + 1), P(i + 1, j + 1)
             f.append((a, b, d))
@@ -331,8 +368,9 @@ def spartan_helm(seg_lon=26, seg_lat=12, crest=True):
         for k in range(n + 1):
             a = math.radians(-58 + (115 - (-58)) * k / n)
             dy, dz = math.cos(a), -math.sin(a)   # a=-58 -> +Z (brow), a=115 -> -Z (nape)
-            h = 0.30 + 0.14 * math.sin(math.pi * k / n)        # taller mid-arc
-            rim.append(((0, dy * 1.02, dz * 1.02), (0, dy * (1.02 + h), dz * (1.02 + h))))
+            h = crest_h + 0.15 * math.sin(math.pi * k / n)     # taller mid-arc
+            rim.append(((0, dy * 1.34, dz * 1.04),
+                        (0, dy * (1.34 + h), dz * (1.04 + h))))
         for sx in (-t, t):
             base = len(v)
             for (pi, po) in rim:
@@ -386,8 +424,10 @@ SHAPES = {
     "iris_prism": lambda: prism(8, 0.55),
     "iris_prism_12": lambda: prism(12, 0.30),
     "iris_lattice": lambda: diamond_lattice(3),
-    "iris_spartan_helm": lambda: spartan_helm(26, 12, crest=True),
-    "iris_corinthian": lambda: spartan_helm(26, 12, crest=False),
+    "iris_spartan_helm": lambda: spartan_helm(36, 18, crest=True),
+    "iris_corinthian": lambda: spartan_helm(36, 18, crest=False),
+    "iris_spartan_plume": lambda: spartan_helm(36, 18, crest=True,
+                                               crest_h=0.52),
 }
 
 
