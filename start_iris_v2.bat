@@ -62,6 +62,16 @@ REM --- iris_runtime) so the loop-liveness watchdog iris_runtime_watchdog.py
 REM --- SURVIVES the restarts it itself triggers.
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voice_watchdog|wren_voice_daemon|wren_styletts_server|iris_runtime\.py|iris_body_host' } | ForEach-Object { Write-Host ('[start_iris_v2.bat] killing stale PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
+REM --- ORPHAN-COGNITION SWEEP (2026-08-31, fixes the 08-28 twin): the python
+REM --- sweep above kills the body host, which ORPHANS its claude.exe grandchild
+REM --- — and nothing here killed claude.exe, so a second cognition survived the
+REM --- 08-28 07:27 force-restart and had to self-terminate per ONE-OF-ME.
+REM --- Filter is Name='claude.exe' AND CommandLine contains Wren-Companion
+REM --- (verified live: the SDK-bundled exe path is
+REM --- D:\Wren-Companion\.venv\...\claude.exe) — any Claude session from
+REM --- another repo has neither and is SPARED.
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object { $_.CommandLine -like '*Wren-Companion*' } | ForEach-Object { Write-Host ('[start_iris_v2.bat] killing orphan cognition PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+
 REM --- Kill any stale ORB APP too (Zeke directive 2026-07-08): a ghost iris-control
 REM --- wedged at its splash screen holds the app's single-instance lock, so every
 REM --- double-click bounces off silently (tonight's bug, PID 13220). Fresh session
