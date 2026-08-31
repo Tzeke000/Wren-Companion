@@ -1,4 +1,20 @@
 {
+  "armor_golden": {
+    "author": "Quaternius",
+    "edges": 2604,
+    "id": "65ltdmlBcy",
+    "license": "CC0",
+    "verts": 2088,
+    "wireframe_safe": true
+  },
+  "armor_metal": {
+    "author": "Quaternius",
+    "edges": 1764,
+    "id": "TMUoxILh9w",
+    "license": "CC0",
+    "verts": 1416,
+    "wireframe_safe": true
+  },
   "barn": {
     "author": "CreativeTrio",
     "edges": 7644,
@@ -68,6 +84,14 @@
     "id": "z3TSQYx1Kn",
     "license": "CC0",
     "verts": 21091,
+    "wireframe_safe": false
+  },
+  "character_soldier": {
+    "author": "Quaternius",
+    "edges": 40262,
+    "id": "PpLF4rt4ah",
+    "license": "CC0",
+    "verts": 21427,
     "wireframe_safe": false
   },
   "crown_1": {
@@ -153,6 +177,14 @@
     "id": "kbgiCMzdxg",
     "license": "CC0"
   },
+  "gold_sword": {
+    "author": "Quaternius",
+    "edges": 258,
+    "id": "5fJinXD1mc",
+    "license": "CC0",
+    "verts": 161,
+    "wireframe_safe": true
+  },
   "harp": {
     "author": "Poly by Google",
     "id": "102E7hcxEPT",
@@ -183,6 +215,16 @@
     "id": "1yCRUwFnwX",
     "license": "CC0"
   },
+  "helmet_creativetechlab": {
+    "edges": 820,
+    "verts": 656,
+    "wireframe_safe": true
+  },
+  "helmet_viking": {
+    "edges": 6298,
+    "verts": 5132,
+    "wireframe_safe": false
+  },
   "house": {
     "author": "Kenney",
     "edges": 910,
@@ -190,6 +232,19 @@
     "license": "CC0",
     "verts": 619,
     "wireframe_safe": true
+  },
+  "house_cylinder": {
+    "author": "Quaternius",
+    "edges": 2259,
+    "id": "VQF43DYGQO",
+    "license": "CC0",
+    "verts": 1200,
+    "wireframe_safe": true
+  },
+  "iris_corinthian": {
+    "author": "Iris (procedural)",
+    "id": null,
+    "license": "ORIGINAL - no attribution required"
   },
   "iris_crystal": {
     "author": "Iris (procedural)",
@@ -242,6 +297,11 @@
     "license": "ORIGINAL - no attribution required"
   },
   "iris_prism_12": {
+    "author": "Iris (procedural)",
+    "id": null,
+    "license": "ORIGINAL - no attribution required"
+  },
+  "iris_spartan_helm": {
     "author": "Iris (procedural)",
     "id": null,
     "license": "ORIGINAL - no attribution required"
@@ -321,6 +381,14 @@
     "id": "155LOgjwUy2",
     "license": "CC-BY 3.0"
   },
+  "monk": {
+    "author": "Quaternius",
+    "edges": 18942,
+    "id": "P5FzFYgG5z",
+    "license": "CC0",
+    "verts": 7611,
+    "wireframe_safe": false
+  },
   "moon_1": {
     "author": "Zoe XR",
     "id": "10VNaCg1jYM",
@@ -340,6 +408,14 @@
     "author": "Poly by Google",
     "id": "6dOb2Q_w_pM",
     "license": "CC-BY 3.0"
+  },
+  "ninja": {
+    "author": "Quaternius",
+    "edges": 3476,
+    "id": "mCNoqcqpvC",
+    "license": "CC0",
+    "verts": 1332,
+    "wireframe_safe": true
   },
   "palm_tree": {
     "author": "Alex Safayan",
@@ -393,6 +469,11 @@
     "author": "Peter Simcoe",
     "id": "2QYyKRb68QD",
     "license": "CC-BY 3.0"
+  },
+  "roman_centurion": {
+    "edges": 7164,
+    "verts": 5700,
+    "wireframe_safe": false
   },
   "skull": {
     "author": "Kay Lousberg",
@@ -514,6 +595,14 @@
     "author": "Matt Newell",
     "id": "0SguM8o_PMc",
     "license": "CC-BY 3.0"
+  },
+  "warrior": {
+    "author": "mastjie",
+    "edges": 10532,
+    "id": "RaWl2GJ0NZ",
+    "license": "CC0",
+    "verts": 8398,
+    "wireframe_safe": false
   },
   "wolf_1": {
     "author": "Poly by Google",
