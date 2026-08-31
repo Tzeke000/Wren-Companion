@@ -758,9 +758,12 @@ LYRIC_MODELS: "list[tuple[tuple[str, ...], tuple[str, ...]]]" = [
     # Tzeke000 persona helm (2026-08-31, his ask: "a spartan helmet nodding
     # and or spinning"). iris_spartan_helm/iris_corinthian are PROCEDURAL
     # (gen_models.py) — original geometry, zero attribution, brand-safe.
+    # Zeke's ruling 08-31: OWN the machine-finish look (no bronze pass), and
+    # the plume stays ON — crested variants only in the auto-deck. The bare
+    # iris_corinthian still exists by name for --shape, just never auto-picked.
     (("spartan", "warrior", "warriors", "soldier", "soldiers", "battle",
       "fight", "fighting", "war", "sword", "shield", "armor", "helmet"),
-     ("iris_spartan_helm", "iris_corinthian")),
+     ("iris_spartan_plume", "iris_spartan_helm")),
 ]
 
 
