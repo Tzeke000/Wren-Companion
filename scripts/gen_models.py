@@ -236,8 +236,12 @@ def heart(seg=40, depth=0.42):
     y = (13 * np.cos(t) - 5 * np.cos(2 * t)
          - 2 * np.cos(3 * t) - np.cos(4 * t))
     x, y = x / 17.0, y / 17.0
-    v = [(xi, -depth, yi) for xi, yi in zip(x, y)]
-    v += [(xi, depth, yi) for xi, yi in zip(x, y)]
+    # Axis mapping matters: curve-x -> X, curve-y (lobes up) -> Y, extrusion
+    # depth -> Z, so the heart STANDS UPRIGHT facing the camera. The original
+    # mapping put depth on Y — the heart lay flat and read as a spade from
+    # half the spin angles (caught by eye in the Be My One test, 2026-09-01).
+    v = [(xi, yi, -depth) for xi, yi in zip(x, y)]
+    v += [(xi, yi, depth) for xi, yi in zip(x, y)]
     f = []
     for k in range(seg):
         k2 = (k + 1) % seg
