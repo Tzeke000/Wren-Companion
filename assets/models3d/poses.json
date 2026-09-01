@@ -15,33 +15,13 @@
     "Kept SEPARATE from manifest.json because build_model_manifest rewrites that file",
     "wholesale and would silently wipe hand-tuned poses."
   ],
-  "skull_kay": {
-    "head": true
+  "cd": {
+    "flat": true
   },
-  "skull_quaternius": {
-    "head": true
+  "dragonfly": {
+    "flat": true
   },
-  "skull_q3": {
-    "head": true
-  },
-  "skull_q4": {
-    "head": true
-  },
-  "skull_2": {
-    "head": true
-  },
-  "skull_3": {
-    "head": true
-  },
-  "skull_4": {
-    "head": true
-  },
-  "iris_heart": {
-    "rot": [
-      90,
-      0,
-      0
-    ],
+  "figure": {
     "flat": true
   },
   "heart": {
@@ -50,7 +30,7 @@
   "heart_2": {
     "flat": true
   },
-  "star_1": {
+  "iris_heart": {
     "flat": true
   },
   "iris_star": {
@@ -65,16 +45,16 @@
   "lightning_bolt_2": {
     "flat": true
   },
-  "cd": {
-    "flat": true
-  },
-  "figure": {
-    "flat": true
-  },
-  "dragonfly": {
-    "flat": true
-  },
   "skull": {
+    "head": true
+  },
+  "skull_2": {
+    "head": true
+  },
+  "skull_3": {
+    "head": true
+  },
+  "skull_4": {
     "head": true
   },
   "skull_5": {
@@ -88,5 +68,20 @@
   },
   "skull_enemy": {
     "head": true
+  },
+  "skull_kay": {
+    "head": true
+  },
+  "skull_q3": {
+    "head": true
+  },
+  "skull_q4": {
+    "head": true
+  },
+  "skull_quaternius": {
+    "head": true
+  },
+  "star_1": {
+    "flat": true
   }
 }
