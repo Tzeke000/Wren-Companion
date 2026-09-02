@@ -58,7 +58,7 @@ _REARM_MAX_S = 600.0      # ...doubling per consecutive failure up to 10 min —
 _PAN_SWEEP = (0.0, -25.0, 25.0, -50.0, 50.0)   # relative to last-seen pan
 _TILT_SWEEP = (0.0, -12.0)                     # level first, then slightly down
 _SOFT_PAN = (-115.0, 115.0)
-_SOFT_TILT = (-35.0, 60.0)                     # same rails as the servo est
+_SOFT_TILT = (-35.0, 30.0)                     # PEOPLE band (Zeke 09-02: nobody is on the ceiling); the search only ever looks for people
 
 # ── head_watch tuning ───────────────────────────────────────────────────────
 _WATCH_POLL_S = 0.5
