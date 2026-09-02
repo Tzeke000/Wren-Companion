@@ -8,7 +8,7 @@ study_face — Zeke's standing rule (Discord, 2026-09-02, from Cpl's Course):
 
 What "study" means here, mechanically:
   1. keep the head on them (retarget the smooth-pursuit servo to the unknown
-     face — only when nobody KNOWN is in frame; a guest beside Zeke is his call),
+     face — EVEN beside Zeke: "unknown outranks known", Zeke 09-02 14:5x),
   2. burst-capture frames through the video loop's enroll hook into
      faces/_drafts/study_<ts>/ (the same invisible-to-the-recognizer layout
      brain/unknown_capture.py uses),
@@ -287,18 +287,21 @@ def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     out_dir = DRAFTS_DIR / study_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) head on them — only when nobody known is in frame.
+    # 1) head on them. UNKNOWN OUTRANKS KNOWN (Zeke 09-02 14:5x) — even beside
+    #    Zeke, the thing I can't name gets the eyes until it has been studied.
     servo: dict[str, Any] = {"retargeted": False}
-    if track and not knowns:
+    st["active"] = True
+    if track:
         prev = (g.get("_attention_state_obj") or {}).get("target")
-        st["restore_target"] = prev or (g.get("_attention_smooth") or {}).get(
-            "auto_start_target") or "person:zeke"
+        if prev and prev != "person:unknown":
+            st["restore_target"] = prev
+        elif not st.get("restore_target"):
+            st["restore_target"] = (g.get("_attention_smooth") or {}).get(
+                "auto_start_target") or "person:zeke"
         r = _servo(g, {"action": "start", "target": "person:unknown", "pin": False})
         servo = {"retargeted": bool(r.get("ok")), "result": r,
-                 "restore_target": st["restore_target"]}
-    elif knowns:
-        servo["note"] = ("someone known is in frame — not retargeting the head "
-                         "(a guest beside a known person is their call)")
+                 "restore_target": st.get("restore_target"),
+                 "known_also_in_frame": [str(k.get("person_id")) for k in knowns]}
 
     # 2) burst through the enroll hook; wait out another capture if one is live.
     t0 = time.time()
@@ -399,6 +402,7 @@ def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         record["study_json_error"] = repr(e)[:120]
     st["last"] = record
+    st["active"] = False
     try:
         bus = g.get("_signal_bus")
         if bus is not None:
@@ -422,6 +426,7 @@ def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 
 def _study_release(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     st = g.setdefault("_study_face", {})
+    st["active"] = False
     target = (st.pop("restore_target", None)
               or (g.get("_attention_smooth") or {}).get("auto_start_target")
               or "person:zeke")

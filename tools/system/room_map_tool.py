@@ -322,6 +322,31 @@ def ingest(g: dict[str, Any]) -> dict:
     now = time.time()
     seen, unknown = [], 0
 
+    # UNKNOWN OUTRANKS KNOWN (Zeke 2026-09-02): the largest unrecognised face
+    # is kept as ONE pseudo-person "unknown" so the scheduler can prefer it.
+    # It is a bearing with no identity — it expires when nobody unrecognised
+    # has been seen for a while (identities persist; this is not one).
+    unk_faces = [f for f in faces
+                 if str(f.get("person_id") or "").strip().lower() in ("", "unknown", "none")]
+    if unk_faces:
+        def _area(f):
+            b = f.get("bbox") or [0, 0, 0, 0]
+            return max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+        big = max(unk_faces, key=_area)
+        upan, utilt = face_bearing(big, fw, fh, head, sign)
+        prev_u = people.get("unknown")
+        if prev_u is not None:
+            prev_u.update({"pan_deg": upan, "tilt_deg": utilt, "last_seen_ts": now,
+                           "last_conf": 0.0, "sightings": int(prev_u.get("sightings") or 0) + 1,
+                           "p_present": 1.0, "negative_looks": 0, "novel": True})
+        else:
+            people["unknown"] = {"pan_deg": upan, "tilt_deg": utilt, "last_seen_ts": now,
+                                 "last_conf": 0.0, "first_seen_ts": now, "sightings": 1,
+                                 "last_jump_deg": 0.0, "teleported": False,
+                                 "p_present": 1.0, "negative_looks": 0, "novel": True}
+    elif "unknown" in people and (now - float(people["unknown"].get("last_seen_ts") or 0.0)) > 600.0:
+        del people["unknown"]          # no identity to keep — the position was all it was
+
     for f in faces:
         pid = str(f.get("person_id") or "").strip().lower()
         if not pid or pid in ("unknown", "none"):
@@ -648,6 +673,15 @@ def _score_people(g: dict[str, Any], now: float) -> list[dict]:
         # Social priority. No audio DOA here, so 'active speaker' is not
         # available; presence and recency stand in.
         prio = 0.40 if pid in in_frame else 0.30
+        if pid == "unknown":
+            # Novelty beats familiarity (Zeke 09-02) — until the unknown has
+            # been STUDIED (a study_face result in the last 10 min), then it
+            # drops to a plain bystander so I don't stare at a guest all night.
+            last_study = float(((g.get("_study_face") or {}).get("last") or {}).get("ts") or 0.0)
+            studied = (now - last_study) < 600.0
+            prio = 0.35 if studied else 0.75
+            if pid not in in_frame:
+                drive = min(1.0, drive + 0.25)   # an unnamed thing I lost sight of is worth a look
         if float(e.get("p_present", 1.0)) < 0.3:
             prio *= 0.4        # I looked and they were gone; stop hunting
         hab = float(e.get("hab", 1.0))
