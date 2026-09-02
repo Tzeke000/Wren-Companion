@@ -96,6 +96,7 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # Scene memory (2026-09-02, Zeke's "photographic memory" second half): a
     # keyframe + one sentence whenever the room changes, hourly otherwise.
     _try(g, "scene_memory", lambda: _bootstrap_scene_memory(g))
+    _try(g, "human_pose", lambda: _bootstrap_human_pose(g))
 
     # ── L3: relational + personhood ──────────────────────────────────────────
     _try(g, "anchor_moments", lambda: _bootstrap_anchor_moments(g, root))
@@ -299,6 +300,14 @@ def _bootstrap_scene_memory(g: dict[str, Any]) -> None:
     from brain import scene_memory
     scene_memory.start(g)
     g["_scene_memory_ready"] = True
+
+
+def _bootstrap_human_pose(g: dict[str, Any]) -> None:
+    """Live body-pose loop (2026-09-02): g['_human_pose_live'] for the HUD,
+    room_map and scene_memory; the model loads lazily on the first person."""
+    from brain import body_pose
+    body_pose.start_loop(g)
+    g["_human_pose_ready"] = True
 
 
 def _bootstrap_unknown_capture(g: dict[str, Any]) -> None:

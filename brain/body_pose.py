@@ -381,11 +381,11 @@ def analyze(frame: Any, *, person_hint: str | None = None, conf: float = 0.25,
 def describe(persons: list[dict[str, Any]], person_hint: str | None = None) -> str:
     if not persons:
         return "no body in view"
+    real = [p for p in persons if not p.get("static_shape")]
+    if not real:
+        return f"no body in view ({len(persons)} known non-person shape(s) ignored)"
     parts = []
-    for p in persons:
-        if p.get("static_shape"):
-            parts.append(f"a known non-person shape ({p['static_shape']}) — ignored")
-            continue
+    for p in real:
         who = (p.get("face_id") if p.get("face_id") and p["face_id"] != "unknown"
                else person_hint if (person_hint and p["index"] == 0) else "someone")
         if not p.get("verified_person"):
@@ -423,3 +423,220 @@ def draw(frame: Any, result: dict[str, Any]) -> Any:
         cv2.putText(out, f"{p['posture']} {d if d else '?'}m", (x1, max(14, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     return out
+
+
+# =============================================================================
+# LIVE LOOP + ACTIVITY OVER TIME (task 2 of Zeke's "do all three", 2026-09-02)
+# A ~2 Hz thread keeps g["_human_pose_live"] fresh (faces/tracks/head attached)
+# and a short per-person history so "what is he doing" has a memory:
+# walking / still / sat down / stood up / reaching. person_track, room_map,
+# the HUD and scene_memory read this instead of running the model themselves.
+# =============================================================================
+_LAST_HEAD: dict[str, Any] | None = None
+HISTORY_S = 12.0
+LOOP_ACTIVE_S = 0.5      # someone in view
+LOOP_IDLE_S = 2.0        # nobody in view
+
+
+def current_head() -> dict[str, Any] | None:
+    return _LAST_HEAD
+
+
+def is_static_box(xyxy) -> bool:
+    """For person_track: does this detection sit on a remembered non-person
+    shape at the current head bearing? (The statue had a body track.)"""
+    try:
+        return _matches_static([float(v) for v in xyxy[:4]], _LAST_HEAD) is not None
+    except Exception:
+        return False
+
+
+def _torso_px(p: dict[str, Any]) -> float:
+    j = p.get("joints") or {}
+    try:
+        sho = [(j[k]["x"], j[k]["y"]) for k in ("l_sho", "r_sho") if j[k]["c"] >= KP_CONF]
+        hip = [(j[k]["x"], j[k]["y"]) for k in ("l_hip", "r_hip") if j[k]["c"] >= KP_CONF]
+        if sho and hip:
+            s = _mid(*sho) if len(sho) == 2 else sho[0]
+            h = _mid(*hip) if len(hip) == 2 else hip[0]
+            return max(20.0, _dist(s, h))
+    except Exception:
+        pass
+    return 80.0
+
+
+def _centre(p: dict[str, Any]) -> tuple[float, float]:
+    j = p.get("joints") or {}
+    pts = [(j[k]["x"], j[k]["y"]) for k in ("l_hip", "r_hip", "l_sho", "r_sho") if j[k]["c"] >= KP_CONF]
+    if pts:
+        return (sum(x for x, _ in pts) / len(pts), sum(y for _, y in pts) / len(pts))
+    x1, y1, x2, y2 = p["box"]
+    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+
+def _reach_px(p: dict[str, Any]) -> float:
+    j = p.get("joints") or {}
+    best = 0.0
+    for s in ("l", "r"):
+        try:
+            if j[f"{s}_wri"]["c"] >= KP_CONF and j[f"{s}_sho"]["c"] >= KP_CONF:
+                best = max(best, _dist((j[f"{s}_wri"]["x"], j[f"{s}_wri"]["y"]),
+                                       (j[f"{s}_sho"]["x"], j[f"{s}_sho"]["y"])))
+        except Exception:
+            continue
+    return best
+
+
+class PoseLoop:
+    def __init__(self, g: dict[str, Any]):
+        self._g = g
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.history: dict[str, list[dict[str, Any]]] = {}
+        self.stats = {"ticks": 0, "with_person": 0, "errors": 0, "last_ms": None}
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="human_pose_loop", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=4.0)
+
+    def alive(self) -> bool:
+        return bool(self._thread is not None and self._thread.is_alive())
+
+    def _run(self) -> None:
+        global _LAST_HEAD
+        while not self._stop.is_set():
+            period = LOOP_IDLE_S
+            try:
+                from brain import frame_store
+                g = self._g
+                head = (g.get("_attention_state_obj") or {}).get("bearing")
+                _LAST_HEAD = dict(head) if isinstance(head, dict) else None
+                faces = list(g.get("_face_results") or [])
+                tracks: list = []
+                try:
+                    from brain import person_track
+                    tracks, _sz = person_track.track_boxes()
+                except Exception:
+                    tracks = []
+                if faces or tracks:
+                    res = frame_store.get_buffered_frame(max_age_sec=2.0)
+                    if res.frame is not None:
+                        known = [str(f.get("person_id")) for f in faces
+                                 if str(f.get("person_id") or "unknown") not in ("unknown", "")]
+                        hint = known[0] if len(known) == 1 else None
+                        out = analyze(res.frame, person_hint=hint, faces=faces, tracks=tracks,
+                                      head=_LAST_HEAD)
+                        self.stats["ticks"] += 1
+                        self.stats["last_ms"] = out.get("ms")
+                        if out.get("ok"):
+                            out["captured_ts"] = res.capture_ts
+                            self._record(out)
+                            g["_human_pose_live"] = out
+                            if any(p.get("verified_person") or p.get("likely_person") for p in out["persons"]):
+                                self.stats["with_person"] += 1
+                                period = LOOP_ACTIVE_S
+                else:
+                    self.stats["ticks"] += 1
+            except Exception:  # noqa: BLE001
+                self.stats["errors"] += 1
+            self._stop.wait(period)
+
+    def _key(self, p: dict[str, Any]) -> str:
+        fid = p.get("face_id")
+        if fid and fid != "unknown":
+            return str(fid)
+        return "primary" if p.get("verified_person") or p.get("likely_person") else f"shape{p['index']}"
+
+    def _record(self, out: dict[str, Any]) -> None:
+        now = time.time()
+        for p in out.get("persons") or []:
+            if p.get("static_shape"):
+                continue
+            k = self._key(p)
+            h = self.history.setdefault(k, [])
+            h.append({"ts": now, "c": _centre(p), "torso": _torso_px(p),
+                      "posture": p.get("posture"), "reach": _reach_px(p),
+                      "extent": p.get("extent"), "dist": (p.get("distance") or {}).get("m")})
+            cutoff = now - HISTORY_S
+            self.history[k] = [r for r in h if r["ts"] >= cutoff]
+        for k in list(self.history):
+            if self.history[k] and self.history[k][-1]["ts"] < now - HISTORY_S:
+                del self.history[k]
+        for p in out.get("persons") or []:
+            p["activity"] = None if p.get("static_shape") else self.activity(self._key(p))
+
+    def activity(self, key: str) -> str | None:
+        h = self.history.get(key) or []
+        if len(h) < 2:
+            return None
+        now = h[-1]["ts"]
+        recent = [r for r in h if r["ts"] >= now - 3.0]
+        if len(recent) < 2:
+            return None
+        a, b = recent[0], recent[-1]
+        dt = max(0.25, b["ts"] - a["ts"])
+        torso = max(20.0, (a["torso"] + b["torso"]) / 2.0)
+        speed = _dist(a["c"], b["c"]) / dt / torso      # torso-lengths per second
+        reach_rate = (b["reach"] - a["reach"]) / dt / torso
+        postures = [r["posture"] for r in h if r.get("posture")]
+        words: list[str] = []
+        if speed > 0.6:
+            legs = b.get("extent") in ("full body", "to the knees")
+            words.append("walking" if legs and str(b.get("posture")).startswith("standing") else "moving")
+        elif speed < 0.15:
+            words.append("still")
+        if reach_rate > 0.8:
+            words.append("reaching")
+        if len(postures) >= 4:
+            first = postures[0]
+            last = postures[-1]
+            if first.startswith("standing") and last.startswith("sitting"):
+                words.append("sat down")
+            elif first.startswith("sitting") and last.startswith("standing"):
+                words.append("stood up")
+            elif first != "lying down" and last == "lying down":
+                words.append("lay down")
+        return ", ".join(words) if words else None
+
+
+def start_loop(g: dict[str, Any]) -> dict[str, Any]:
+    lp = g.get("_human_pose_loop")
+    if not isinstance(lp, PoseLoop):
+        lp = PoseLoop(g)
+        g["_human_pose_loop"] = lp
+    lp.start()
+    return {"alive": lp.alive(), **lp.stats}
+
+
+def loop_status(g: dict[str, Any]) -> dict[str, Any]:
+    lp = g.get("_human_pose_loop")
+    if not isinstance(lp, PoseLoop):
+        return {"alive": False, "note": "not started"}
+    return {"alive": lp.alive(), **lp.stats, "history_keys": list(lp.history.keys())}
+
+
+def live(g: dict[str, Any], max_age_s: float = 3.0) -> dict[str, Any] | None:
+    out = g.get("_human_pose_live")
+    if not isinstance(out, dict):
+        return None
+    if time.time() - float(out.get("captured_ts") or 0.0) > max_age_s:
+        return None
+    return out
+
+
+def live_person(g: dict[str, Any], face_id: str, max_age_s: float = 3.0) -> dict[str, Any] | None:
+    out = live(g, max_age_s)
+    if not out:
+        return None
+    for p in out.get("persons") or []:
+        if str(p.get("face_id") or "").lower() == str(face_id).lower():
+            return p
+    return None

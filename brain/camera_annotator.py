@@ -325,6 +325,7 @@ def annotate_display(frame: Any, face_results: list[dict[str, Any]] | None, g: d
             continue
 
     out = _draw_hands(out, g)
+    out = _draw_pose(out, g)
     return _overlay_attention(out, h, g)
 
 
@@ -336,6 +337,48 @@ def annotate_display(frame: Any, face_results: list[dict[str, Any]] | None, g: d
 # hand that left the frame is worse than a blink.
 _HANDS_HOLD_S = 0.8
 _last_hands: dict[str, Any] = {"ts": 0.0, "hr": None}
+
+
+_POSE_PAIRS = (("l_sho", "r_sho"), ("l_sho", "l_elb"), ("l_elb", "l_wri"), ("r_sho", "r_elb"),
+               ("r_elb", "r_wri"), ("l_sho", "l_hip"), ("r_sho", "r_hip"), ("l_hip", "r_hip"),
+               ("l_hip", "l_knee"), ("l_knee", "l_ank"), ("r_hip", "r_knee"), ("r_knee", "r_ank"))
+
+
+def _draw_pose(frame: Any, g: dict[str, Any]) -> Any:
+    """Skeleton + posture/distance/activity words for VERIFIED people from
+    brain/body_pose's live loop (2026-09-02, task 2). Known non-person shapes
+    are not drawn. Never raises — camera pipeline safety."""
+    try:
+        import time as _time
+        import cv2  # type: ignore
+        live = g.get("_human_pose_live")
+        if not isinstance(live, dict) or _time.time() - float(live.get("captured_ts") or 0.0) > 1.5:
+            return frame
+        out = frame
+        for p in live.get("persons") or []:
+            if p.get("static_shape") or not (p.get("verified_person") or p.get("likely_person")):
+                continue
+            j = p.get("joints") or {}
+            col = (0, 220, 255) if p.get("verified_person") else (0, 160, 200)
+            for a, b in _POSE_PAIRS:
+                ja, jb = j.get(a), j.get(b)
+                if ja and jb and ja["c"] >= 0.5 and jb["c"] >= 0.5:
+                    cv2.line(out, (int(ja["x"]), int(ja["y"])), (int(jb["x"]), int(jb["y"])), col, 2)
+            for v in j.values():
+                if v["c"] >= 0.5:
+                    cv2.circle(out, (int(v["x"]), int(v["y"])), 3, (0, 255, 0), -1)
+            x1, y1, x2, y2 = p["box"]
+            d = (p.get("distance") or {}).get("m")
+            words = p.get("posture") or ""
+            if p.get("activity"):
+                words += f" · {p['activity']}"
+            if d:
+                words += f" · {d:.1f}m"
+            cv2.putText(out, words, (x1, min(frame.shape[0] - 6, y2 + 16)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
+        return out
+    except Exception:
+        return frame
 
 
 def _draw_hands(frame: Any, g: dict[str, Any]) -> Any:
