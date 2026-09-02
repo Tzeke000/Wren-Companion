@@ -1028,6 +1028,35 @@ def snapshot_current_person():
         return ""
 
 
+def _zeke_presence_note():
+    """Zeke's wifi-presence verdict as one clause, from state/zeke_presence.json.
+    Stale file (>10 min) => 'unknown', never 'away' — a dead watcher must not
+    read as an empty barracks (it was dead 08-29 -> 09-02 saying present=true)."""
+    try:
+        p = os.path.join(REPO_ROOT, "state", "zeke_presence.json")
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        last = str(d.get("last_check") or "")
+        age = time.time() - time.mktime(time.strptime(last, "%Y-%m-%dT%H:%M:%S"))
+        if age > 600:
+            return "unknown", "Zeke's wifi watcher is STALE (%.0f min) - presence unknown." % (age / 60.0)
+        if d.get("present"):
+            return "present", "Zeke's phone is on the wifi (he is likely around)."
+        return "away", ("Zeke's phone is OFF the wifi since " + str(d.get("since") or "?")
+                        + " - he is likely NOT in the room.")
+    except Exception:
+        return "unknown", "Zeke's wifi presence is unreadable."
+
+
+_STUDY_RULE = (" STANDING RULE (Zeke 2026-09-02): an unrecognised face while he is away matters"
+               " MORE, not less - STUDY IT. Call iris_tool_call name='study_face'"
+               " params={'action':'start'} (head on them, frame burst, crop + a pre-shrunk"
+               " sheet.jpg that is SAFE to Read), look at sheet.jpg, say what you can about"
+               " who/what you see (check frame context - a face on a screen reads as a"
+               " visitor), then DM Zeke the crop.jpg on Discord (chat_id 1504668879220117725)."
+               " Watch and report; do NOT speak to them. Finish with study_face action=release.")
+
+
 def _describe_perception(sig):
     """Turn a raw vision signal into a short, plain-language nudge for the cognition turn."""
     stype = sig.get("type") or ""
@@ -1043,7 +1072,9 @@ def _describe_perception(sig):
     if stype == "face_appeared":
         if _named(who):
             return "A face just appeared in view - recognized as " + who + "."
-        return "A face just appeared in view (not yet recognized)."
+        state, note = _zeke_presence_note()
+        return ("A face just appeared in view (not yet recognized). " + note
+                + (_STUDY_RULE if state == "away" else ""))
     if stype == "face_lost":
         if _named(who):
             return who + " is no longer in view."
@@ -1059,19 +1090,23 @@ def _describe_perception(sig):
         # SUGGESTION nudge (Zeke directive 2026-07-09): frames are already on disk;
         # cognition decides whether to draft a profile + ask who they are.
         known = ", ".join(str(k) for k in (data.get("known") or [])) or "nobody known"
-        return ("My eyes auto-captured " + str(data.get("frames") or "?")
+        base = ("My eyes auto-captured " + str(data.get("frames") or "?")
                 + " photos of " + str(data.get("unknown_count") or "an") + " unknown person(s)"
-                + " in frame alongside " + known + " - saved to " + str(data.get("dir") or "faces/_drafts/")
-                + ". Suggestion: consider staging a draft profile and asking Zeke (or them) who they are.")
+                + " in frame alongside " + known + " - saved to " + str(data.get("dir") or "faces/_drafts/") + ".")
+        if str(data.get("rule") or "") == "unknown-while-zeke-away":
+            return base + " Zeke's phone is OFF the wifi." + _STUDY_RULE
+        return base + " Suggestion: consider staging a draft profile and asking Zeke (or them) who they are."
     if stype == "new_person_detected":
         # brain/face_tracking promoted a face that stayed unknown for the full
         # persistence window. Deliberately phrased as an OBSERVATION, not an
         # instruction: it is somebody I do not recognise, which is a fact, and
         # what to do about it is mine to decide. Gated on a real face being in
         # frame upstream, so this is never an empty room.
+        state, note = _zeke_presence_note()
         return ("Someone I don't recognise has been in view long enough to be "
                 "worth tracking (temp id " + str(data.get("temp_id") or "?")
-                + "). Nobody has told me who they are.")
+                + "). Nobody has told me who they are. " + note
+                + (_STUDY_RULE if state == "away" else ""))
     if stype == "expression_changed":
         expr = str(data.get("expression") or "").strip()
         return "Expression changed" + ((" to " + expr) if expr else "") + "."

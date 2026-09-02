@@ -74,6 +74,38 @@ CAPTURE_TIMEOUT_S = 25.0  # give up waiting for the loop to finish saving
 
 _POLL_S = 0.5
 
+# ── Zeke-away rule (Zeke, Discord, 2026-09-02, from Cpl's Course) ──────────────
+# "with your eyes a unrecognized face is kinda more important when I'm not in
+#  the room. My phone not connected to the WiFi and you see a face you don't
+#  know — you should study it."
+# The wifi watcher (scripts/zeke_presence.py) writes state/zeke_presence.json.
+# A STALE file is NOT an open gate: on 09-02 the watcher had been dead since
+# 08-29 while the file still said present=true. away=None when stale/missing.
+PRESENCE_FILE = ROOT / "state" / "zeke_presence.json"
+PRESENCE_FRESH_S = float(os.environ.get("IRIS_PRESENCE_FRESH_S", "600"))
+AWAY_COOLDOWN_S = float(os.environ.get("IRIS_UNKNOWN_CAPTURE_AWAY_COOLDOWN", "180"))
+
+
+def zeke_presence() -> dict[str, Any]:
+    """Read the wifi watcher's verdict. Returns {away: True|False|None, present,
+    age_s, since, ip, reason}. away is None when the watcher file is stale
+    (> PRESENCE_FRESH_S) or unreadable — "don't know" must not read as "away"."""
+    try:
+        d = json.loads(PRESENCE_FILE.read_text(encoding="utf-8"))
+        last = str(d.get("last_check") or "")
+        ts = time.mktime(time.strptime(last, "%Y-%m-%dT%H:%M:%S"))
+        age = time.time() - ts
+        present = bool(d.get("present"))
+        stale = age > PRESENCE_FRESH_S
+        away = None if stale else (not present)
+        return {"away": away, "present": present, "age_s": round(age, 1),
+                "since": d.get("since"), "ip": d.get("ip"),
+                "reason": ("watcher stale — restart Iris-Zeke-Presence" if stale
+                           else ("phone OFF wifi" if away else "phone on wifi"))}
+    except Exception as e:  # noqa: BLE001
+        return {"away": None, "present": None, "age_s": None, "since": None,
+                "ip": None, "reason": f"unreadable: {e!r}"[:100]}
+
 
 def _log(msg: str) -> None:
     print(f"[unknown_capture] {msg}", file=sys.stderr, flush=True)
@@ -143,7 +175,11 @@ class UnknownCaptureWatcher:
             return
 
         knowns, unknowns = self._classify()
-        cond = (bool(knowns) and bool(unknowns)) or len(unknowns) >= 2
+        pres = zeke_presence() if unknowns else {"away": None}
+        # Rule 3 (2026-09-02): ONE unknown, nobody known, Zeke's phone OFF the
+        # wifi — the case that matters most and used to trigger nothing.
+        away_rule = bool(unknowns) and not knowns and pres.get("away") is True
+        cond = (bool(knowns) and bool(unknowns)) or len(unknowns) >= 2 or away_rule
         if not cond:
             self._cond_since = 0.0
             return
@@ -172,7 +208,9 @@ class UnknownCaptureWatcher:
             "unknown_count": len(unknowns),
             "unknown_confidences": [
                 round(float(u.get("confidence") or 0.0), 3) for u in unknowns],
-            "rule": "known+unknown" if knowns else "multi-unknown",
+            "rule": ("known+unknown" if knowns
+                     else ("unknown-while-zeke-away" if away_rule else "multi-unknown")),
+            "zeke_presence": pres,
         }
         g["_enroll_request"] = {
             "pid": pid,
@@ -227,17 +265,27 @@ class UnknownCaptureWatcher:
             _log(f"metadata write error: {e!r}")
         # Fire the nudge (only if we actually captured something).
         if saved:
-            self._cooldown_until = now + COOLDOWN_S
+            rule = str(act["meta"].get("rule") or "")
+            away = rule == "unknown-while-zeke-away"
+            # A stranger while he is away is worth re-evidencing sooner than a
+            # guest beside him — but still not a strobe.
+            self._cooldown_until = now + (AWAY_COOLDOWN_S if away else COOLDOWN_S)
             event = {
                 "draft_id": act["meta"]["draft_id"],
                 "dir": str(draft_dir),
                 "frames": len(saved),
                 "known": [k["person_id"] for k in act["meta"]["known_present"]],
                 "unknown_count": act["meta"]["unknown_count"],
+                "rule": rule,
+                "zeke_presence": act["meta"].get("zeke_presence"),
                 "note": ("unknown person alongside "
                          + ",".join(k["person_id"] for k in act["meta"]["known_present"])
                          if act["meta"]["known_present"]
-                         else f"{act['meta']['unknown_count']} unknown people in frame"),
+                         else (f"{act['meta']['unknown_count']} unknown person(s) in frame "
+                               "while Zeke's phone is OFF the wifi — STUDY THEM "
+                               "(Zeke's rule 2026-09-02: study_face, look, DM him the crop)"
+                               if away
+                               else f"{act['meta']['unknown_count']} unknown people in frame")),
             }
             self._last_event = event
             try:
