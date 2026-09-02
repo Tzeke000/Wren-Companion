@@ -33,6 +33,11 @@ def _human_pose(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         try:
             from brain import person_track
             pt = person_track.status()
+            try:
+                pt["static_dropped"] = int(person_track._state.get("static_dropped") or 0)
+                pt["track_boxes"] = [[round(v) for v in t.get("tlwh", [])] for t in person_track._state.get("tracks") or []]
+            except Exception:
+                pass
         except Exception as e:  # noqa: BLE001
             pt = {"error": repr(e)[:80]}
         return {"ok": True, **bp.status(), "loop": bp.loop_status(g), "person_track": pt}

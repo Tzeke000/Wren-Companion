@@ -446,7 +446,23 @@ def is_static_box(xyxy) -> bool:
     """For person_track: does this detection sit on a remembered non-person
     shape at the current head bearing? (The statue had a body track.)"""
     try:
-        return _matches_static([float(v) for v in xyxy[:4]], _LAST_HEAD) is not None
+        box = [float(v) for v in xyxy[:4]]
+        if _matches_static(box, _LAST_HEAD) is not None:
+            return True
+        # A different detector draws a different box around the same statue
+        # (YOLOX vs the pose head): also accept centre-inside at this bearing.
+        cx = (box[0] + box[2]) / 2.0
+        cy = (box[1] + box[3]) / 2.0
+        hp = (_LAST_HEAD or {}).get("pan_deg")
+        ht = (_LAST_HEAD or {}).get("tilt_deg")
+        for s in static_shapes():
+            sp, stt = s.get("head_pan"), s.get("head_tilt")
+            if hp is not None and sp is not None and (abs(float(hp) - float(sp)) > 4.0 or abs(float(ht or 0) - float(stt or 0)) > 4.0):
+                continue
+            sb = s["box"]
+            if sb[0] <= cx <= sb[2] and sb[1] <= cy <= sb[3] and _iou(box, sb) >= 0.2:
+                return True
+        return False
     except Exception:
         return False
 
@@ -607,20 +623,28 @@ class PoseLoop:
         return ", ".join(words) if words else None
 
 
-def start_loop(g: dict[str, Any]) -> dict[str, Any]:
+def _loop_obj(g: dict[str, Any]):
+    # Duck-typed on purpose: brain_hot_swap re-executes this module, which
+    # redefines PoseLoop — an isinstance check then disowns the LIVE loop and
+    # a second start() would spawn a twin thread (seen 2026-09-02 17:1x).
     lp = g.get("_human_pose_loop")
-    if not isinstance(lp, PoseLoop):
+    return lp if (lp is not None and hasattr(lp, "alive") and hasattr(lp, "stats")) else None
+
+
+def start_loop(g: dict[str, Any]) -> dict[str, Any]:
+    lp = _loop_obj(g)
+    if lp is None or not lp.alive():
         lp = PoseLoop(g)
         g["_human_pose_loop"] = lp
-    lp.start()
+        lp.start()
     return {"alive": lp.alive(), **lp.stats}
 
 
 def loop_status(g: dict[str, Any]) -> dict[str, Any]:
-    lp = g.get("_human_pose_loop")
-    if not isinstance(lp, PoseLoop):
+    lp = _loop_obj(g)
+    if lp is None:
         return {"alive": False, "note": "not started"}
-    return {"alive": lp.alive(), **lp.stats, "history_keys": list(lp.history.keys())}
+    return {"alive": lp.alive(), **lp.stats, "history_keys": list(getattr(lp, "history", {}).keys())}
 
 
 def live(g: dict[str, Any], max_age_s: float = 3.0) -> dict[str, Any] | None:
