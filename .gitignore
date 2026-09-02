@@ -94,3 +94,6 @@ nul
 # Vendored CODE is committed; the blob is not.
 models/yolox/*.pth
 assets/vjloops/
+
+# YOLO pose weights (downloaded from the ultralytics release on first use; 6-20 MB each)
+models/pose/*.pt
