@@ -35,7 +35,7 @@ if %errorLevel% neq 0 (
 echo [start_iris_v2_fable.bat] running elevated.
 
 REM --- The one line that makes this the Fable launcher.
-set "IRIS_MODEL=claude-fable-5"
+set "IRIS_MODEL=claude-fable-5-1"
 
 if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
     echo [start_iris_v2_fable.bat] ERROR: venv missing at D:\Wren-Companion\.venv\Scripts\python.exe 1>&2

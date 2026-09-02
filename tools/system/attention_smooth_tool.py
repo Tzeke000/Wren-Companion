@@ -106,6 +106,61 @@ _GAIN_UNITS = 20.0          # units per unit of offset (dx=0.5 -> 10u ≈ 8.5°/
 # Derivation: offset rate r [1/s] -> target angular velocity r*(HFOV/2) deg/s
 # -> units = r*34/0.85 ≈ 40*r.
 _KD_UNITS = 40.0            # units per (offset-units/second) of target motion
+
+# ── Persisted tune + boot auto-start (2026-09-02) ───────────────────────────
+# Gain 26 has been the referee-settled value since 08-27, but it lived only in
+# g["_attention_smooth"], so every restart silently came back at _GAIN_UNITS
+# with the servo stopped — re-applied by hand 08-28, 08-31, 09-02. The tune now
+# lives on disk, is read the first time this tool is touched after boot, and
+# `auto_start_target` lets brain/iris_bootstrap arm the servo once a live
+# frame exists (action='autostart'). `tune reset` clears the file's gains.
+import json as _json
+from pathlib import Path as _Path
+_TUNE_PATH = (_Path(__file__).resolve().parents[2] / "state" / "attention"
+              / "servo_tune.json")
+
+
+def _load_tune(st: dict[str, Any]) -> None:
+    """First touch after boot: pull gain/kd/auto_start from disk. Live values
+    already in `st` win (a hot tune made before the first read)."""
+    if st.get("_tune_loaded"):
+        return
+    st["_tune_loaded"] = True
+    try:
+        d = _json.loads(_TUNE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(d, dict):
+        return
+    if st.get("gain_units") is None and d.get("gain_units") is not None:
+        st["gain_units"] = max(5.0, min(35.0, float(d["gain_units"])))
+    if st.get("kd_units") is None and d.get("kd_units") is not None:
+        st["kd_units"] = max(0.0, min(80.0, float(d["kd_units"])))
+    if "auto_start_target" not in st:
+        st["auto_start_target"] = d.get("auto_start_target") or None
+    st["tune_loaded_from"] = str(_TUNE_PATH)
+
+
+def _save_tune(st: dict[str, Any]) -> None:
+    d = {
+        "gain_units": st.get("gain_units"),
+        "kd_units": st.get("kd_units"),
+        "auto_start_target": st.get("auto_start_target"),
+        "updated_ts": time.time(),
+        "note": ("read by attention_smooth on first touch after boot; "
+                 "auto_start_target is armed by brain/iris_bootstrap once a "
+                 "live frame exists. Edit via attention_smooth action=tune."),
+    }
+    try:
+        _TUNE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _TUNE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps(d, indent=2), encoding="utf-8")
+        tmp.replace(_TUNE_PATH)
+        st["tune_persisted"] = True
+        st.pop("tune_save_error", None)
+    except Exception as e:
+        st["tune_persisted"] = False
+        st["tune_save_error"] = repr(e)
 _D_EMA = 0.4                # smoothing on the rate estimate (tracker jitter)
 # ── RATE BASELINE (2026-08-21 jitter fix, part 2): at the 30Hz fast path the
 # derivative was (sub-pixel bbox noise)/(0.033s) — a STILL face measured as
@@ -1096,15 +1151,62 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                             and not homed_while_lost):
                         # Absolute snap home: recovers view AND resyncs the
                         # position registers the jog left stale.
+                        # 2026-09-02: MEASURED — absolute moves are encoder-true
+                        # even after a jog stream (jogged +10 up, re-commanded
+                        # the same (0,10), head came back; frame diff 9.5 vs
+                        # 41.9). So the home is sound. Yet at 12:18 a home
+                        # logged ok and two minutes later the head sat on the
+                        # CEILING with no audited mover in between. Cause
+                        # UNKNOWN — so instrument it: log the live readback
+                        # and a frame fingerprint after settling, and only
+                        # count the home as done when look_at said ok.
+                        _home_ok = False
                         try:
                             act = va.build_actuator()
                             if act.capabilities().get("can_pan"):
-                                act.look_at(*_HOME)
-                                est_pan, est_tilt = _HOME
-                                st["mode"] = "lost_homed"
-                        except Exception:
-                            pass
-                        homed_while_lost = True
+                                _r = act.look_at(*_HOME) or {}
+                                _home_ok = bool(_r.get("ok"))
+                                if _home_ok:
+                                    est_pan, est_tilt = _HOME
+                                    st["mode"] = "lost_homed"
+                                    stop.wait(2.0)          # let the motor land
+                                    _rb = {}
+                                    try:
+                                        _rb = act.bearing() or {}
+                                    except Exception as _e:  # noqa: BLE001
+                                        _rb = {"error": repr(_e)[:80]}
+                                    _fp = None
+                                    try:
+                                        from brain import frame_store as _fsh
+                                        _fr = _fsh.get_buffered_frame(
+                                            max_age_sec=2.5).frame
+                                        if _fr is not None:
+                                            _g0 = _fr.mean(axis=2) if _fr.ndim == 3 else _fr
+                                            _hh = int(_g0.shape[0]) // 2
+                                            _fp = {"top": round(float(_g0[:_hh].mean()), 1),
+                                                   "bottom": round(float(_g0[_hh:].mean()), 1),
+                                                   "std": round(float(_g0.std()), 1)}
+                                    except Exception:
+                                        _fp = None
+                                    st["last_home"] = {"ts": time.time(),
+                                                       "readback": _rb,
+                                                       "frame": _fp}
+                                    try:
+                                        from brain.visual_attention import _ptz_audit
+                                        _ptz_audit("home_verify", True,
+                                                   readback=_rb, frame=_fp)
+                                    except Exception:
+                                        pass
+                                else:
+                                    st["last_home"] = {"ts": time.time(),
+                                                       "failed": _r}
+                        except Exception as _e:  # noqa: BLE001
+                            st["last_home"] = {"ts": time.time(),
+                                               "failed": repr(_e)[:120]}
+                        if _home_ok:
+                            homed_while_lost = True
+                        else:
+                            lost_since = time.time()   # re-arm; retry in _LOST_HOLD_S
             except Exception as e:  # noqa: BLE001 — servo survives anything
                 st["error"] = repr(e)
                 # 2026-08-22 (Zeke: "make the logs tell you what happened"):
@@ -1158,8 +1260,24 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
     """attention_smooth(action='start'|'stop'|'status', target?)"""
     action = str(params.get("action") or "status").lower()
     st = g.setdefault("_attention_smooth", {})
+    _load_tune(st)
     t = st.get("thread")
     running = bool(t is not None and t.is_alive())
+
+    if action == "autostart":
+        # Boot re-arm (iris_bootstrap) — start on the persisted target if one
+        # is set and nothing is running. Safe to call any time.
+        target = st.get("auto_start_target")
+        if not target:
+            return {"ok": True, "started": False, "reason": "no auto_start_target",
+                    "tune_path": str(_TUNE_PATH)}
+        if running:
+            return {"ok": True, "started": False, "reason": "already running",
+                    "target": (g.get("_attention_state_obj") or {}).get("target")}
+        r = _attention_smooth({"action": "start", "target": target}, g)
+        r["started"] = bool(r.get("ok") and r.get("running"))
+        r["auto_start_target"] = target
+        return r
 
     if action == "status":
         out = {k: v for k, v in st.items() if k not in ("thread", "stop")}
@@ -1178,13 +1296,31 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
             st.pop("gain_units", None)
             st.pop("kd_units", None)
         else:
-            if params.get("gain") is not None:
-                st["gain_units"] = max(5.0, min(35.0, float(params["gain"])))
-            if params.get("kd") is not None:
-                st["kd_units"] = max(0.0, min(80.0, float(params["kd"])))
+            # `gain_units`/`kd_units` accepted as aliases — status REPORTS those
+            # keys, and tuning with them used to return ok:true while changing
+            # nothing (2026-08-28 scar).
+            gain = params.get("gain", params.get("gain_units"))
+            kd = params.get("kd", params.get("kd_units"))
+            if gain is not None:
+                st["gain_units"] = max(5.0, min(35.0, float(gain)))
+            if kd is not None:
+                st["kd_units"] = max(0.0, min(80.0, float(kd)))
+            auto = params.get("auto_start")
+            if auto is not None:
+                if auto is False or str(auto).strip().lower() in (
+                        "", "off", "none", "false", "0", "no"):
+                    st["auto_start_target"] = None
+                else:
+                    st["auto_start_target"] = str(auto).strip()
+        _save_tune(st)
         out["gain_units"] = float(st.get("gain_units") or _GAIN_UNITS)
         out["kd_units"] = float(st.get("kd_units") or _KD_UNITS)
         out["defaults"] = {"gain_units": _GAIN_UNITS, "kd_units": _KD_UNITS}
+        out["auto_start_target"] = st.get("auto_start_target")
+        out["persisted"] = bool(st.get("tune_persisted"))
+        out["tune_path"] = str(_TUNE_PATH)
+        if st.get("tune_save_error"):
+            out["tune_save_error"] = st["tune_save_error"]
         return out
 
     if action == "stop":
@@ -1234,14 +1370,16 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
                 "period_s": _PERIOD_S, "max_deg_s": _MAX_UNITS * _UNIT_DEG_S}
 
     return {"ok": False,
-            "error": f"unknown action {action!r} — start|stop|status|tune"}
+            "error": f"unknown action {action!r} — start|stop|status|tune|autostart"}
 
 
 register_tool(
     "attention_smooth",
     "TRUE smooth pursuit (HID jog protocol, ~12Hz visual servo, up to "
     "~21 deg/s continuous) for ANY target — person or object. "
-    "action='start' (+target='zeke'|'object:mug') | 'stop' | 'status'. "
+    "action='start' (+target='zeke'|'object:mug') | 'stop' | 'status' | "
+    "'tune' (gain=, kd=, auto_start='person:zeke'|'off', reset=) — persisted "
+    "to state/attention/servo_tune.json | 'autostart' (boot re-arm). "
     "Replaces the steppy absolute-move follow for live tracking; object "
     "targets auto-pin. Rails: zero-vector on lost/stale/error, absolute "
     "home+resync after 8s lost. NOTE: WinRT bearing readback cannot see jog "

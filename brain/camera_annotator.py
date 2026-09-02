@@ -18,7 +18,6 @@ _BOX_KNOWN = (0, 220, 0)
 _BOX_UNKNOWN = (0, 220, 220)
 _LANDMARK_FAINT = (0, 180, 0)
 _LANDMARK_KEY = (0, 255, 80)
-_TEXT_AGE_GENDER = (200, 200, 200)
 
 _KEY_LANDMARK_INDICES = {
     # Approximate key landmark indices from buffalo_l 106-pt set.
@@ -35,6 +34,18 @@ _ATTENTION_COLORS = {
     "distracted": (0, 220, 220),
     "away": (0, 165, 255),
     "absent": (0, 0, 220),
+}
+
+# What the eye tracker's four states actually MEAN, in words a reader of the
+# frame can't misread (2026-09-02). Raw "AWAY" covered two different truths —
+# "face in frame, eyes off the screen >10s" and "face lost <30s ago" — and
+# read as "he left" while Zeke sat three feet from the lens looking down.
+_ATTENTION_LABELS = {
+    "focused": "EYES ON SCREEN",
+    "distracted": "GLANCED AWAY",
+    "away": "LOOKING AWAY",        # face still in frame, eyes off screen >10s
+    "away_noface": "FACE LOST <30s",
+    "absent": "NOBODY IN VIEW",    # no face for >30s
 }
 
 # ── Hand overlay (2026-07-13, Zeke: "I can see what you see" — help me tune hands) ──
@@ -256,13 +267,10 @@ def annotate_display(frame: Any, face_results: list[dict[str, Any]] | None, g: d
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2,
             )
 
-            age = face.get("age", 0)
-            gender = face.get("gender", "?")
-            ag = f"Age:{age} {gender}"
-            cv2.putText(
-                out, ag, (max(0, x2 - 90), max(15, y1 - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, _TEXT_AGE_GENDER, 1,
-            )
+            # Age/gender used to be drawn here. Removed 2026-09-02: they are
+            # InsightFace GUESSES (the standing rule is never to treat them as
+            # facts — they are Zeke's to state), and a number on the HUD reads
+            # as a fact to whoever looks at the frame, me included.
 
             lm = face.get("landmarks")
             if lm is not None:
@@ -402,13 +410,20 @@ def _draw_attention_only(frame: Any, g: dict[str, Any]) -> Any:
 def _overlay_attention(frame: Any, h: int, g: dict[str, Any]) -> Any:
     try:
         import cv2  # type: ignore
-        # Default to "focused" so the bottom-left readout is always visible —
-        # the eye tracker only updates this when a face is being tracked.
-        attn = str(g.get("_attention_state") or "focused").strip().lower()
-        color = _ATTENTION_COLORS.get(attn, (200, 200, 200))
+        raw = str(g.get("_attention_state") or "").strip().lower()
+        if not raw:
+            # Used to default to "FOCUSED" so the readout was always visible —
+            # which is a claim the tracker never made. Say there's no read.
+            label, color = "GAZE: no read yet", (200, 200, 200)
+        else:
+            key = raw
+            if raw == "away" and not (g.get("_face_results") or []):
+                key = "away_noface"
+            label = _ATTENTION_LABELS.get(key, raw.upper())
+            color = _ATTENTION_COLORS.get(raw, (200, 200, 200))
         y = max(15, h - 10)
         cv2.putText(
-            frame, attn.upper(),
+            frame, label,
             (10, y),
             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
         )
