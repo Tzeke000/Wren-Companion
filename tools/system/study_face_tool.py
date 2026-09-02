@@ -18,8 +18,14 @@ What "study" means here, mechanically:
   4. write study.json with what the sensors said (bbox, confidence, the
      InsightFace age/gender GUESS — labelled a guess, never a fact),
   5. hand it back. Cognition looks, describes, and DMs Zeke the crop on
-     Discord (chat_id 1504668879220117725). Watch-and-report; never speak
-     to them — his default until he says otherwise.
+     Discord (chat_id 1504668879220117725). Speaking to them is ALLOWED
+     (Zeke 09-02 13:3x: "you can try and speak to a stranger, they might not hear
+     you because you're in headphones") — ask who they are; never announce he's out.
+  6. PHOTOGRAPHIC MEMORY (Zeke 09-02: "learn photographic memory in the ways you
+     can"): every studied face is embedded (ArcFace, via the live InsightFace
+     engine) into faces/_seen/<seen_id>/ and matched against every stranger seen
+     before, so the result can say "this is the one from Tuesday" (seen_before).
+     action='note' stores my words about them next to the face.
 
 action='start' (frames=6, interval_s=0.7, track=True) | 'release' (servo back
 to its persisted target) | 'status' | 'rearm_watcher' (restart the
@@ -108,6 +114,132 @@ def _write_small_jpeg(cv2, img, path: Path, max_w: int = SHEET_MAX_W,
             return {"ok": True, "path": str(path), "bytes": int(len(buf)),
                     "quality": q, "size": [int(img.shape[1]), int(img.shape[0])]}
         q -= 10
+
+
+SEEN_DIR = ROOT / "faces" / "_seen"        # nested => invisible to the recognizer's loader
+SEEN_THRESHOLD = 0.45                       # same cosine bar the engine uses for a positive ID
+SEEN_MAX_EMB = 12                           # per stranger; keeps the gallery cheap
+
+
+def _embed_frames(g: dict[str, Any], paths: list[str]) -> list[Any]:
+    """ArcFace embeddings of the LARGEST face in each saved frame, via the live
+    InsightFace engine (its own lock). Empty list if the engine is down."""
+    engine = g.get("_insight_face")
+    app = getattr(engine, "_app", None)
+    lock = getattr(engine, "_lock", None)
+    if app is None:
+        return []
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        return []
+    out = []
+    for pth in paths:
+        try:
+            img = cv2.imread(pth)
+            if img is None:
+                continue
+            if lock is not None:
+                with lock:
+                    faces = app.get(img)
+            else:
+                faces = app.get(img)
+            if not faces:
+                continue
+            f = max(faces, key=lambda z: float((z.bbox[2] - z.bbox[0]) * (z.bbox[3] - z.bbox[1])))
+            emb = getattr(f, "embedding", None)
+            if emb is not None:
+                out.append(np.asarray(emb, dtype="float32"))
+        except Exception:
+            continue
+    return out
+
+
+def _gallery_load() -> list[dict[str, Any]]:
+    import numpy as np  # type: ignore
+    entries = []
+    if not SEEN_DIR.exists():
+        return entries
+    for d in sorted(SEEN_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        try:
+            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except Exception:
+            meta = {"seen_id": d.name}
+        embs = None
+        try:
+            embs = np.load(d / "embeddings.npy")
+        except Exception:
+            pass
+        entries.append({"seen_id": d.name, "dir": d, "meta": meta, "embs": embs})
+    return entries
+
+
+def _gallery_match(embs: list[Any]) -> tuple[dict[str, Any] | None, float]:
+    """Best (entry, cosine) across strangers seen before; entry None if under the bar."""
+    import numpy as np  # type: ignore
+    best, best_s = None, 0.0
+    for e in _gallery_load():
+        if e["embs"] is None or not len(e["embs"]):
+            continue
+        for q in embs:
+            qn = float(np.linalg.norm(q)) or 1.0
+            for kv in e["embs"]:
+                kn = float(np.linalg.norm(kv)) or 1.0
+                sc = float(np.dot(q, kv) / (qn * kn))
+                if sc > best_s:
+                    best, best_s = e, sc
+    if best is not None and best_s >= SEEN_THRESHOLD:
+        return best, best_s
+    return None, best_s
+
+
+def _gallery_record(embs: list[Any], crop_path: str | None, study_id: str,
+                    pres: dict[str, Any]) -> dict[str, Any]:
+    """Match the studied face against strangers seen before; append the sighting
+    (new embeddings capped) or create a new seen_id. Returns the seen record."""
+    import numpy as np  # type: ignore
+    import shutil
+    if not embs:
+        return {"ok": False, "reason": "no embeddings (engine down or no face in saved frames)"}
+    now = time.time()
+    hit, sim = _gallery_match(embs)
+    if hit is not None:
+        d = hit["dir"]
+        meta = hit["meta"]
+        old = hit["embs"] if hit["embs"] is not None else np.zeros((0, embs[0].shape[0]), dtype="float32")
+        merged = np.concatenate([old, np.stack(embs)], axis=0)[-SEEN_MAX_EMB:]
+        seen_before = True
+    else:
+        seen_id = "seen_" + time.strftime("%Y%m%d_%H%M%S")
+        d = SEEN_DIR / seen_id
+        d.mkdir(parents=True, exist_ok=True)
+        meta = {"seen_id": seen_id, "first_seen": now,
+                "first_seen_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "note": None, "sightings": []}
+        merged = np.stack(embs)[-SEEN_MAX_EMB:]
+        seen_before = False
+    meta["last_seen"] = now
+    meta["last_seen_iso"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    meta.setdefault("sightings", []).append(
+        {"ts": now, "iso": meta["last_seen_iso"], "study_id": study_id,
+         "similarity": round(sim, 3) if seen_before else None,
+         "zeke_away": pres.get("away")})
+    try:
+        np.save(d / "embeddings.npy", merged.astype("float32"))
+        if crop_path and Path(crop_path).exists():
+            shutil.copyfile(crop_path, d / f"crop_{study_id}.jpg")
+            if not (d / "crop.jpg").exists():
+                shutil.copyfile(crop_path, d / "crop.jpg")
+        (d / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"gallery write: {e!r}"[:120]}
+    return {"ok": True, "seen_before": seen_before, "seen_id": meta["seen_id"],
+            "similarity": round(sim, 3), "first_seen_iso": meta.get("first_seen_iso"),
+            "sightings": len(meta["sightings"]), "note": meta.get("note"),
+            "embeddings_kept": int(merged.shape[0]), "dir": str(d)}
 
 
 def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
@@ -222,8 +354,12 @@ def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         except Exception as e:  # noqa: BLE001
             sheet_info = {"ok": False, "error": repr(e)[:120]}
 
+    # 4) photographic memory: embed the burst, match against strangers seen before.
+    seen = _gallery_record(_embed_frames(g, saved), crop_info.get("path"), study_id, pres)
+
     record = {
         "study_id": study_id,
+        "seen": seen,
         "ts": time.time(),
         "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "zeke_presence": pres,
@@ -259,8 +395,10 @@ def _study_start(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     out["next"] = ("Read ONLY sheet.jpg (pre-shrunk, safe). Say what you can about "
                    "who/what you see — and check frame CONTEXT: a face on a SCREEN "
                    "reads as a visitor. Then DM Zeke on Discord with crop.jpg "
-                   f"(chat_id {DISCORD_CHAT_ID}); do not speak to them. "
-                   "Finish with study_face action=release.")
+                   f"(chat_id {DISCORD_CHAT_ID}). You MAY speak to them (Zeke 09-02) - "
+                   "but my voice lands in his HEADPHONES so they may not hear; ask who "
+                   "they are / what they need, never announce that he is out. Then "
+                   "study_face action=note seen_id=... text='what I saw' and action=release.")
     return out
 
 
@@ -302,6 +440,45 @@ def _study_face(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         return _study_release(params, g)
     if action == "rearm_watcher":
         return _rearm_watcher(params, g)
+    if action == "note":
+        seen_id = str(params.get("seen_id") or "").strip()
+        text = str(params.get("text") or "").strip()
+        d = SEEN_DIR / seen_id
+        if not seen_id or not d.is_dir():
+            return {"ok": False, "error": f"unknown seen_id {seen_id!r}",
+                    "known": [e["seen_id"] for e in _gallery_load()]}
+        try:
+            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+            meta["note"] = text
+            meta.setdefault("notes", []).append(
+                {"ts": time.time(), "iso": time.strftime("%Y-%m-%dT%H:%M:%S"), "text": text})
+            (d / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            return {"ok": True, "seen_id": seen_id, "note": text}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)[:120]}
+    if action == "selftest":
+        # Exercise the embedding + matching path on frames already on disk,
+        # WITHOUT writing to the gallery (no stranger needed to prove the plumbing).
+        d = Path(str(params.get("dir") or ""))
+        paths = sorted(str(p) for p in d.glob("*.jpg")) if d.is_dir() else []
+        t0 = time.time()
+        embs = _embed_frames(g, paths[: int(params.get("limit") or 4)])
+        hit, sim = _gallery_match(embs) if embs else (None, 0.0)
+        return {"ok": bool(embs), "frames": len(paths), "embedded": len(embs),
+                "dim": int(embs[0].shape[0]) if embs else None,
+                "secs": round(time.time() - t0, 2),
+                "best_match": (hit or {}).get("seen_id"), "similarity": round(sim, 3),
+                "engine_present": g.get("_insight_face") is not None}
+    if action == "gallery":
+        out = []
+        for e in _gallery_load():
+            m = e["meta"]
+            out.append({"seen_id": e["seen_id"], "first_seen": m.get("first_seen_iso"),
+                        "last_seen": m.get("last_seen_iso"),
+                        "sightings": len(m.get("sightings") or []),
+                        "embeddings": int(len(e["embs"])) if e["embs"] is not None else 0,
+                        "note": m.get("note"), "crop": str(e["dir"] / "crop.jpg")})
+        return {"ok": True, "strangers": out, "count": len(out), "dir": str(SEEN_DIR)}
     if action == "status":
         st = g.get("_study_face") or {}
         faces = list(g.get("_face_results") or [])
@@ -317,7 +494,7 @@ def _study_face(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
                               "unknown": len(unknowns)},
                 "zeke_presence": _presence(), "unknown_capture": watcher}
     return {"ok": False,
-            "error": f"unknown action {action!r} — start|release|status|rearm_watcher"}
+            "error": f"unknown action {action!r} — start|release|status|note|gallery|rearm_watcher"}
 
 
 register_tool(
@@ -326,8 +503,12 @@ register_tool(
     "phone is off the wifi). action='start' puts the head on them, burst-captures "
     "frames to faces/_drafts/study_<ts>/, cuts crop.jpg and a SMALL sheet.jpg "
     "(safe to Read), writes study.json; then cognition looks + DMs Zeke the crop "
-    "(never speaks to them). 'release' returns the head to its persisted target; "
-    "'status'; 'rearm_watcher' restarts the unknown_capture watcher on new code.",
+    "(may speak: voice is in his headphones; never say he's out). Every studied "
+    "face is embedded into faces/_seen/ and matched against strangers seen before "
+    "(seen_before in the result). 'note' (seen_id=, text=) stores my words about "
+    "them; 'gallery' lists strangers I've seen; 'release' returns the head to its "
+    "persisted target; 'status'; 'rearm_watcher' restarts the unknown_capture "
+    "watcher on new code.",
     2,
     _study_face,
 )

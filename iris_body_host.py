@@ -1054,7 +1054,9 @@ _STUDY_RULE = (" STANDING RULE (Zeke 2026-09-02): an unrecognised face while he 
                " sheet.jpg that is SAFE to Read), look at sheet.jpg, say what you can about"
                " who/what you see (check frame context - a face on a screen reads as a"
                " visitor), then DM Zeke the crop.jpg on Discord (chat_id 1504668879220117725)."
-               " Watch and report; do NOT speak to them. Finish with study_face action=release.")
+               " You MAY speak to them (Zeke 09-02: 'you can try and speak to a stranger') - but"
+               " my voice lands in HIS HEADPHONES, so they may not hear; ask who they are and what"
+               " they need, and do NOT announce that Zeke is out. Finish with study_face action=release.")
 
 
 def _describe_perception(sig):
