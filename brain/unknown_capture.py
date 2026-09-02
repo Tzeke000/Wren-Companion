@@ -84,6 +84,13 @@ _POLL_S = 0.5
 PRESENCE_FILE = ROOT / "state" / "zeke_presence.json"
 PRESENCE_FRESH_S = float(os.environ.get("IRIS_PRESENCE_FRESH_S", "600"))
 AWAY_COOLDOWN_S = float(os.environ.get("IRIS_UNKNOWN_CAPTURE_AWAY_COOLDOWN", "180"))
+# ARRIVAL RACE (first live firing, 2026-09-02 14:49:56): the rule fired on a
+# face in a MOTORCYCLE HELMET, cammies, at the door — and Zeke's phone rejoined
+# the wifi 10 s later. It was him coming home; the watcher's "away" verdict
+# lags arrival by up to a poll (60 s) plus the phone's wifi join. So the away
+# rule holds longer than the guest rules, and cognition must re-check presence
+# ~90 s after the capture before calling anyone a stranger.
+AWAY_HOLD_S = float(os.environ.get("IRIS_UNKNOWN_CAPTURE_AWAY_HOLD_S", "10"))
 
 
 def zeke_presence() -> dict[str, Any]:
@@ -188,7 +195,7 @@ class UnknownCaptureWatcher:
         if self._cond_since == 0.0:
             self._cond_since = now
             return
-        if (now - self._cond_since) < HOLD_S:
+        if (now - self._cond_since) < (AWAY_HOLD_S if away_rule else HOLD_S):
             return
         # Someone else (enroll_face tool) mid-enrollment — do not stomp it.
         if g.get("_enroll_request") is not None:
