@@ -417,6 +417,18 @@ class _PixyJog:
 
     def write_vector(self, x: float, y: float) -> bool:
         with self._lock:
+            # ★★★ NEVER STREAM ZEROS (measured 2026-09-02 15:58–16:00): with the
+            # servo STOPPED, 120 s of (0,0) reports at 12.5 Hz — nothing else —
+            # tilted the head from the verified (0,10) room view to the ceiling
+            # (frame bottom-half mean 79 → 122). A single zero on the
+            # moving→stopped edge is a real stop (the head sat still for 150 s
+            # after one); a STREAM of them is a slow upward drive in the PIXY
+            # firmware. lost_hold used to call stop() every tick, which is why
+            # the head climbed to the ceiling within minutes of losing Zeke
+            # (12:18 and 15:25 today; the 08-22 "+89.5 tilt" most likely too).
+            # No audited mover existed because these writes were "stops".
+            if not (x or y) and not self._burst_active:
+                return True
             try:
                 if self._dev is None:
                     self._dev = self._open()
