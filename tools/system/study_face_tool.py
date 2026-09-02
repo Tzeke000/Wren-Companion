@@ -147,10 +147,28 @@ def _embed_frames(g: dict[str, Any], paths: list[str]) -> list[Any]:
                 faces = app.get(img)
             if not faces:
                 continue
-            f = max(faces, key=lambda z: float((z.bbox[2] - z.bbox[0]) * (z.bbox[3] - z.bbox[1])))
-            emb = getattr(f, "embedding", None)
-            if emb is not None:
-                out.append(np.asarray(emb, dtype="float32"))
+            # Largest UNKNOWN face: a burst often has Zeke in it too, and the
+            # gallery must never learn a known person as a "stranger".
+            match = getattr(engine, "_match", None)
+            cands = []
+            for z in faces:
+                emb = getattr(z, "embedding", None)
+                if emb is None:
+                    continue
+                pid = "unknown"
+                if callable(match):
+                    try:
+                        pid, _sc = match(emb)
+                    except Exception:
+                        pid = "unknown"
+                if pid != "unknown":
+                    continue
+                area = float((z.bbox[2] - z.bbox[0]) * (z.bbox[3] - z.bbox[1]))
+                cands.append((area, emb))
+            if not cands:
+                continue
+            _area, emb = max(cands, key=lambda t: t[0])
+            out.append(np.asarray(emb, dtype="float32"))
         except Exception:
             continue
     return out
@@ -464,7 +482,12 @@ def _study_face(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         t0 = time.time()
         embs = _embed_frames(g, paths[: int(params.get("limit") or 4)])
         hit, sim = _gallery_match(embs) if embs else (None, 0.0)
+        recorded = None
+        if embs and params.get("record"):
+            # Opt-in: write these as a gallery entry (tests the record path).
+            recorded = _gallery_record(embs, None, "selftest", {"away": None})
         return {"ok": bool(embs), "frames": len(paths), "embedded": len(embs),
+                "recorded": recorded,
                 "dim": int(embs[0].shape[0]) if embs else None,
                 "secs": round(time.time() - t0, 2),
                 "best_match": (hit or {}).get("seen_id"), "similarity": round(sim, 3),
