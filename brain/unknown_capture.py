@@ -114,6 +114,18 @@ def zeke_presence() -> dict[str, Any]:
                 "ip": None, "reason": f"unreadable: {e!r}"[:100]}
 
 
+def _servo(g: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    """attention_smooth through the tool registry (no import cycle)."""
+    try:
+        from tools.tool_registry import _REGISTRY
+        td = _REGISTRY.get("attention_smooth")
+        if td is None:
+            return {"ok": False, "error": "attention_smooth not registered"}
+        return td.handler(params, g)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": repr(e)[:120]}
+
+
 def _log(msg: str) -> None:
     print(f"[unknown_capture] {msg}", file=sys.stderr, flush=True)
 
@@ -232,6 +244,19 @@ class UnknownCaptureWatcher:
         }
         self._active = {"pid": pid, "meta": trigger_meta, "started": now}
         self._cond_since = 0.0
+        # UNKNOWN OUTRANKS KNOWN (Zeke, Discord, 2026-09-02 14:5x: "something
+        # that you don't know should be studied until you have some
+        # understanding of what it is" — "arguably more important than seeing
+        # something that you already know"). Put the head on the unknown for
+        # the capture, even beside Zeke; restore the previous target after.
+        try:
+            prev = str((g.get("_attention_state_obj") or {}).get("target") or "")
+            r = _servo(g, {"action": "start", "target": "person:unknown", "pin": False})
+            self._active["restore_target"] = prev or None
+            self._active["servo"] = {"ok": bool(r.get("ok")), "prev": prev}
+            _log(f"head -> person:unknown for the capture (prev={prev!r}, ok={r.get('ok')})")
+        except Exception as e:  # noqa: BLE001
+            self._active["servo"] = {"ok": False, "error": repr(e)[:80]}
         _log(f"TRIGGER {draft_id}: {trigger_meta['rule']} "
              f"(known={[k['person_id'] for k in trigger_meta['known_present']]}, "
              f"unknowns={len(unknowns)})")
@@ -302,6 +327,15 @@ class UnknownCaptureWatcher:
             except Exception as e:
                 _log(f"signal fire error: {e!r}")
             _log(f"captured {event['frames']} frames -> {event['dir']} (signal fired)")
+        # Give the head back unless cognition's study_face is holding it.
+        prev = (act or {}).get("restore_target")
+        study_active = bool((g.get("_study_face") or {}).get("active"))
+        if prev and not study_active:
+            try:
+                r = _servo(g, {"action": "start", "target": prev})
+                _log(f"head restored -> {prev!r} (ok={r.get('ok')})")
+            except Exception:
+                pass
         self._active = None
 
 
