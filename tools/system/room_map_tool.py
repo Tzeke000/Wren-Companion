@@ -274,6 +274,13 @@ def _entry_view(pid: str, e: dict, now: float, in_frame_ids: set) -> dict:
     if state != "dormant":
         out["pan_deg"] = round(float(e.get("pan_deg") or 0.0), 1)
         out["tilt_deg"] = round(float(e.get("tilt_deg") or 0.0), 1)
+        pose = e.get("pose") or {}
+        if pose and (now - float(pose.get("ts") or 0.0)) <= 30.0:
+            out["distance_m"] = pose.get("distance_m")
+            out["posture"] = pose.get("posture")
+            out["activity"] = pose.get("activity")
+            out["extent"] = pose.get("extent")
+            out["pose_age_s"] = round(now - float(pose.get("ts") or 0.0), 1)
     else:
         out["pan_deg"] = None
         out["tilt_deg"] = None
@@ -372,6 +379,22 @@ def ingest(g: dict[str, Any]) -> dict:
                            "first_seen_ts": now, "sightings": 1,
                            "last_jump_deg": 0.0, "teleported": False,
                            "p_present": 1.0, "negative_looks": 0}
+        # BODY (2026-09-02, task 2): the live pose loop's read of this person —
+        # distance from the eyes ruler / their true height, posture, activity.
+        # A bearing says which way; this says how far and what they're doing.
+        try:
+            from brain import body_pose as _bp
+            lp = _bp.live_person(g, pid, max_age_s=3.0)
+            if lp is not None:
+                people[pid]["pose"] = {
+                    "ts": now,
+                    "distance_m": (lp.get("distance") or {}).get("m"),
+                    "ruler": (lp.get("distance") or {}).get("ruler"),
+                    "assumed_height": (lp.get("distance") or {}).get("assumed_height"),
+                    "posture": lp.get("posture"), "activity": lp.get("activity"),
+                    "extent": lp.get("extent")}
+        except Exception:
+            pass
         seen.append(pid)
 
     # ── NEGATIVE EVIDENCE, GATED ON VISIBILITY ─────────────────────────────
@@ -430,10 +453,17 @@ def _where(g: dict[str, Any], pid: str) -> dict:
     v = _entry_view(pid.strip().lower(), e, now, in_frame)
     head = _head_bearing(g)
     rel = None
-    if head is not None:
+    if head is not None and v.get("pan_deg") is not None:
         rel = round(v["pan_deg"] - float(head["pan_deg"]), 1)
     if v["state"] == "visible":
-        s = f"{pid} is in view, at pan {v['pan_deg']:+.0f} deg."
+        s = f"{pid} is in view, at pan {v['pan_deg']:+.0f} deg"
+        if v.get("distance_m"):
+            s += f", about {v['distance_m']:.1f} m away"
+        if v.get("posture"):
+            s += f", {v['posture']}"
+        if v.get("activity"):
+            s += f" ({v['activity']})"
+        s += "."
     elif v["state"] == "dormant":
         mins = v["age_s"] / 60.0
         s = (f"I know {pid}, but I do not know where they are. Last placed at "

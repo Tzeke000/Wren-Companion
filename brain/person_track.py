@@ -141,6 +141,17 @@ def step(frame, faces: list[dict], capture_ts: float) -> dict[str, Any]:
             dets = yolox_person.detect(frame, min_score=_DET_FLOOR)
             _state["detect_ms_ema"] = (0.8 * _state["detect_ms_ema"]
                                        + 0.2 * (time.time() - t0) * 1000.0)
+            # Known NON-persons (2026-09-02): the Spartan-helmet statue on the
+            # dresser held a body track and corroborated a pose false-positive.
+            # brain/body_pose remembers such shapes by head bearing; drop them
+            # before they become tracks the head could chase.
+            try:
+                from brain import body_pose as _bp
+                _n0 = len(dets)
+                dets = [d for d in dets if not _bp.is_static_box(d.get("bbox") or [0, 0, 0, 0])]
+                _state["static_dropped"] = int(_state.get("static_dropped") or 0) + (_n0 - len(dets))
+            except Exception:
+                pass
             import numpy as np
             arr = (np.array([[*d["bbox"], d["confidence"]] for d in dets],
                             dtype=float).reshape(-1, 5))

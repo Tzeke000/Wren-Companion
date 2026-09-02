@@ -228,7 +228,12 @@ class SceneMemory:
         }
         try:
             from brain import body_pose
-            if body_pose.status().get("loaded"):
+            live = body_pose.live(g, max_age_s=3.0)
+            if live is not None:
+                out["pose"] = live.get("sentence")
+                out["activity"] = [p.get("activity") for p in (live.get("persons") or [])
+                                   if p.get("activity")]
+            elif body_pose.status().get("loaded"):
                 tracks = []
                 try:
                     from brain import person_track

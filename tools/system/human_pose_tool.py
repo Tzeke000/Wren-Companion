@@ -29,7 +29,32 @@ def _human_pose(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": f"brain.body_pose import failed: {e!r}"[:200]}
 
     if action == "status":
-        return {"ok": True, **bp.status()}
+        pt = None
+        try:
+            from brain import person_track
+            pt = person_track.status()
+        except Exception as e:  # noqa: BLE001
+            pt = {"error": repr(e)[:80]}
+        return {"ok": True, **bp.status(), "loop": bp.loop_status(g), "person_track": pt}
+    if action == "loop":
+        sub = str(params.get("mode") or "start").lower()
+        if sub == "start":
+            return {"ok": True, **bp.start_loop(g)}
+        if sub == "stop":
+            lp = g.get("_human_pose_loop")
+            if lp is not None:
+                lp.stop()
+            return {"ok": True, "alive": False}
+        return {"ok": False, "error": "mode=start|stop"}
+    if action == "live":
+        out = bp.live(g, max_age_s=float(params.get("max_age_s") or 3.0))
+        if out is None:
+            return {"ok": True, "live": None, "note": "no fresh pose (nobody in view, or loop not running)"}
+        slim = [{k: p.get(k) for k in ("index", "face_id", "verified_person", "likely_person",
+                                       "posture", "activity", "extent", "distance", "hands", "box_conf")}
+                for p in out.get("persons") or [] if not p.get("static_shape")]
+        return {"ok": True, "ts": out.get("captured_ts"), "ms": out.get("ms"),
+                "sentence": out.get("sentence"), "persons": slim}
 
     if action == "set_height":
         person = str(params.get("person") or "").strip().lower()
