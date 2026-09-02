@@ -93,6 +93,10 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # signal as a suggestion-nudge. Chores->code, wakes->decisions.
     _try(g, "unknown_capture", lambda: _bootstrap_unknown_capture(g))
 
+    # Scene memory (2026-09-02, Zeke's "photographic memory" second half): a
+    # keyframe + one sentence whenever the room changes, hourly otherwise.
+    _try(g, "scene_memory", lambda: _bootstrap_scene_memory(g))
+
     # ── L3: relational + personhood ──────────────────────────────────────────
     _try(g, "anchor_moments", lambda: _bootstrap_anchor_moments(g, root))
     _try(g, "identity_stability", lambda: _bootstrap_identity_stability(g, root))
@@ -289,6 +293,12 @@ def _bootstrap_skill_sandbox(g: dict[str, Any], root: Path) -> None:
 def _bootstrap_signal_bus(g: dict[str, Any]) -> None:
     from brain.signal_bus import bootstrap_signal_bus
     bootstrap_signal_bus(g)
+
+
+def _bootstrap_scene_memory(g: dict[str, Any]) -> None:
+    from brain import scene_memory
+    scene_memory.start(g)
+    g["_scene_memory_ready"] = True
 
 
 def _bootstrap_unknown_capture(g: dict[str, Any]) -> None:
