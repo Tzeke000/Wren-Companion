@@ -290,8 +290,13 @@ def analyze(frame: Any, *, person_hint: str | None = None, conf: float = 0.25,
     if m is None:
         return {"ok": False, "error": _LOAD_ERROR or "model not loaded", "persons": []}
     t0 = time.time()
+    # Detect LOW (0.15) and filter AFTER corroboration: a dim, occluded man
+    # lying on the bed scored 0.76 / 0.35 / nothing across three reads while a
+    # face sat inside his box every time. A weak body + a face = a person;
+    # a weak body alone is dropped below `conf`.
+    det_conf = min(conf, 0.15)
     try:
-        res = m.predict(frame, device=0, verbose=False, conf=conf, imgsz=imgsz)[0]
+        res = m.predict(frame, device=0, verbose=False, conf=det_conf, imgsz=imgsz)[0]
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": repr(e)[:200], "persons": []}
     ms = (time.time() - t0) * 1000.0
@@ -355,6 +360,8 @@ def analyze(frame: Any, *, person_hint: str | None = None, conf: float = 0.25,
         # verifies; track-only is "likely".
         verified = ("face" in corroborated) and not static_label
         likely = ("track" in corroborated) and not verified and not static_label
+        if bconf < conf and not verified:
+            continue          # weak and nothing independent agrees — not a person
         persons.append({
             "index": i, "box": box, "box_conf": round(bconf, 2),
             "corroborated_by": corroborated, "face_id": face_id,
