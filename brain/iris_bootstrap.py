@@ -109,6 +109,11 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # tool (one bridge instead of 50 wrapper decorators).
     _try(g, "tool_registry", lambda: _bootstrap_tool_registry(g))
 
+    # Servo re-arm (2026-09-02): the smooth-pursuit tune + target persist in
+    # state/attention/servo_tune.json; for a week every restart came up at
+    # gain 20 and stopped, re-applied by hand. Waits for a LIVE frame first.
+    _try(g, "servo_autostart", lambda: _bootstrap_servo_autostart(g))
+
     # App discovery — scans Start Menu / Desktop / Steam / Epic on a thread
     _try(g, "app_discoverer", lambda: _bootstrap_app_discoverer(g))
 
@@ -351,6 +356,55 @@ def _bootstrap_tool_registry(g: dict[str, Any]) -> None:
         g["_tool_registry_count"] = len(_REGISTRY)
     except Exception:
         g["_tool_registry_count"] = 0
+
+
+def _bootstrap_servo_autostart(g: dict[str, Any]) -> None:
+    """Re-arm the smooth-pursuit servo after a restart on the persisted target
+    (attention_smooth action='autostart'). Waits for a live frame — the camera
+    takes minutes to come up, and a servo started blind would spend them in
+    lost_hold issuing home+resync moves at nothing. Idempotent per process."""
+    import threading
+    import time as _time
+
+    th = g.get("_servo_autostart_thread")
+    if th is not None and th.is_alive():
+        return
+
+    def _arm() -> None:
+        deadline = _time.time() + 20 * 60
+        try:
+            from brain import frame_store
+            from tools.tool_registry import _REGISTRY
+        except Exception as e:
+            _log(f"servo_autostart: imports failed: {e!r}")
+            return
+        seen_frame = False
+        while _time.time() < deadline:
+            try:
+                res = frame_store.get_buffered_frame(max_age_sec=2.5)
+                seen_frame = res.frame is not None
+            except Exception:
+                seen_frame = False
+            if seen_frame and _REGISTRY.get("attention_smooth") is not None:
+                break
+            _time.sleep(5.0)
+        else:
+            g["_servo_autostart_result"] = {"ok": False, "reason": "no live frame within 20 min"}
+            _log("servo_autostart: no live frame within 20 min — not arming")
+            return
+        _time.sleep(10.0)  # let face tracking / room map settle on the fresh feed
+        try:
+            td = _REGISTRY.get("attention_smooth")
+            r = td.handler({"action": "autostart"}, g)
+            g["_servo_autostart_result"] = r
+            _log(f"servo_autostart: {r}")
+        except Exception as e:
+            g["_servo_autostart_result"] = {"ok": False, "error": repr(e)}
+            _log(f"servo_autostart failed: {e!r}")
+
+    th = threading.Thread(target=_arm, daemon=True, name="iris-servo-autostart")
+    g["_servo_autostart_thread"] = th
+    th.start()
 
 
 def _bootstrap_app_discoverer(g: dict[str, Any]) -> None:
