@@ -578,6 +578,10 @@ def _look(g: dict[str, Any], params: dict) -> dict:
                               f"would be theatre — pass anyway=true if you "
                               f"want it regardless."}
         pan, tilt, src = e["pan_deg"], e["tilt_deg"], f"remembered:{who}"
+        # People live in a band (Zeke 09-02): a remembered PERSON bearing above
+        # a standing head is a map error, never a place to look for them.
+        if tilt is not None and float(tilt) > 30.0:
+            tilt = 30.0
 
     if pan is None:
         return {"ok": False,

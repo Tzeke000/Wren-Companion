@@ -184,6 +184,15 @@ _HOME = (0.0, 10.0)         # measured level bearing at this desk perch
 # start (registers are valid until the first jog).
 _EST_TILT_FLOOR = -35.0
 _EST_TILT_CEIL = 60.0
+# PEOPLE LIVE IN A BAND (Zeke, Discord, 2026-09-02 14:5x: "no human being is
+# going to be on the ceiling so if you're looking for people, you probably
+# shouldn't be looking at the ceiling"). When the target is a person the tilt
+# ceiling is a standing head's height from this desk perch, not the hardware
+# rail. Objects and explicit looks keep the full range. Measured references:
+# (0,10) = upper wall with the ceiling line at the top of frame; the ceiling
+# fills the frame somewhere past +45. +30 keeps a standing person's head in
+# view at arm's length and never shows tiles.
+_PERSON_TILT_CEIL = 30.0
 _EST_PAN_LIMIT = 115.0
 # ── HARD RESYNC (2026-08-21 ~22:0x, minutes after scar #2): dead-reckoning
 # alone CANNOT bound the physical pose — est said tilt −14 while Zeke watched
@@ -650,6 +659,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                 state = g.get("_attention_state_obj") or {}
                 is_person = str(state.get("target") or "").startswith("person:")
                 period = _PERSON_PERIOD_S if is_person else _OBJECT_PERIOD_S
+                _tilt_ceil = _PERSON_TILT_CEIL if is_person else _EST_TILT_CEIL
                 # ── visual odometry: est tracks MEASURED head motion, not
                 # commanded motion (see _ODO_* above). Runs on every fresh
                 # frame regardless of pursuit state.
@@ -933,7 +943,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                             # jog soft rails apply to pulses too (privacy scar)
                             if est_tilt <= _EST_TILT_FLOOR and py < 0:
                                 py = 0.0
-                            if est_tilt >= _EST_TILT_CEIL and py > 0:
+                            if est_tilt >= _tilt_ceil and py > 0:
                                 py = 0.0
                             if est_pan <= -_EST_PAN_LIMIT and px < 0:
                                 px = 0.0
@@ -952,7 +962,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                         # scar #2): past a limit, only inward motion passes.
                         if est_tilt <= _EST_TILT_FLOOR and uy < 0:
                             uy = 0.0
-                        if est_tilt >= _EST_TILT_CEIL and uy > 0:
+                        if est_tilt >= _tilt_ceil and uy > 0:
                             uy = 0.0
                         if est_pan <= -_EST_PAN_LIMIT and ux < 0:
                             ux = 0.0
@@ -1055,7 +1065,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                             _safe_pan = max(-_EST_PAN_LIMIT,
                                             min(_EST_PAN_LIMIT, est_pan))
                             _safe_tilt = max(_EST_TILT_FLOOR,
-                                             min(_EST_TILT_CEIL, est_tilt))
+                                             min(_tilt_ceil, est_tilt))
                             if (_safe_pan != est_pan) or (_safe_tilt != est_tilt):
                                 st["rail_clamped_resyncs"] = int(
                                     st.get("rail_clamped_resyncs") or 0) + 1
