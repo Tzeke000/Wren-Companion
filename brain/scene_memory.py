@@ -183,6 +183,17 @@ class SceneMemory:
         self._last_writes = writes
         if str(sm.get("mode") or "") == "pursuit":
             moved = True
+        # SETTLE WINDOW (22:4x, 09-02): the head's own small moves (re-anchors,
+        # a pursue→lose→home cycle around a sleeping face at the frame edge)
+        # produced three "change" keyframes of the same scene in 20 min — the
+        # gate caught the sample DURING the move, and the next sample, taken
+        # against a base grabbed mid-motion, read as a room change. Treat the
+        # 4 s after any detected motion as still moving.
+        now = time.time()
+        if moved:
+            self._settle_until = now + 4.0
+        elif getattr(self, "_settle_until", 0.0) > now:
+            moved = True
         return moved
 
     def _tick(self, first: bool) -> None:
