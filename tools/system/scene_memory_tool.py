@@ -47,6 +47,11 @@ def _scene_memory(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     if action == "recent":
         return {"ok": True, "keyframes": sm.recent(int(params.get("n") or 10),
                                                    bool(params.get("words_only")))}
+    if action == "backfill":
+        # Free-time job: keyframes that never got words (timeouts while I was
+        # held). Read each jpeg (all are <=150 KB) and answer with action=caption.
+        return {"ok": True, "wordless": sm.wordless(int(params.get("n") or 20)),
+                "how": "Read path, then scene_memory action=caption id=<id> text='one sentence' (or skip by leaving it)"}
     if action == "snapshot":
         return sm.snapshot(reason=str(params.get("reason") or "manual"),
                            caption=params.get("caption") is not False)
