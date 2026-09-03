@@ -42,7 +42,9 @@ HOLD_SAMPLES = 2            # change must persist 2 samples (~4 s)
 MIN_GAP_S = 45.0            # between change-keyframes
 HOURLY_S = 3600.0           # diary frame even if nothing changed
 CAPTION_MIN_GAP_S = 120.0   # cognition wakes are not free
-CAPTION_MAX_PER_DAY = 40
+CAPTION_MAX_PER_DAY = 60
+CAPTION_TIMEOUT_S = 540.0   # the bridge's request TTL is 600 s; 240 s timed out 10/11 times
+                            # on 09-02 while cognition was held for three hours
 HEAD_MOVE_DEG = 1.5
 KF_MAX_W = 900
 KF_MAX_BYTES = 150_000
@@ -313,7 +315,7 @@ class SceneMemory:
         try:
             from brain import iris_llm
             words = iris_llm.describe_image(rec["path"], prompt=prompt,
-                                            kind="scene_caption", timeout_s=240.0)
+                                            kind="scene_caption", timeout_s=CAPTION_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001
             words = None
             _log(f"caption error: {e!r}")
@@ -351,6 +353,24 @@ class SceneMemory:
         rec["memory_id"] = mem_id
         _log(f"words for {kid}: {words[:90]}")
         return {"ok": True, "id": kid, "words": words, "memory_id": mem_id}
+
+    def wordless(self, n: int = 20) -> list[dict[str, Any]]:
+        """Keyframes whose caption timed out or was rate-skipped — for a
+        free-time BACKFILL by cognition (Read the jpeg, action=caption)."""
+        out = []
+        for kid in reversed(self.order):
+            r = self.records.get(kid) or {}
+            if r.get("words") or r.get("caption_status") in ("done", "skipped", "none"):
+                continue
+            s = r.get("sensors") or {}
+            out.append({"id": kid, "iso": r.get("iso"), "reason": r.get("reason"),
+                        "diff": r.get("diff"), "path": r.get("path"),
+                        "caption_status": r.get("caption_status"),
+                        "faces": s.get("faces"), "pose": s.get("pose"),
+                        "light": s.get("light_mean")})
+            if len(out) >= n:
+                break
+        return out
 
     def recent(self, n: int = 10, with_words_only: bool = False) -> list[dict[str, Any]]:
         out = []
