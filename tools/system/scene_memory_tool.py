@@ -52,6 +52,11 @@ def _scene_memory(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         # held). Read each jpeg (all are <=150 KB) and answer with action=caption.
         return {"ok": True, "wordless": sm.wordless(int(params.get("n") or 20)),
                 "how": "Read path, then scene_memory action=caption id=<id> text='one sentence' (or skip by leaving it)"}
+    if action == "skip":
+        kid = str(params.get("id") or "").strip()
+        if not kid:
+            return {"ok": False, "error": "pass id="}
+        return sm.mark_skipped(kid, str(params.get("note") or ""))
     if action == "snapshot":
         return sm.snapshot(reason=str(params.get("reason") or "manual"),
                            caption=params.get("caption") is not False)
@@ -62,7 +67,7 @@ def _scene_memory(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "error": "pass id= and text="}
         return sm.set_words(kid, text, source="manual")
     return {"ok": False,
-            "error": f"unknown action {action!r} — status|start|stop|recent|snapshot|caption|rearm"}
+            "error": f"unknown action {action!r} — status|start|stop|recent|snapshot|caption|skip|backfill|rearm"}
 
 
 register_tool(

@@ -377,6 +377,18 @@ class SceneMemory:
         _log(f"words for {kid}: {words[:90]}")
         return {"ok": True, "id": kid, "words": words, "memory_id": mem_id}
 
+    def mark_skipped(self, kid: str, note: str = "") -> dict[str, Any]:
+        """Cognition looked (or the frame is a duplicate) and there is nothing
+        worth words — take it out of the backfill list without inventing text."""
+        rec = self.records.get(kid)
+        if rec is None:
+            return {"ok": False, "error": f"unknown keyframe {kid!r}"}
+        rec["caption_status"] = "skipped"
+        if note:
+            rec["skip_note"] = note
+        self._append({"id": kid, "_update": True, "caption_status": "skipped", "skip_note": note})
+        return {"ok": True, "id": kid, "caption_status": "skipped"}
+
     def wordless(self, n: int = 20) -> list[dict[str, Any]]:
         """Keyframes whose caption timed out or was rate-skipped — for a
         free-time BACKFILL by cognition (Read the jpeg, action=caption)."""
