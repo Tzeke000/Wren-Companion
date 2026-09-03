@@ -183,6 +183,16 @@ class SceneMemory:
         self._last_writes = writes
         if str(sm.get("mode") or "") == "pursuit":
             moved = True
+        # An absolute HOME after a jogged-away pose is invisible to the bearing
+        # readback (it read (0,10) before AND after) — the servo records it as
+        # last_home; count the 6 s after one as motion (22:4x-23:0x: three
+        # diff-40 "changes" that were just the head coming home).
+        try:
+            lh = float(((sm.get("last_home") or {}).get("ts")) or 0.0)
+            if lh and (time.time() - lh) < 6.0:
+                moved = True
+        except Exception:
+            pass
         # SETTLE WINDOW (22:4x, 09-02): the head's own small moves (re-anchors,
         # a pursue→lose→home cycle around a sleeping face at the frame edge)
         # produced three "change" keyframes of the same scene in 20 min — the
@@ -214,7 +224,9 @@ class SceneMemory:
         if self._base is None or first:
             self._base = grey
             if first:
-                self.commit(frame, reason="start", diff=0.0, caption=True)
+                # A start frame is a diary page, not news — no caption wake for it
+                # (every rearm was costing a duplicate "he's asleep" request).
+                self.commit(frame, reason="start", diff=0.0, caption=False)
             return
         diff = float(abs(grey - self._base).mean())
         self.stats["last_diff"] = round(diff, 2)
