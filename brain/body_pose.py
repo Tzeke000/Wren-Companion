@@ -434,7 +434,9 @@ def draw(frame: Any, result: dict[str, Any]) -> Any:
 # =============================================================================
 _LAST_HEAD: dict[str, Any] | None = None
 HISTORY_S = 12.0
-LOOP_ACTIVE_S = 0.5      # someone in view
+LOOP_ACTIVE_S = 1.0      # someone in view (was 0.5: at 2 Hz the shared GPU pushed
+                         # person_track's YOLOX from 33 ms to 156 ms and its fps 17→13;
+                         # 1 Hz still gives the 3 s activity window three samples)
 LOOP_IDLE_S = 2.0        # nobody in view
 
 
