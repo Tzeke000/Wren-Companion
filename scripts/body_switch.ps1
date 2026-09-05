@@ -49,8 +49,11 @@ if ($Mode -eq "voice_off") {
     exit 0
 }
 if ($Mode -eq "voice_on") {
-    Set-Content -Path "$ROOT\state\voice_deliberately_off.json" -Value '{"off": false}' -Encoding ascii
-    Log "voice off-flag CLEARED (durable)"
+    # 2026-09-05: REMOVE the file rather than writing {"off": false}. Every reader
+    # fails open on a missing file, but iris_body_host.py's ear loop (pre-fix) keyed
+    # on the file's EXISTENCE - so "off: false" left the ears asleep for six weeks.
+    Remove-Item -Path "$ROOT\state\voice_deliberately_off.json" -Force -ErrorAction SilentlyContinue
+    Log "voice off-flag REMOVED (durable; absent = on for every reader)"
     $vwd = ProcUp 'python.exe' 'voice_watchdog\.py'
     if ($vwd.Count -eq 0) {
         Start-Process -FilePath "$ROOT\.venv\Scripts\python.exe" -ArgumentList "$ROOT\scripts\voice_watchdog.py" -WorkingDirectory $ROOT -WindowStyle Hidden
