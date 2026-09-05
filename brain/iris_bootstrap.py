@@ -97,6 +97,7 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # keyframe + one sentence whenever the room changes, hourly otherwise.
     _try(g, "scene_memory", lambda: _bootstrap_scene_memory(g))
     _try(g, "human_pose", lambda: _bootstrap_human_pose(g))
+    _try(g, "body_loop", lambda: _bootstrap_body_loop(g))
 
     # ── L3: relational + personhood ──────────────────────────────────────────
     _try(g, "anchor_moments", lambda: _bootstrap_anchor_moments(g, root))
@@ -308,6 +309,23 @@ def _bootstrap_human_pose(g: dict[str, Any]) -> None:
     from brain import body_pose
     body_pose.start_loop(g)
     g["_human_pose_ready"] = True
+
+
+def _bootstrap_body_loop(g: dict[str, Any]) -> None:
+    """30Hz body-detection worker (2026-09-03, Zeke: "get the body at 30 FPS").
+
+    Before this, person_track.step() ran inline on the SERVO tick, so body
+    boxes only refreshed as fast as the servo happened to turn — measured
+    ~5/s, and Zeke could see it: "it looks like it's glitching along."
+    As its own worker it steps at the camera's rate (26/s measured) with no
+    cost to capture fps or the other four perception workers.
+
+    Safe to start blind: the loop polls for a frame and no-ops until the
+    camera is up, and if it ever dies the servo transparently resumes
+    stepping inline (step() refuses frames it has already seen)."""
+    from brain import person_track
+    person_track.start_loop(g)
+    g["_body_loop_ready"] = True
 
 
 def _bootstrap_unknown_capture(g: dict[str, Any]) -> None:

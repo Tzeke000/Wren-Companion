@@ -434,10 +434,47 @@ def draw(frame: Any, result: dict[str, Any]) -> Any:
 # =============================================================================
 _LAST_HEAD: dict[str, Any] | None = None
 HISTORY_S = 12.0
-LOOP_ACTIVE_S = 1.0      # someone in view (was 0.5: at 2 Hz the shared GPU pushed
-                         # person_track's YOLOX from 33 ms to 156 ms and its fps 17→13;
-                         # 1 Hz still gives the 3 s activity window three samples)
-LOOP_IDLE_S = 2.0        # nobody in view
+# ── LIVE TUNABLES (2026-09-03) ───────────────────────────────────────────────
+# These are knobs on purpose: the ONLY safe way to change a perception rate on
+# this machine is to A/B it INSIDE the running stack with a one-call revert
+# (see memory/pose_30hz_2026-09-03.md — a change benchmarked offline was 10x
+# worse live the same morning). set_tuning() moves them without a file edit.
+LOOP_ACTIVE_S = 0.05     # someone in view. BAKED 2026-09-03 after Zeke watched it:
+                         # *"it's a lotttt better"*. Was 1.0 — set 09-02 because at
+                         # 2 Hz the shared GPU pushed person_track's YOLOX 33→156 ms.
+                         # That constraint died when body detection moved to its own
+                         # worker and POSE_IMGSZ dropped: measured 09-03, capture held
+                         # 29.5 fps and face/hands/expr were unchanged. The loop is
+                         # model-bound now, not period-bound — ~6-7 reads/s.
+LOOP_IDLE_S = 1.0        # nobody in view
+POSE_IMGSZ = 640         # analyze() input size for the LIVE LOOP only (callers may
+                         # still pass their own). 1280 was picked 09-02 from a SINGLE
+                         # frame; measured in-runtime 09-03 it costs **320 ms** vs
+                         # **41-80 ms** at 640, and is not uniformly more accurate —
+                         # on the 05:25 keyframe 640 scored 0.88 where 1280 got 0.34.
+                         # ★ The old value was a one-operating-point result.
+
+
+def set_tuning(active_s: float | None = None, idle_s: float | None = None,
+               imgsz: int | None = None) -> dict[str, Any]:
+    """Move the live loop's rate/resolution without editing the file.
+    Takes effect on the NEXT loop iteration. Returns the resulting values."""
+    global LOOP_ACTIVE_S, LOOP_IDLE_S, POSE_IMGSZ
+    if active_s is not None:
+        LOOP_ACTIVE_S = max(0.0, float(active_s))
+    if idle_s is not None:
+        LOOP_IDLE_S = max(0.0, float(idle_s))
+    if imgsz is not None:
+        iv = int(imgsz)
+        if iv % 32 or not (320 <= iv <= 1920):
+            return {"ok": False, "error": "imgsz must be a multiple of 32 in 320..1920"}
+        POSE_IMGSZ = iv
+    return {"ok": True, "active_s": LOOP_ACTIVE_S, "idle_s": LOOP_IDLE_S,
+            "imgsz": POSE_IMGSZ}
+
+
+def tuning() -> dict[str, Any]:
+    return {"active_s": LOOP_ACTIVE_S, "idle_s": LOOP_IDLE_S, "imgsz": POSE_IMGSZ}
 
 
 def current_head() -> dict[str, Any] | None:
@@ -551,7 +588,7 @@ class PoseLoop:
                                  if str(f.get("person_id") or "unknown") not in ("unknown", "")]
                         hint = known[0] if len(known) == 1 else None
                         out = analyze(res.frame, person_hint=hint, faces=faces, tracks=tracks,
-                                      head=_LAST_HEAD)
+                                      head=_LAST_HEAD, imgsz=POSE_IMGSZ)
                         self.stats["ticks"] += 1
                         self.stats["last_ms"] = out.get("ms")
                         if out.get("ok"):

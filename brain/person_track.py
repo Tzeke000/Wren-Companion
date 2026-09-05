@@ -306,3 +306,90 @@ def status() -> dict[str, Any]:
                 "fps_ema": round(_state["fps_ema"], 1),
                 "detect_ms_ema": round(_state["detect_ms_ema"], 1),
                 "error": _state["error"]}
+
+
+# =============================================================================
+# LIVE DETECTION LOOP — "get the body at 30 FPS" (Zeke, Discord 2026-09-03)
+#
+# Until today, step() ran INLINE ON THE SERVO TICK: the pursuit loop paid for a
+# full YOLOX pass before it could steer, so body boxes only refreshed as often
+# as the servo ticked. Measured 09-03: servo ~13.5 Hz, true step rate ~5/s, and
+# Zeke's own eyes on the HUD — "it looks like it's glitching along."
+#
+# Meanwhile the four perception workers (face/hands/expr/attn) hold the camera's
+# full 29.2 fps by doing exactly one thing: watch the newest frame, process it
+# once, sleep the rest of the 33 ms budget. This is that same worker, for bodies.
+#
+# ★ WHY THE SERVO NEEDS NO EDIT: step() already refuses a frame it has seen
+#   (`capture_ts <= last_step_ts` → "stale frame"). Once this loop is stepping
+#   every fresh frame, the servo's own step() call finds nothing new and returns
+#   for free — and if this thread ever dies, the servo silently goes back to
+#   doing the work itself. Self-healing in both directions, no flag to forget.
+#   That only holds because BOTH read frame_store.get_buffered_frame(), so they
+#   share one capture_ts clock. Do not "optimise" this loop onto the raw frame
+#   slot (g["_raw_frame_slot"]) — its timestamps are a DIFFERENT clock and the
+#   stale-frame guard would stop working, silently doubling the detection load.
+# =============================================================================
+_LOOP_BUDGET_S = 0.033       # one camera frame at ~30fps
+_loop_thread: Any = None
+_loop_stop: Any = None
+_loop_stats: dict[str, Any] = {"alive": False, "ticks": 0, "steps": 0,
+                               "errors": 0, "last_ms": None, "started_ts": 0.0}
+
+
+def loop_status() -> dict[str, Any]:
+    alive = bool(_loop_thread is not None and _loop_thread.is_alive())
+    out = dict(_loop_stats)
+    out["alive"] = alive
+    if alive and out.get("started_ts"):
+        el = time.time() - float(out["started_ts"])
+        out["steps_per_s"] = round(out["steps"] / el, 1) if el > 0 else None
+        out["elapsed_s"] = round(el, 1)
+    return out
+
+
+def _loop(g: dict[str, Any], stop) -> None:
+    from brain import frame_store
+    last_ts = 0.0
+    while not stop.is_set():
+        try:
+            _loop_stats["ticks"] += 1
+            res = frame_store.get_buffered_frame(max_age_sec=1.0)
+            if res.frame is None or float(res.capture_ts) <= last_ts:
+                stop.wait(0.004)          # no new frame yet — poll cheaply
+                continue
+            last_ts = float(res.capture_ts)
+            t0 = time.time()
+            step(res.frame, g.get("_face_results") or [], res.capture_ts)
+            dt = time.time() - t0
+            _loop_stats["steps"] += 1
+            _loop_stats["last_ms"] = round(dt * 1000.0, 1)
+            # A pass slower than the budget just runs flat out at its own rate.
+            stop.wait(max(0.0, _LOOP_BUDGET_S - dt))
+        except Exception as e:  # noqa: BLE001 — seeing degrades, never raises
+            _loop_stats["errors"] += 1
+            _loop_stats["error"] = repr(e)[:160]
+            stop.wait(0.5)
+    _loop_stats["alive"] = False
+
+
+def start_loop(g: dict[str, Any]) -> dict[str, Any]:
+    """Start the 30Hz body-detection worker. Idempotent."""
+    global _loop_thread, _loop_stop
+    if _loop_thread is not None and _loop_thread.is_alive():
+        return {"already_running": True, **loop_status()}
+    _loop_stop = threading.Event()
+    _loop_stats.update({"ticks": 0, "steps": 0, "errors": 0,
+                        "started_ts": time.time(), "alive": True})
+    _loop_thread = threading.Thread(target=_loop, args=(g, _loop_stop),
+                                    daemon=True, name="iris-body-worker")
+    _loop_thread.start()
+    return {"started": True, **loop_status()}
+
+
+def stop_loop() -> dict[str, Any]:
+    """Stop the worker. The servo transparently resumes stepping inline."""
+    global _loop_stop
+    if _loop_stop is not None:
+        _loop_stop.set()
+    return {"stopped": True, **loop_status()}
