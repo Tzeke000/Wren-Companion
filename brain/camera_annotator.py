@@ -343,6 +343,23 @@ _POSE_PAIRS = (("l_sho", "r_sho"), ("l_sho", "l_elb"), ("l_elb", "l_wri"), ("r_s
                ("r_elb", "r_wri"), ("l_sho", "l_hip"), ("r_sho", "r_hip"), ("l_hip", "r_hip"),
                ("l_hip", "l_knee"), ("l_knee", "l_ank"), ("r_hip", "r_knee"), ("r_knee", "r_ank"))
 
+# ── SKELETON GLIDE (2026-09-03, Zeke: "because the edge of limbs move faster it
+# looks choppy ... 30 FPS please") ───────────────────────────────────────────
+# The pose model produces ~6-7 poses/sec; this overlay is drawn at the camera's
+# ~29 fps. Without smoothing the joints TELEPORT on every 4th or 5th drawn
+# frame, which is exactly the choppiness he described at the fast-moving ends
+# of limbs. So the drawn skeleton chases the newest pose instead of snapping to
+# it: cheap float maths per joint per frame, NO extra inference, no extra GPU.
+# It does not make the model faster — it makes the DRAWING continuous, which is
+# the thing his eyes were complaining about.
+#
+# ★ ALL OF THIS LIVES INSIDE _draw_pose ON PURPOSE. brain_hot_swap can REPLACE
+#   an existing function but cannot ADD one (see the kill-switch note above), so
+#   a helper would need a full stack restart to become reachable.
+_POSE_TAU_S = 0.08       # glide time-constant. Larger = smoother + laggier.
+_POSE_SNAP_S = 0.5       # older than this ⇒ snap, don't slide across the room
+_pose_smooth: dict[str, dict[str, Any]] = {}
+
 
 def _draw_pose(frame: Any, g: dict[str, Any]) -> Any:
     """Skeleton + posture/distance/activity words for VERIFIED people from
@@ -360,14 +377,43 @@ def _draw_pose(frame: Any, g: dict[str, Any]) -> Any:
                 continue
             j = p.get("joints") or {}
             col = (0, 220, 255) if p.get("verified_person") else (0, 160, 200)
+            # ── glide the DRAWN positions toward this pose (see note above) ──
+            now = _time.time()
+            key = str(p.get("face_id") or "") or "i%s" % p.get("index")
+            st = _pose_smooth.get(key)
+            if st is None or now - float(st.get("ts") or 0.0) > _POSE_SNAP_S:
+                st = {"j": {}, "box": None, "ts": now}
+                _pose_smooth[key] = st
+            step = (now - float(st["ts"])) / _POSE_TAU_S if _POSE_TAU_S > 0 else 1.0
+            alpha = 1.0 if step >= 1.0 else (0.0 if step < 0.0 else step)
+            st["ts"] = now
+            sj = st["j"]
+            for _n, _v in j.items():
+                _t = (float(_v["x"]), float(_v["y"]))
+                _c = sj.get(_n)
+                if _c is None or float(_v.get("c") or 0.0) < 0.5:
+                    sj[_n] = [_t[0], _t[1]]          # new/low-confidence: snap
+                else:
+                    _c[0] += (_t[0] - _c[0]) * alpha
+                    _c[1] += (_t[1] - _c[1]) * alpha
+            for _n in [k for k in sj if k not in j]:
+                sj.pop(_n, None)
+            _tb = [float(v) for v in p["box"]]
+            if st["box"] is None:
+                st["box"] = _tb
+            else:
+                for _i in range(4):
+                    st["box"][_i] += (_tb[_i] - st["box"][_i]) * alpha
             for a, b in _POSE_PAIRS:
                 ja, jb = j.get(a), j.get(b)
-                if ja and jb and ja["c"] >= 0.5 and jb["c"] >= 0.5:
-                    cv2.line(out, (int(ja["x"]), int(ja["y"])), (int(jb["x"]), int(jb["y"])), col, 2)
-            for v in j.values():
-                if v["c"] >= 0.5:
-                    cv2.circle(out, (int(v["x"]), int(v["y"])), 3, (0, 255, 0), -1)
-            x1, y1, x2, y2 = p["box"]
+                sa, sb = sj.get(a), sj.get(b)
+                if ja and jb and sa and sb and ja["c"] >= 0.5 and jb["c"] >= 0.5:
+                    cv2.line(out, (int(sa[0]), int(sa[1])), (int(sb[0]), int(sb[1])), col, 2)
+            for _n, v in j.items():
+                _s = sj.get(_n)
+                if _s is not None and v["c"] >= 0.5:
+                    cv2.circle(out, (int(_s[0]), int(_s[1])), 3, (0, 255, 0), -1)
+            x1, y1, x2, y2 = (int(v) for v in st["box"])
             d = (p.get("distance") or {}).get("m")
             words = p.get("posture") or ""
             if p.get("activity"):

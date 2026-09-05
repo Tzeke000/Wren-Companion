@@ -39,7 +39,35 @@ from typing import Any
 _ROOT = Path(__file__).resolve().parent.parent
 _WEIGHTS = _ROOT / "models" / "yolox" / "yolox_s.pth"
 
-_INPUT = 640
+# Letterbox canvas: SQUARE 640x640, and it must stay square until someone
+# explains the 2026-09-03 result below.
+#
+# A 16:9 frame only fills 640x360 of this canvas, so ~44% of every forward pass
+# is grey padding. Switching to 640x384 (both dims still /32) is obviously
+# free compute, and OFFLINE IT IS: 30 runs on a real 1280x720 frame in a fresh
+# process measured 22.3ms -> 17.5ms median (-22%), with person scores across
+# ten keyframes unchanged (0.74->0.72, 0.52->0.48, identical on the other 8).
+#
+# ★★★ IT WAS 10x SLOWER IN THE LIVE RUNTIME. A/B'd both directions via
+# brain_hot_swap while the stack ran: 640x384 -> person_track detect_ms_ema
+# 30.9 -> 326.8 -> 353.6ms and fps 14.7 -> 2.7 (still climbing, not a warmup
+# transient); reverting to 640x640 -> straight back to 30.9ms / 14.3fps.
+# Suspected cuDNN per-input-shape algorithm search inside a long-lived process
+# that already holds several CUDA contexts (cf. brain/startup.py: "cudnn
+# EXHAUSTIVE algorithm search can take ~80s", tts_worker: "cudnn algorithm
+# tuning per input shape") — but I did NOT prove the mechanism, so this is a
+# measured fact with an unproven cause, not a diagnosis.
+#
+# ⇒ THE LESSON, which is bigger than this constant: a benchmark in a fresh
+#   process is a DIFFERENT MACHINE from this runtime (39 Python threads, 322
+#   OS threads, several CUDA contexts). Any perf change to a live subsystem
+#   must be A/B'd INSIDE the runtime before it is believed. Also rejected the
+#   same day, offline: fp16 (21.4ms — slower) and GPU-side pre/post (19.3ms).
+#   Full write-up: memory/pose_30hz_2026-09-03.md
+# Portrait frames are safe either way: r = min(H/h, W/w) always fits.
+_INPUT_W = 640
+_INPUT_H = 640
+_INPUT = _INPUT_W            # kept: anything reading the old name gets the width
 _PERSON_CLASS = 0            # COCO class 0
 _MIN_SCORE = 0.60            # see NOTE below
 _NMS = 0.45
@@ -139,10 +167,10 @@ def detect(frame, *, min_score: float = _MIN_SCORE) -> list[dict]:
         import torch
 
         h, w = frame.shape[:2]
-        r = min(_INPUT / h, _INPUT / w)
+        r = min(_INPUT_H / h, _INPUT_W / w)
         resized = cv2.resize(frame, (int(w * r), int(h * r)),
                              interpolation=cv2.INTER_LINEAR)
-        canvas = np.full((_INPUT, _INPUT, 3), 114, dtype=np.uint8)
+        canvas = np.full((_INPUT_H, _INPUT_W, 3), 114, dtype=np.uint8)
         canvas[:resized.shape[0], :resized.shape[1]] = resized
         x = torch.from_numpy(canvas.transpose(2, 0, 1)).float()
         with torch.no_grad():

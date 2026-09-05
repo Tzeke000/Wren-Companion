@@ -51,6 +51,39 @@ def _human_pose(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
                 lp.stop()
             return {"ok": True, "alive": False}
         return {"ok": False, "error": "mode=start|stop"}
+    if action == "tune":
+        # Live rate/resolution knobs for the POSE loop (the HUD skeleton).
+        # A/B in-runtime, revert in one call — never edit-and-hope.
+        if "pose_tau" in params:
+            # Skeleton GLIDE time-constant in camera_annotator. Set as a module
+            # attribute, not via a setter: brain_hot_swap can replace a function
+            # but cannot ADD one, so a new setter would need a stack restart.
+            from brain import camera_annotator as _ca
+            _ca._POSE_TAU_S = max(0.0, float(params["pose_tau"]))
+        if any(k in params for k in ("active_s", "idle_s", "imgsz")):
+            return {"ok": True, **bp.set_tuning(
+                active_s=params.get("active_s"), idle_s=params.get("idle_s"),
+                imgsz=params.get("imgsz"))}
+        cur = bp.tuning()
+        try:
+            from brain import camera_annotator as _ca
+            cur["pose_tau"] = _ca._POSE_TAU_S
+        except Exception:
+            pass
+        return {"ok": True, **cur}
+    if action == "body_loop":
+        # The 30Hz body-detection worker (2026-09-03). Separate from action=
+        # 'loop', which is body_pose's ~1Hz JOINT loop — this one is
+        # person_track's DETECTION loop that feeds the servo and the HUD boxes.
+        from brain import person_track as _pt
+        sub = str(params.get("mode") or "status").lower()
+        if sub == "start":
+            return {"ok": True, **_pt.start_loop(g)}
+        if sub == "stop":
+            return {"ok": True, **_pt.stop_loop()}
+        if sub == "status":
+            return {"ok": True, **_pt.loop_status()}
+        return {"ok": False, "error": "mode=start|stop|status"}
     if action == "live":
         out = bp.live(g, max_age_s=float(params.get("max_age_s") or 3.0))
         if out is None:
