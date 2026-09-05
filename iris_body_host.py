@@ -810,6 +810,18 @@ def _blog(channel: str, event: str, detail=None) -> None:
         pass
 
 
+def _voice_flag_says_off(path: str) -> bool:
+    """True only if state/voice_deliberately_off.json exists AND says {"off": true}.
+    Same fail-open semantics as scripts/voice_watchdog.py::_voice_off."""
+    try:
+        if not os.path.isfile(path):
+            return False
+        with open(path, "r", encoding="utf-8") as fh:
+            return bool(json.load(fh).get("off"))
+    except Exception:
+        return False
+
+
 async def voice_reader(queue, loop, mic_gate):
     """Warm the rich call once, then loop the daemon's blocking listen and enqueue each
     real utterance as ('voice', transcript, None). The 'voice' source auto-speaks my reply.
@@ -837,10 +849,19 @@ async def voice_reader(queue, loop, mic_gate):
     _fail_streak = 0
     while True:
         try:
-            if os.path.isfile(_voff_flag):
+            # 2026-09-05 fix: EXISTENCE of the flag file is NOT "off". Every other
+            # reader (voice_watchdog, sleep_mode, startup, voice_loop) parses the
+            # {"off": bool} key and fails OPEN; body_switch.ps1 voice_on writes
+            # {"off": false} and leaves the file in place. This loop checked
+            # os.path.isfile() alone, so from the first `voice_on` (08-25) the ears
+            # slept here as "deliberately OFF" while the mouth + daemon ran fine -
+            # Zeke talked to a live mic for six weeks and nothing was ever listened
+            # for. Missing / unreadable / off:false => ears ON.
+            if _voice_flag_says_off(_voff_flag):
                 if not _voff_warned:
                     print("[host] voice ears: deliberately OFF (flag file) — "
                           "sleeping quietly, no error spam.", flush=True)
+                    _blog("ears", "[ears OFF: voice_deliberately_off.json says off:true]")
                     _voff_warned = True
                 await asyncio.sleep(30.0)
                 continue
@@ -848,6 +869,7 @@ async def voice_reader(queue, loop, mic_gate):
                 _voff_warned = False
                 print("[host] voice ears: flag cleared — resuming listen loop.",
                       flush=True)
+                _blog("ears", "[ears ON: off-flag cleared, listen loop resumed]")
         except Exception:
             pass
         # Barge-in (2026-07-08): while a SPEAKING turn is in flight (gate cleared),
