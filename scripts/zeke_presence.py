@@ -32,6 +32,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# 2026-09-06 (Zeke, mid-game): every ping/arp/tasklist child spawned a console window that FLASHED on his
+# screen and knocked full-screen Rainbow Six out of focus (the /24 sweep = ~254 flashes every ~5 min).
+# CREATE_NO_WINDOW on every subprocess call. Keep it on anything this watcher ever spawns.
+_NOWIN = 0x08000000  # subprocess.CREATE_NO_WINDOW
+
 REPO = Path(r"D:\Wren-Companion")
 STATE = REPO / "state" / "zeke_presence.json"
 LOGF = REPO / "state" / "zeke_presence_log.jsonl"
@@ -80,7 +85,7 @@ def _pid_alive(pid: int) -> bool:
     try:
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}"],
-            capture_output=True, text=True, timeout=10).stdout
+            capture_output=True, text=True, timeout=10, creationflags=_NOWIN).stdout
         return str(pid) in out
     except Exception:
         return False
@@ -89,7 +94,7 @@ def _pid_alive(pid: int) -> bool:
 def ping(ip: str, timeout_ms: int = 400) -> None:
     with open(os.devnull, "w") as dn:
         subprocess.run(["ping", "-n", "1", "-w", str(timeout_ms), ip],
-                       stdout=dn, stderr=dn, timeout=5)
+                       stdout=dn, stderr=dn, timeout=5, creationflags=_NOWIN)
 
 
 def sweep() -> None:
@@ -98,7 +103,7 @@ def sweep() -> None:
         for i in range(1, 255):
             procs.append(subprocess.Popen(
                 ["ping", "-n", "1", "-w", "250", f"{SUBNET}.{i}"],
-                stdout=dn, stderr=dn))
+                stdout=dn, stderr=dn, creationflags=_NOWIN))
     for p in procs:
         try:
             p.wait(timeout=8)
@@ -114,7 +119,7 @@ def _arp_table() -> dict:
     out = {}
     try:
         raw = subprocess.run(["arp", "-a"], capture_output=True, text=True,
-                             timeout=10).stdout
+                             timeout=10, creationflags=_NOWIN).stdout
     except Exception:
         return out
     for line in raw.lower().splitlines():
@@ -150,7 +155,7 @@ def find_mac(mac: str) -> str | None:
     """Return the IP currently holding `mac` per the ARP table, else None."""
     try:
         out = subprocess.run(["arp", "-a"], capture_output=True, text=True,
-                             timeout=10).stdout
+                             timeout=10, creationflags=_NOWIN).stdout
     except Exception:
         return None
     want = mac.replace(":", "-").lower()
