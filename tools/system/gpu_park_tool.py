@@ -72,11 +72,19 @@ def _verify(g: dict[str, Any], want_parked: bool) -> dict[str, Any]:
     if want_parked:
         ok = all(checks.values())
     else:
-        # un-parked = the inverse of every check except the servo, which stays off by design
-        inv = {k: (not v) for k, v in checks.items() if k != "servo_thread_absent"}
-        ok = all(inv.values())
-        checks = {**{k: (not v) for k, v in checks.items() if k != "servo_thread_absent"},
-                  "servo_thread_absent": checks["servo_thread_absent"]}
+        # un-parked = the inverse of every check except the servo, which stays off by design.
+        # Report with *_active names so true always means "as wanted" (the first version printed
+        # parked-perspective names with inverted values — unreadable, 2026-09-07 14:5x).
+        active = {
+            "eyes_active": not checks["eyes_resting"],
+            "hands_on": not checks["hands_off"],
+            "sentry_running": not checks["sentry_thread_absent"],
+            "pose_loop_running": not checks["pose_loop_absent"],
+            "body_worker_running": not checks["body_worker_absent"],
+            "voice_body_resumed": not checks["voice_body_paused"],
+        }
+        ok = all(active.values())
+        checks = {**active, "servo_off_by_design": checks["servo_thread_absent"]}
     return {"ok": ok, "checks": checks, "threads_of_interest": sorted(t for t in th if t in _PARK_THREADS)}
 
 
