@@ -56,8 +56,10 @@ def _flag_path():
     return paths.body_pause_flag
 
 
-def _verify(g: dict[str, Any], want_parked: bool) -> dict[str, Any]:
-    """Every check reads LIVE state — threads, engine stash, flag — never a return dict."""
+def _verify(g: dict[str, Any], want_parked: bool, require_sentry: bool = True) -> dict[str, Any]:
+    """Every check reads LIVE state — threads, engine stash, flag — never a return dict.
+    require_sentry=False (un-park with servo=false): the sentry is deliberately left off because it
+    would re-arm the servo, so its state is reported but not required."""
     th = _threads()
     stash = g.get("_eyes_rest_stash") or {}
     checks = {
@@ -83,8 +85,10 @@ def _verify(g: dict[str, Any], want_parked: bool) -> dict[str, Any]:
             "body_worker_running": not checks["body_worker_absent"],
             "voice_body_resumed": not checks["voice_body_paused"],
         }
-        ok = all(active.values())
-        checks = {**active, "servo_off_by_design": checks["servo_thread_absent"]}
+        required = {k: v for k, v in active.items() if require_sentry or k != "sentry_running"}
+        ok = all(required.values())
+        checks = {**active, "servo_off_by_design": checks["servo_thread_absent"],
+                  "sentry_required": bool(require_sentry)}
     return {"ok": ok, "checks": checks, "threads_of_interest": sorted(t for t in th if t in _PARK_THREADS)}
 
 
@@ -163,11 +167,15 @@ def _unpark(g: dict[str, Any], servo: bool) -> dict[str, Any]:
         steps["frame_age_s_after"] = _frame_age_s()
     steps["pose_loop_start"] = _human_pose({"action": "loop", "mode": "start"}, g)
     steps["body_loop_start"] = _human_pose({"action": "body_loop", "mode": "start"}, g)
-    steps["sentry_start"] = _attention_sentry({"action": "start"}, g)
+    # The sentry's job is to RE-ARM the servo on motion, so "servo off" must mean "sentry off" too
+    # (2026-09-07 14:5x: an unpark with servo=false left the sentry armed to restart the servo).
     if servo:
+        steps["sentry_start"] = _attention_sentry({"action": "start"}, g)
         steps["servo_start"] = _attention_smooth({"action": "start", "target": "zeke"}, g)
+    else:
+        steps["sentry_start"] = {"ok": True, "skipped": "servo=false → sentry stays off (it would re-arm the servo)"}
     time.sleep(1.5)
-    v = _verify(g, want_parked=False)
+    v = _verify(g, want_parked=False, require_sentry=bool(servo))
     return {"ok": v["ok"], "action": "unpark", "servo_started": bool(servo), "verify": v, "steps": steps,
             "note": ("UN-PARKED and verified (servo left OFF unless servo=true)" if v["ok"] else
                      "UN-PARK INCOMPLETE — see verify.checks")}
