@@ -129,8 +129,16 @@ def _unpark(g: dict[str, Any], servo: bool) -> dict[str, Any]:
         steps["voice_body_resume"] = {"ok": False, "error": repr(e)}
     steps["eyes_resume"] = _eyes_rest({"rest": False}, g)
     steps["hands_on"] = _hands_rest({"rest": False}, g)
+    # The camera loop RELEASES the capture while the shared pause flag exists (iris_runtime honours
+    # body_pause_flag.exists()), so a parked body always shows a stale frame. After clearing the
+    # flag give the loop up to ~10 s to reopen DSHOW and push a fresh frame before calling it frozen.
     age = _frame_age_s()
+    t_wait = time.time()
+    while (age is None or age > _FRESH_S) and time.time() - t_wait < 10.0:
+        time.sleep(0.5)
+        age = _frame_age_s()
     steps["frame_age_s_before"] = age
+    steps["reopen_wait_s"] = round(time.time() - t_wait, 1)
     if age is None or age > _FRESH_S:
         # The camera stream froze behind the park on 09-06 (79-min-old frame while the capture
         # loop still 'read' at 29 fps). Heal before letting anything aim from it.

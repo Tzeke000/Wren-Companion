@@ -138,7 +138,8 @@ def _eyes_reload_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
     if _pre_existing:
         try:
             flag.write_text(_prev_body or "reason: restored by eyes_reload", encoding="utf-8")
-            steps.append("voice-body pause flag RESTORED (it pre-existed) — ears stay paused")
+            steps.append("voice-body pause flag RESTORED (it pre-existed) — ears stay paused, and the "
+                         "camera loop will release the capture again while it exists (parked)")
         except Exception as e:
             steps.append(f"could not restore pre-existing pause flag: {e!r}")
     return {
