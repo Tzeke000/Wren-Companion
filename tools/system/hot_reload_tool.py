@@ -31,6 +31,18 @@ from typing import Any
 from tools.tool_registry import register_tool
 
 
+def _resolve(mod: Any, dotted: str) -> Any:
+    """Walk 'Class.method' (or plain 'func') on a module. 2026-09-07: class methods are plain
+    functions on the class object, so their __code__ can be swapped exactly like module functions -
+    every live instance looks the method up on the class at call time."""
+    obj = mod
+    for part in dotted.split("."):
+        obj = getattr(obj, part, None)
+        if obj is None:
+            return None
+    return obj
+
+
 def _brain_hot_swap(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
     module_name = str(params.get("module") or "")
     func_names = params.get("funcs") or []
@@ -45,7 +57,7 @@ def _brain_hot_swap(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
 
     old_funcs: dict[str, Any] = {}
     for name in func_names:
-        fn = getattr(mod, name, None)
+        fn = _resolve(mod, name)
         if fn is None or not callable(fn):
             return {"ok": False, "error": f"{module_name}.{name} not found or not callable"}
         if getattr(fn, "__closure__", None):
@@ -59,7 +71,7 @@ def _brain_hot_swap(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
 
     swapped = []
     for name, old_fn in old_funcs.items():
-        new_fn = getattr(mod, name, None)
+        new_fn = _resolve(mod, name)
         if new_fn is None or not callable(new_fn):
             return {"ok": False, "error": f"post-reload {module_name}.{name} missing — module reloaded but {swapped} swapped, {name} NOT", "swapped": swapped}
         try:

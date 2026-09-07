@@ -553,6 +553,10 @@ def _face_fast_offset(g: dict[str, Any], st: dict[str, Any],
         m = next((f for f in faces
                   if str(f.get("person_id") or "").lower() == label), None)
         bb = (m.get("bbox") or m.get("box")) if m else None
+        # 2026-09-07: a face box smaller than this is texture (vent grille, screen) - not a target.
+        if bb and len(bb) >= 4 and (int(bb[3]) - int(bb[1]) < 28 or int(bb[2]) - int(bb[0]) < 28):
+            st["_ft_tiny_dropped"] = int(st.get("_ft_tiny_dropped") or 0) + 1
+            bb = None
         if bb and len(bb) >= 4:
             x1, y1, x2, y2 = (int(v) for v in bb[:4])
             mb = (float(x1), float(y1),

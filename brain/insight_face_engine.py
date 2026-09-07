@@ -18,11 +18,22 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 
-_SIMILARITY_THRESHOLD = 0.45  # cosine sim ≥ this → positive ID
+_SIMILARITY_THRESHOLD = 0.45
+# STICKY IDENTITY (2026-09-07, Zeke: "want to do the tracking fix"). In his gaming headset his
+# score hovers 0.45-0.55 against this hard threshold, so he flickered zeke/unknown every few
+# frames: the servo lost its target, room_map forked him into a second "unknown" person at his own
+# bearing, and the head chased phantoms. Rule: once a face in a spot is CONFIDENTLY someone, a face
+# in (about) the same spot stays that someone for _STICKY_S seconds as long as its best score for
+# that identity is still >= _STICKY_FLOOR and nobody ELSE scores above the threshold there.
+_STICKY_S = 8.0            # how long a confident identity holds a spot
+_STICKY_FLOOR = 0.30       # below this the face is genuinely someone else / nothing
+_STICKY_DIST_FRAC = 1.2    # centre-to-centre distance allowed, in multiples of the face width
+_MIN_FACE_PX = 28          # smaller boxes are texture (vent grilles, screens) - never a target  # cosine sim ≥ this → positive ID
 
 _SINGLETON: Optional["InsightFaceEngine"] = None
 _SINGLETON_LOCK = threading.Lock()
@@ -318,6 +329,45 @@ class InsightFaceEngine:
                 if emb is not None:
                     pid, conf = self._match(emb)
                 bbox = getattr(f, "bbox", None)
+                # ── min face size: a 2-cm "face" on the PC grille steered the head for 3 h (09-06)
+                if bbox is not None:
+                    _bx1, _by1, _bx2, _by2 = (float(v) for v in bbox.tolist())
+                    if (_by2 - _by1) < _MIN_FACE_PX or (_bx2 - _bx1) < _MIN_FACE_PX:
+                        continue
+                # ── sticky identity (see constants above). State lives on the instance so a
+                # __code__ hot-swap of this method needs no new __init__ fields.
+                sticky = False
+                if bbox is not None:
+                    _now = time.time()
+                    _mem = self.__dict__.setdefault("_sticky_mem", {})
+                    _cx, _cy, _w = (_bx1 + _bx2) / 2.0, (_by1 + _by2) / 2.0, max(1.0, _bx2 - _bx1)
+                    if pid != "unknown":
+                        _mem[pid] = {"cx": _cx, "cy": _cy, "w": _w, "ts": _now, "score": float(conf)}
+                    else:
+                        # who was confidently here a moment ago?
+                        _best_pid, _best_d = None, 1e9
+                        for _p, _m in list(_mem.items()):
+                            if _now - float(_m.get("ts", 0.0)) > _STICKY_S:
+                                continue
+                            _d = ((_cx - _m["cx"]) ** 2 + (_cy - _m["cy"]) ** 2) ** 0.5
+                            if _d <= _STICKY_DIST_FRAC * max(_w, float(_m.get("w", _w))) and _d < _best_d:
+                                _best_pid, _best_d = _p, _d
+                        if _best_pid is not None and emb is not None:
+                            # score THIS embedding against the remembered identity only
+                            try:
+                                import numpy as _np
+                                _en = float(_np.linalg.norm(emb)) or 1.0
+                                _sc = 0.0
+                                for _kv in (self._known_multi.get(_best_pid) or [self._known.get(_best_pid)]):
+                                    if _kv is None:
+                                        continue
+                                    _kn = float(_np.linalg.norm(_kv)) or 1.0
+                                    _sc = max(_sc, float(_np.dot(emb, _kv) / (_en * _kn)))
+                            except Exception:
+                                _sc = float(conf)
+                            if _sc >= _STICKY_FLOOR:
+                                pid, conf, sticky = _best_pid, _sc, True
+                                _mem[_best_pid].update({"cx": _cx, "cy": _cy, "w": _w})  # follow, but do not refresh ts
                 landmark = getattr(f, "landmark_2d_106", None)
                 pose = getattr(f, "pose", None)
                 age = getattr(f, "age", None)
@@ -330,6 +380,7 @@ class InsightFaceEngine:
                     "gender": ("M" if int(gender) == 1 else "F") if gender is not None else "?",
                     "person_id": pid,
                     "confidence": float(conf),
+                    "sticky": bool(sticky),
                 })
             except Exception as e:
                 print(f"[insight_face] face decode error: {e!r}")
