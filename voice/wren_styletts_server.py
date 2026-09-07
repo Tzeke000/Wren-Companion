@@ -491,26 +491,76 @@ _FILLER_CACHE: list = []
 _FILLER_IDX = 0
 
 
+# 2026-09-05 (Iris): fillers are re-rendered at every warm and play BEFORE every
+# sentence. Tonight the boot warm and a /warm re-warm ran CONCURRENTLY (see _bg_load),
+# the fillers were rendered against a model mid-reload, cached unvalidated and unclipped,
+# and Zeke heard "an ear-piercing amount of static right before you say something".
+# Every clip is now clipped to [-1, 1] and rejected unless it looks like a short
+# utterance in my voice (finite, 0.15-3.0 s, RMS 0.02-0.30). Rejected clips are
+# LOGGED, never played. WREN_STYLE_FILLERS=0 disables fillers entirely.
+FILLERS_ENABLED = os.environ.get("WREN_STYLE_FILLERS", "1").strip().lower() not in ("0", "false", "off", "no")
+_FILLER_STATS: list = []
+
+
+def _filler_stats(arr) -> dict:
+    a = np.asarray(arr, dtype=np.float32)
+    n = int(a.size)
+    if n == 0:
+        return {"dur_s": 0.0, "rms": 0.0, "peak": 0.0, "finite": True, "n": 0}
+    finite = bool(np.all(np.isfinite(a)))
+    if not finite:
+        return {"dur_s": round(n / SAMPLE_RATE, 3), "rms": None, "peak": None, "finite": False, "n": n}
+    return {"dur_s": round(n / SAMPLE_RATE, 3),
+            "rms": round(float(np.sqrt(np.mean(a * a))), 4),
+            "peak": round(float(np.max(np.abs(a))), 4),
+            "finite": True, "n": n}
+
+
+def _filler_ok(st: dict) -> bool:
+    return (st["finite"] and st["n"] > 0
+            and 0.15 <= st["dur_s"] <= 3.0
+            and 0.02 <= (st["rms"] or 0.0) <= 0.30)
+
+
 def _prime_fillers() -> int:
-    global _FILLER_CACHE
-    if _FILLER_CACHE:
-        return len(_FILLER_CACHE)
-    rendered = []
+    """Render + VALIDATE the filler clips. Always re-renders (the cache may hold clips
+    from an earlier, half-warm model). Only clips that pass _filler_ok are kept."""
+    global _FILLER_CACHE, _FILLER_STATS
+    rendered, stats = [], []
+    if not FILLERS_ENABLED:
+        _FILLER_CACHE, _FILLER_STATS = [], []
+        print("[styletts] fillers DISABLED (WREN_STYLE_FILLERS=0)", flush=True)
+        return 0
     for ph in FILLER_PHRASES:
         try:
             arr = _synth(ph, _ref_s)
-            if arr is not None and getattr(arr, "size", 0):
-                rendered.append(arr.astype(np.float32, copy=False))
+            if arr is None or not getattr(arr, "size", 0):
+                print(f"[styletts] filler prime: empty render for {ph!r} — skipped", flush=True)
+                continue
+            st = _filler_stats(arr)
+            st["text"] = ph
+            if not _filler_ok(st):
+                st["kept"] = False
+                stats.append(st)
+                print(f"[styletts] filler prime: REJECTED {ph!r} {st}", flush=True)
+                continue
+            clip = np.clip(np.nan_to_num(np.asarray(arr, dtype=np.float32)), -1.0, 1.0)
+            st["kept"] = True
+            stats.append(st)
+            rendered.append(clip)
         except Exception as e:
             print(f"[styletts] filler prime failed for {ph!r}: {e!r}", flush=True)
-    _FILLER_CACHE = rendered
-    print(f"[styletts] primed {len(_FILLER_CACHE)} filler clips", flush=True)
+    _FILLER_CACHE, _FILLER_STATS = rendered, stats
+    print(f"[styletts] primed {len(_FILLER_CACHE)} filler clips "
+          f"(rejected {sum(1 for s in stats if not s.get('kept'))}): "
+          + "; ".join(f"{s['text']!r} {s['dur_s']}s rms={s['rms']} peak={s['peak']}" for s in stats if s.get("kept")),
+          flush=True)
     return len(_FILLER_CACHE)
 
 
 def _next_filler():
     global _FILLER_IDX
-    if not _FILLER_CACHE:
+    if not FILLERS_ENABLED or not _FILLER_CACHE:
         return None
     arr = _FILLER_CACHE[_FILLER_IDX % len(_FILLER_CACHE)]
     _FILLER_IDX += 1
@@ -732,6 +782,16 @@ class Handler(BaseHTTPRequestHandler):
             # listening so the next voice_call_start can re-warm without a restart.
             _cold_unload()
             self._send(200, "cold")
+        elif self.path == "/fillers":
+            # 2026-09-05 diagnostic: what will play before my next sentence, without
+            # playing it. Lets a silent check catch a garbage filler (the static bug).
+            body = json.dumps({"enabled": FILLERS_ENABLED, "cached": len(_FILLER_CACHE),
+                               "ready": _READY, "clips": _FILLER_STATS}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self._send(404, "not found")
 
@@ -889,11 +949,21 @@ def main() -> int:
           f"(/health=503 until warm)", flush=True)
 
     def _bg_load() -> None:
+        # 2026-09-05 (Iris): claim _LOADING so a GET /warm arriving DURING the boot warm
+        # (the daemon's ears-on-boot does exactly that) is a no-op instead of spawning a
+        # SECOND _load_model()+_warmup() that interleaves with this one. That race is what
+        # rendered tonight's garbage filler clips (static before every sentence).
+        global _LOADING
+        with _LOADING_LOCK:
+            _LOADING = True
         try:
             _load_model()
             _warmup()   # sets _READY = True once the model is warm
         except Exception as e:
             print(f"[styletts] background model load FAILED: {e!r}", flush=True)
+        finally:
+            with _LOADING_LOCK:
+                _LOADING = False
 
     threading.Thread(target=_bg_load, daemon=True, name="styletts-bg-load").start()
 
