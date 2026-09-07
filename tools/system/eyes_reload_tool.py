@@ -85,6 +85,17 @@ def _eyes_reload_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
     steps.append(f"frame age before: {age_before:.1f}s" if age_before >= 0 else
                  "frame age before: no frame ever pushed")
 
+    # 2026-09-07: this flag is SHARED with voice_body_pause (the ears). Unlinking it after the
+    # reload silently un-paused the voice body while Zeke had asked for a GPU park (found by
+    # gpu_park's verification: voice_body_paused=false after an eyes_reload). Remember and RESTORE.
+    _pre_existing = flag.exists()
+    try:
+        _prev_body = flag.read_text(encoding="utf-8") if _pre_existing else ""
+    except Exception:
+        _prev_body = "reason: restored by eyes_reload"
+    if _pre_existing:
+        steps.append("pause flag already set (voice body paused) — will RESTORE it after the reload")
+
     # 1. PAUSE — video loop releases the capture handle.
     try:
         flag.write_text("eyes_reload", encoding="utf-8")
@@ -101,7 +112,9 @@ def _eyes_reload_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
     else:
         steps.append("device restart skipped (deep=false)")
 
-    # 3. RESUME — loop reopens DSHOW.
+    # 3. RESUME — loop reopens DSHOW. The flag is cleared here so the capture loop can reopen and
+    # the verify step below can see fresh frames; if it PRE-EXISTED (voice body deliberately
+    # paused) it is RESTORED after verify so the ears stay paused (2026-09-07).
     try:
         if flag.exists():
             flag.unlink()
@@ -121,6 +134,13 @@ def _eyes_reload_fn(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
             break
     steps.append(f"frame age after: {age:.1f}s" if age >= 0 else "frame age after: still no frame")
 
+    # 5. RESTORE the shared pause flag if it was set before we touched it (voice body paused).
+    if _pre_existing:
+        try:
+            flag.write_text(_prev_body or "reason: restored by eyes_reload", encoding="utf-8")
+            steps.append("voice-body pause flag RESTORED (it pre-existed) — ears stay paused")
+        except Exception as e:
+            steps.append(f"could not restore pre-existing pause flag: {e!r}")
     return {
         "ok": True,
         "healed": healed,
