@@ -625,6 +625,24 @@ def _person_track_offset(g: dict[str, Any], st: dict[str, Any],
         return None
 
 
+# 2026-09-07 (Zeke: "do them now"): a servo without fresh frames is a hardware hazard, not a
+# degraded mode. On 09-06 the camera stream froze at 23:37 and this loop kept jogging the head on a
+# fossil face box for THREE HOURS (117k writes, rail clamps 165 -> 292) while the eyes were parked.
+_NO_FRAME_STOP_S = 10.0     # no NEW frame for this long while running -> auto-stop
+_START_FRESH_S = 5.0        # start refused unless a frame this fresh exists
+
+
+def _frame_age_s() -> float | None:
+    try:
+        from brain import frame_store as _fs
+        _r = _fs.get_buffered_frame(max_age_sec=1e9)
+        if _r.frame is None:
+            return None
+        return max(0.0, time.time() - float(_r.capture_ts))
+    except Exception:
+        return None
+
+
 def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -> None:
     from brain import visual_attention as va
 
@@ -657,6 +675,7 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
     # "no new frame this tick" is the normal case. What is dangerous is TIME
     # spent with a frozen est while the jog keeps driving, so measure that.
     _odo_good_ts = time.time()
+    _last_fresh_ts = time.time()   # wall-clock of the last NEW frame seen by this loop
     try:
         _act = va.build_actuator()
         if not _act.capabilities().get("can_pan"):
@@ -699,7 +718,19 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                             st.get("odo_starved") or 0) + 1
                         st["odo_starved_since_resync"] = int(
                             st.get("odo_starved_since_resync") or 0) + 1
+                        if time.time() - _last_fresh_ts > _NO_FRAME_STOP_S:
+                            # No new frame for _NO_FRAME_STOP_S: the eyes are parked,
+                            # frozen or gone. Stop the head rather than drive it blind.
+                            st["auto_stopped"] = True
+                            st["auto_stop_reason"] = (
+                                f"no fresh frame for {time.time() - _last_fresh_ts:.0f}s")
+                            try:
+                                jog.stop()
+                            except Exception:
+                                pass
+                            break
                     else:
+                        _last_fresh_ts = time.time()
                         _small = _cv2.cvtColor(
                             _cv2.resize(_ro.frame, (_ODO_W, _ODO_H)),
                             _cv2.COLOR_BGR2GRAY)
@@ -1380,6 +1411,16 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
                     "error": "no target — pass target='zeke' or 'object:...'"}
         if running:
             return {"ok": True, "running": True, "note": "already smooth"}
+        # 2026-09-07: never start blind. eyes_rest nulls the engines (frames may still
+        # stream, but no face/body results will ever update) and a frozen capture means
+        # the offset would be a fossil - both drove the head for hours on 09-06.
+        if g.get("_eyes_rest_stash"):
+            return {"ok": False, "error": "eyes are resting (eyes_rest) - servo start refused; "
+                                          "un-park first (gpu_park action=unpark)"}
+        _age = _frame_age_s()
+        if _age is None or _age > _START_FRESH_S:
+            return {"ok": False, "error": f"no fresh frame (age {_age}) - servo start refused; "
+                                          f"eyes_reload then attention_follow release_ptz"}
         # 0 = run forever (manual starts); sentry passes ~90 so it re-arms.
         st["auto_stop_lost_s"] = float(params.get("auto_stop_lost_s") or 0.0)
         stop = threading.Event()

@@ -251,6 +251,13 @@ def _sentry_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) -
             if time.time() - st.get("last_engage_ts", 0.0) < _ENGAGE_COOLDOWN_S:
                 continue
 
+            # ── EYES PARKED = NEVER ENGAGE (2026-09-07). eyes_rest nulls the
+            # engines but frames keep streaming, so motion still fires here;
+            # on 09-06 the sentry re-armed the servo 90 s after Iris parked it
+            # and the head jogged blind for three hours on a frozen frame.
+            if g.get("_eyes_rest_stash"):
+                st["mode"] = "armed (eyes resting - engage suppressed)"
+                continue
             # ── policy: who/what deserves the eyes ──
             target = _pick_person(g)
             if target is None and (g.get("_face_results") or []):
