@@ -341,6 +341,23 @@ _OLLAMA_EXE = (Path.home() / "AppData" / "Local" / "Programs" / "Ollama"
 _ollama_spawn_ts = 0.0
 
 
+_LB_OFF_FLAG = Path(r"D:\Wren-Companion") / "state" / "little_brain" / "pilot_deliberately_off.json"
+
+
+def _little_brain_parked() -> bool:
+    """True when Zeke has parked the little brain (state/little_brain/pilot_deliberately_off.json, off:true).
+
+    2026-09-06 23:40 (Zeke saw GPU 100%): a bridge timeout made this server fall back to local Ollama, which
+    started loading iris-little-v16 (8.1 GB) onto the 3060 - the exact crash window the park exists to avoid.
+    The flag was never consulted on this path. Absent/unreadable flag = NOT parked (normal operation)."""
+    try:
+        import json as _json
+        d = _json.loads(_LB_OFF_FLAG.read_text(encoding="utf-8"))
+        return bool(d.get("off"))
+    except Exception:
+        return False
+
+
 def _ensure_ollama() -> bool:
     """True if the local LLM server answers AND has models; if not, (re)spawn
     `ollama serve` detached (60s spawn cooldown). The tray app's Startup
@@ -440,6 +457,10 @@ def _ask_local(messages: list[dict], cap_turn: dict | None = None) -> str | None
     personality + big-brain-maintained facts file on top, instead of
     replacing it — the first version dropped the commands entirely."""
     import requests
+    if _little_brain_parked():
+        print("[vector-brain] little brain PARKED (pilot_deliberately_off.json) - skipping local Ollama; "
+              "canned fallback instead", flush=True)
+        return None
     _ensure_ollama()
     wirepod_sys = ""
     convo: list[dict] = []
