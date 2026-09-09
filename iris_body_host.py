@@ -965,6 +965,11 @@ MIC_WARDEN_ON = os.environ.get("IRIS_MIC_WARDEN", "1").strip().lower() not in ("
 # then delivers the real prompt(s). Each request id is nudged at most once.
 LLM_PENDING_POLL_S = float(os.environ.get("IRIS_LLM_PENDING_POLL_S", "30"))
 LLM_PENDING_MIN_AGE_S = float(os.environ.get("IRIS_LLM_PENDING_MIN_AGE_S", "30"))
+# 2026-09-09 (Iris): requests older than this have no caller left waiting (brain/* callers
+# time out at 120-180 s; brain/iris_llm._REQUEST_TTL_S is 600). The poller used to count
+# them forever ("91 pending" at boot, 87666 s-old reflects) because only iris_llm.next_pending()
+# expires them and nothing on the v2 host calls it. Expire here so the nudge is about live callers.
+LLM_PENDING_TTL_S = float(os.environ.get("IRIS_LLM_PENDING_TTL_S", "600"))
 _LLM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "iris_llm")
 
 
@@ -996,6 +1001,16 @@ async def llm_pending_poller(queue, loop, turn):
                     age = now - float(d.get("ts") or os.path.getmtime(path))
                 except Exception:
                     age = 0.0
+                if age > LLM_PENDING_TTL_S:
+                    # dead request: caller gave up long ago — mark expired (iris_llm prunes
+                    # terminal-status files after 1h) and never nudge about it.
+                    try:
+                        d["status"] = "expired"
+                        with open(path, "w", encoding="utf-8") as f:
+                            json.dump(d, f, ensure_ascii=False)
+                    except Exception:
+                        pass
+                    continue
                 if age < LLM_PENDING_MIN_AGE_S or rid in nudged:
                     continue
                 waiting.append((rid, str(d.get("kind") or "?"), str(d.get("requester") or "?"), int(age)))
