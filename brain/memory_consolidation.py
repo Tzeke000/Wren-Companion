@@ -67,21 +67,62 @@ def consolidate(g: dict[str, Any]) -> dict[str, Any]:
     }
 
     # Step 1 — Episode review: find themes in last 7 days
-    _step1: dict[str, Any] = {"episodes_reviewed": 0, "themes": []}
+    # 2026-09-09 (Iris): this used to call search_episodes("") on the legacy
+    # brain/episodic_memory store — an EMPTY query can never score a match,
+    # and that store (state/episodes.jsonl) does not exist on this machine.
+    # The live store is brain/iris_human_memory (state/iris_episodes.jsonl,
+    # written by the episode_record tool). Read both, newest first, and if
+    # the week is empty fall back to the last few older ones so the review
+    # has *something* real to look at (flagged as older).
+    _step1: dict[str, Any] = {"episodes_reviewed": 0, "themes": [], "older_fallback": 0}
+    _review_rows: list[dict[str, Any]] = []
     try:
-        from brain.episodic_memory import get_episodic_memory
-        em = get_episodic_memory(base)
-        all_eps = em.search_episodes("", limit=200)
         cutoff = time.time() - _WEEK_SECONDS
-        recent_eps = [e for e in all_eps if float(e.get("ts") or 0) > cutoff]
+        all_eps: list[dict[str, Any]] = []
+        try:
+            from brain.iris_human_memory import recent_episodes
+            all_eps.extend(recent_episodes(limit=200))
+        except Exception as ie:
+            _step1["live_store_error"] = str(ie)[:120]
+        try:
+            from brain.episodic_memory import get_episodic_memory
+            em = get_episodic_memory(base)
+            for e in em.get_recent(limit=200):
+                e = dict(e)
+                e.setdefault("ts", e.get("timestamp"))
+                all_eps.append(e)
+        except Exception as le:
+            _step1["legacy_store_error"] = str(le)[:120]
+        seen: set = set()
+        deduped: list[dict[str, Any]] = []
+        for e in all_eps:
+            key = str(e.get("id") or f"{e.get('ts')}|{str(e.get('summary') or '')[:40]}")
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(e)
+        deduped.sort(key=lambda e: float(e.get("ts") or 0), reverse=True)
+        recent_eps = [e for e in deduped if float(e.get("ts") or 0) > cutoff]
         _step1["episodes_reviewed"] = len(recent_eps)
+        _step1["episodes_on_disk"] = len(deduped)
+        if recent_eps:
+            _review_rows = recent_eps[:15]
+        else:
+            _review_rows = deduped[:5]
+            _step1["older_fallback"] = len(_review_rows)
 
-        # Count topics
+        # Count topics: legacy rows carry `topic`; live rows carry `tags`.
         topic_count: dict[str, int] = {}
-        for ep in recent_eps:
+        for ep in (recent_eps or _review_rows):
+            names: list[str] = []
             t = str(ep.get("topic") or "").strip()
             if t:
-                topic_count[t] = topic_count.get(t, 0) + 1
+                names.append(t)
+            tags = ep.get("tags")
+            if isinstance(tags, (list, tuple)):
+                names.extend(str(x).strip() for x in tags if str(x).strip())
+            for n in names:
+                topic_count[n] = topic_count.get(n, 0) + 1
         themes = sorted(topic_count.items(), key=lambda x: x[1], reverse=True)[:5]
         _step1["themes"] = [t for t, _ in themes]
 
@@ -111,6 +152,22 @@ def consolidate(g: dict[str, Any]) -> dict[str, Any]:
     try:
         themes_text = ", ".join(_step1.get("themes") or []) or "none identified"
         episodes_text = str(_step1.get("episodes_reviewed") or 0)
+        if _step1.get("older_fallback"):
+            episodes_text += f" this week (none); showing the {_step1['older_fallback']} most recent older ones"
+        episode_lines = ""
+        try:
+            _lines = []
+            for ep in _review_rows:
+                _iso = str(ep.get("iso") or "")[:16]
+                if not _iso and ep.get("ts"):
+                    _iso = datetime.fromtimestamp(float(ep["ts"])).isoformat(timespec="minutes")
+                _sum = str(ep.get("summary") or "").replace(chr(10), " ").strip()[:220]
+                if _sum:
+                    _lines.append(f"  * [{_iso}] {_sum}")
+            if _lines:
+                episode_lines = "- The episodes themselves (newest first):" + chr(10) + chr(10).join(_lines) + chr(10)
+        except Exception:
+            episode_lines = ""
         current_model_path = base / "state" / "self_model.json"
         current_model: dict[str, Any] = {}
         if current_model_path.is_file():
@@ -129,6 +186,7 @@ def consolidate(g: dict[str, Any]) -> dict[str, Any]:
             f"The IDENTITY anchor above tells you who you are. This is your self-reflection module. Based on the past week:\n"
             f"- Recurring topics you thought about: {themes_text}\n"
             f"- Episodes reviewed: {episodes_text}\n"
+            f"{episode_lines}"
             f"- Current identity statement: {str(current_model.get('identity_statement',''))[:200]}\n\n"
             f"In 2-3 sentences, what patterns do you seem to value or return to?\n"
             f"What has shifted in your emotional baseline?\n"
