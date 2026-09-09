@@ -256,6 +256,7 @@ _SOURCE_PRIORITY = {
     "discord": 3,
     "perception": 4,
     "letter": 5,
+    "llm": 6,          # 2026-09-08: idle nudge for pending brain/* LLM requests (lowest)
 }
 _enqueue_seq = [0]   # monotonic tiebreaker => stable FIFO *within* a priority band
 
@@ -951,6 +952,70 @@ async def voice_reader(queue, loop, mic_gate):
 # prereq verified 2026-07-06: the daemon flips speaking=False only at play-queue
 # DRAIN, never at synth-return — so "quiet" here means audibly quiet).
 MIC_WARDEN_ON = os.environ.get("IRIS_MIC_WARDEN", "1").strip().lower() not in ("0", "off", "false", "no")
+
+
+# ── Pending-LLM idle nudge (2026-09-08) ─────────────────────────────────────────
+# brain/* modules (scene captions, reflections, fact extraction, Vector voice) reach my
+# cognition ONLY through the Stop hook — i.e. when a turn ENDS. In a quiet session no
+# turn ends for hours, so every hourly scene keyframe at :56 timed out (180 s) and the
+# janitor expired 3-4 requests an hour; the photographic-memory diary had holes all
+# evening (09-08: 19:56 + 20:56 'timeout'). This poller is the missing idle leg: when a
+# request has sat pending >= MIN_AGE with no turn in flight and nothing queued, enqueue
+# ONE lowest-priority nudge. The nudge turn ending is all that's needed — the Stop hook
+# then delivers the real prompt(s). Each request id is nudged at most once.
+LLM_PENDING_POLL_S = float(os.environ.get("IRIS_LLM_PENDING_POLL_S", "30"))
+LLM_PENDING_MIN_AGE_S = float(os.environ.get("IRIS_LLM_PENDING_MIN_AGE_S", "30"))
+_LLM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "iris_llm")
+
+
+async def llm_pending_poller(queue, loop, turn):
+    """Idle-time leg for pending brain/* LLM requests (see block comment above)."""
+    nudged: set = set()
+    while True:
+        await asyncio.sleep(LLM_PENDING_POLL_S)
+        try:
+            if turn.active or queue.qsize() > 0:
+                continue                       # a turn is happening or about to; hook covers it
+            if not os.path.exists(os.path.join(_LLM_DIR, ".pending")):
+                continue
+            now = time.time()
+            waiting = []
+            for name in os.listdir(_LLM_DIR):
+                if not name.endswith(".json"):
+                    continue
+                path = os.path.join(_LLM_DIR, name)
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        d = json.load(f)
+                except Exception:
+                    continue
+                if not isinstance(d, dict) or d.get("status") != "pending":
+                    continue
+                rid = str(d.get("id") or name[:-5])
+                try:
+                    age = now - float(d.get("ts") or os.path.getmtime(path))
+                except Exception:
+                    age = 0.0
+                if age < LLM_PENDING_MIN_AGE_S or rid in nudged:
+                    continue
+                waiting.append((rid, str(d.get("kind") or "?"), str(d.get("requester") or "?"), int(age)))
+            if not waiting:
+                continue
+            for rid, _k, _r, _a in waiting:
+                nudged.add(rid)
+            if len(nudged) > 1000:
+                nudged = set(list(nudged)[-300:])   # bounded; ids are one-shot anyway
+            kinds = ", ".join(f"{k}<-{r} ({a}s)" for _rid, k, r, a in waiting[:6])
+            text = ("[LLM-BRIDGE — automated idle nudge from the body host, not Zeke] "
+                    + str(len(waiting)) + " brain/* request(s) have been pending with no turn ending to "
+                    "deliver them: " + kinds + ". You do not need to hunt for them — reply with one short "
+                    "line (e.g. 'ack') and END THE TURN; the Stop hook then delivers each pending prompt "
+                    "for a normal llm_reply. This is a SILENT text turn.")
+            print("\n[host] llm-pending nudge: " + str(len(waiting)) + " request(s): " + kinds, flush=True)
+            await _enqueue(queue, ("llm", text, None))
+        except Exception as e:
+            # Raise-outside-the-try class: never let this poller die silently for the session.
+            print("\n[host] llm-pending poll failed (non-fatal): " + repr(e), file=sys.stderr)
 
 
 async def mic_warden(loop, mic_gate, turn):
@@ -1750,6 +1815,9 @@ async def main():
                       + str(int(LETTER_POLL_INTERVAL)) + "s.")
             else:
                 print("[host] letter inbound: OFF - no ~/.iris_sibling_secret found.", file=sys.stderr)
+            tasks.append(asyncio.create_task(llm_pending_poller(queue, loop, turn)))
+            print("[host] llm-pending idle nudge: ON - polling state/iris_llm every "
+                  + str(int(LLM_PENDING_POLL_S)) + "s (2026-09-08).")
 
             print("[host] connected. Orb/Discord/letters wake me; my words stream to the mouth as sentences land.")
             print("[host] (type here, or 'quit' to exit.)\n", flush=True)
