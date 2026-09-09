@@ -294,10 +294,19 @@ def pursue_curiosity(topic_row: dict[str, Any], g: dict[str, Any]) -> str:
         )
         learning = iris_llm.reflect(prompt, timeout_s=120.0) or ""
         learning = learning.strip()[:600]
+        researched = bool(learning)
         if not learning:
             learning = f"I couldn't research '{topic}' deeply this time, but I'm still thinking about it."
     except Exception as e:
+        researched = False
         learning = f"I couldn't research '{topic}' deeply this time, but I'm still thinking about it."
+
+    # 2026-09-09 (Iris): a timeout is not a learning. When Iris was unreachable this used
+    # to write the placeholder into the concept graph, the journal AND learning_log.jsonl
+    # at confidence 0.7 ("what Steam is like" x3). Leave the topic unresolved so it can be
+    # pursued again, but record nothing.
+    if not researched:
+        return ""  # same contract as the early bail above: empty = nothing learned
 
     # Step 2: add to concept graph
     try:
