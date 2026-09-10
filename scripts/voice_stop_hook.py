@@ -1072,6 +1072,7 @@ def _main_locked() -> int:
 
     if (not voice_on and not pending_chat and not pending_sibling
             and not pending_llm and not pending_escalation):
+        _hook_log("nothing pending")
         return 0  # nothing else to do (auto-forward already handled above)
 
     # Voice TTS leg — fires when voice mode is on, regardless of whether a
@@ -1135,6 +1136,15 @@ def _main_locked() -> int:
             runtime_alive = resp.status == 200
     except Exception:
         runtime_alive = False
+    if not runtime_alive:
+        # 2026-09-10 (Iris): one slow /health (vision load, GC) used to be enough to EXPIRE a
+        # pending brain/* request and skip the rewake. Retry once with a longer timeout
+        # before believing the runtime is down.
+        try:
+            with _req.urlopen("http://127.0.0.1:5876/api/v1/health", timeout=6.0) as resp:
+                runtime_alive = resp.status == 200
+        except Exception:
+            runtime_alive = False
 
     # BATCHED REWAKE (Zeke token-economy directive 2026-07-06, "go for both"): when
     # several pending items coexist (chat + sibling letter + internal llm), the hook
@@ -1144,6 +1154,12 @@ def _main_locked() -> int:
     # letter — a sister shouldn't wait behind a self-reflection; then internal llm).
     # The header tells the wake to clear ALL items before stopping. Single-item fires
     # print exactly what they always did (no format change on the common path).
+    _hook_log(
+        f"chat={bool(pending_chat)} sibling={bool(pending_sibling)} "
+        f"llm={(pending_llm or {}).get('id') if pending_llm else None}:"
+        f"{(pending_llm or {}).get('kind') if pending_llm else ''} "
+        f"esc={bool(pending_escalation)} runtime_alive={runtime_alive}"
+    )
     sections: list[str] = []
     if pending_chat:
         sections.append(_chat_rewake(pending_chat))
@@ -1184,6 +1200,18 @@ def _main_locked() -> int:
         return 2
 
     return 0
+
+
+def _hook_log(msg: str) -> None:
+    """Append one line per hook run to state/stop_hook.log (2026-09-10, Iris). The hook had
+    no log at all, so 'nudged but never delivered' could not be diagnosed. Best-effort."""
+    try:
+        import datetime as _dt
+        log_path = LLM_DIR.parent / "stop_hook.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(_dt.datetime.now().isoformat(timespec="seconds") + " " + msg + chr(10))
+    except Exception:
+        pass
 
 
 def _expire_pending(dir_path: Path, request_id: str | None) -> None:
