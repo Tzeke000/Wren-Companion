@@ -12,7 +12,14 @@ VM_IP="192.168.4.32"
 TOKEN_JSON="$HOME/.config/iris/pve_token.json"
 KEY="$HOME/.ssh/id_ed25519_iris"
 ORB_URL="http://$VM_IP:5876/"
-CHECK=0; [ "${1:-}" = "--check" ] && CHECK=1
+CHECK=0; MODE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) CHECK=1 ;;
+    --mode)  MODE="${2:-}"; shift ;;
+  esac
+  shift
+done
 
 say() { echo "[iris-launch] $*"; [ $CHECK -eq 0 ] && command -v notify-send >/dev/null && notify-send -a Iris "Iris" "$*" 2>/dev/null; true; }
 
@@ -51,6 +58,18 @@ if curl -sk --max-time 3 "$VM_IP:5876/api/v1/health" >/dev/null 2>&1; then LIVE=
 if [ $CHECK -eq 1 ]; then
   ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 iris@$VM_IP 'echo ssh-ok: $(hostname)' 2>&1 | tail -n 1
   echo "[iris-launch] iris live on :5876 = $LIVE"
+  if [ -n "$MODE" ]; then
+    echo "[iris-launch] gate check for mode=$MODE:"
+    ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 iris@$VM_IP "~/iris_start.sh $MODE </dev/null" 2>&1 | sed 's/^/    /'
+  fi
+  exit 0
+fi
+
+# A mode (fable|opus|cli) mirrors the tower's three launch bats: run Iris's start gate on
+# the VM inside the terminal. Without a mode, just open a shell into the VM.
+if [ -n "$MODE" ]; then
+  say "starting Iris ($MODE) on iris-home"
+  gnome-terminal --title="Iris ($MODE) — iris-home" -- ssh -t -i "$KEY" -o StrictHostKeyChecking=accept-new iris@$VM_IP "~/iris_start.sh $MODE"
   exit 0
 fi
 

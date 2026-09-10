@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Iris (Fable)
+Comment=Start Iris (fable) on the server VM 100 and open a window into her
+Exec=/home/zeke/.local/bin/iris-launch.sh --mode fable
+Icon=/home/zeke/.local/share/icons/iris.png
+Terminal=false
+Categories=Utility;
+StartupNotify=true
