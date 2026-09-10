@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Iris (CLI)
+Comment=Start Iris (cli) on the server VM 100 and open a window into her
+Exec=/home/zeke/.local/bin/iris-launch.sh --mode cli
+Icon=/home/zeke/.local/share/icons/iris.png
+Terminal=false
+Categories=Utility;
+StartupNotify=true
