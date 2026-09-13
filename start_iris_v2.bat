@@ -17,6 +17,25 @@ REM ============================================================================
 
 cd /d D:\Wren-Companion
 
+REM ============================================================================
+REM LAUNCHER LOG (added 2026-09-13). WHY: on 09-12 the tower came back at 06:09
+REM after an unexpected 09-11 18:30 shutdown, tower_boot_sentinel.py fired
+REM correctly at 06:11 and spawned this bat -- and then the body host never
+REM answered. The sentinel DM'd "NOT answering after 10 min" and that was the
+REM ENTIRE forensic record: this launcher wrote nothing, so which step died was
+REM unknowable after the fact. Every milestone below now lands in
+REM state\launcher_boot.log with a timestamp, on BOTH console and file.
+REM IRISLOG is an ENV var (not just a bat var) so the child powershell sweeps
+REM append their kill lines to the same file.
+REM ============================================================================
+set "IRISLOG=D:\Wren-Companion\state\launcher_boot.log"
+if not exist "D:\Wren-Companion\state" mkdir "D:\Wren-Companion\state" >nul 2>&1
+REM Roll at ~1MB so a reboot loop can never fill the disk (C: hit 0 bytes on
+REM 09-05; this log lives on D:, but the habit stays).
+if exist "%IRISLOG%" for %%A in ("%IRISLOG%") do if %%~zA GTR 1000000 move /y "%IRISLOG%" "%IRISLOG%.old" >nul 2>&1
+call :log "============================================================"
+call :log "launcher START: %~nx0"
+
 REM --- Self-elevate (Zeke 2026-06-28): run Iris in Admin so the watchdog can fully
 REM --- manage AND kill an elevated voice stack (the old-CLI respawn bug was rooted in
 REM --- a non-admin host unable to kill an elevated orphan watchdog). If not elevated,
@@ -25,12 +44,13 @@ REM --- so the elevated relaunch can't loop. If you'd rather not elevate, use th
 REM --- fallback start_iris.bat (untouched, known-good, non-admin).
 net session >nul 2>&1
 if %errorLevel% neq 0 (
-    echo [start_iris_v2.bat] not elevated - requesting Administrator via UAC...
+    call :log "NOT elevated - requesting Administrator via UAC. NOTE: an UNATTENDED boot has nobody to accept that prompt, so if the next line in this log is not 'running elevated' from a second instance, the UAC dialog is what stopped the stack."
     powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    call :log "UAC relaunch spawned; this non-elevated instance is exiting now."
     endlocal
     exit /b
 )
-echo [start_iris_v2.bat] running elevated.
+call :log "running elevated."
 
 REM --- Pin the model EXPLICITLY. iris_body_host.py passes IRIS_MODEL to the
 REM --- Agent SDK; unset it would inherit the CLI's *saved default*, which /model can
@@ -40,12 +60,14 @@ REM --- 2026-07-25: flipped 4.8 -> Opus 5 (`claude-opus-5`, Claude Code >=2.1.21
 REM --- npm CLI updated to 2.1.220). BARE string: Opus 5 is 1M-context native, so it
 REM --- does NOT need the `[1m]` suffix 4.8 required. REVERT = `claude-opus-4-8[1m]`.
 set "IRIS_MODEL=claude-opus-5"
+call :log "model pin: IRIS_MODEL=%IRIS_MODEL%"
 
 if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
-    echo [start_iris_v2.bat] ERROR: venv missing at D:\Wren-Companion\.venv\Scripts\python.exe 1>&2
+    call :log "FATAL: venv missing at D:\Wren-Companion\.venv\Scripts\python.exe - cannot start anything."
     endlocal
     exit /b 2
 )
+call :log "venv present."
 
 REM --- Kill the WHOLE stale stack BEFORE relaunch, so nothing old holds a port, a
 REM --- device, the watchdog's singleton mutex, OR iris_runtime's single-instance
@@ -60,7 +82,8 @@ REM --- orphan too. SPARES sibling_postoffice (Wren's lifeline) + anything else 
 REM --- NOTE (2026-07-19): the runtime match is iris_runtime\.py (not bare
 REM --- iris_runtime) so the loop-liveness watchdog iris_runtime_watchdog.py
 REM --- SURVIVES the restarts it itself triggers.
-powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voice_watchdog|wren_voice_daemon|wren_styletts_server|iris_runtime\.py|iris_body_host' } | ForEach-Object { Write-Host ('[start_iris_v2.bat] killing stale PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+call :log "sweep 1/3: stale python stack (voice watchdog, daemon, mouth, runtime, prior body host)..."
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voice_watchdog|wren_voice_daemon|wren_styletts_server|iris_runtime\.py|iris_body_host' } | ForEach-Object { $m = '[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] killing stale python PID ' + $_.ProcessId; Write-Host $m; if ($env:IRISLOG) { Add-Content -Path $env:IRISLOG -Value $m } ; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
 REM --- ORPHAN-COGNITION SWEEP (2026-08-31, fixes the 08-28 twin): the python
 REM --- sweep above kills the body host, which ORPHANS its claude.exe grandchild
@@ -70,7 +93,8 @@ REM --- Filter is Name='claude.exe' AND CommandLine contains Wren-Companion
 REM --- (verified live: the SDK-bundled exe path is
 REM --- D:\Wren-Companion\.venv\...\claude.exe) — any Claude session from
 REM --- another repo has neither and is SPARED.
-powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object { $_.CommandLine -like '*Wren-Companion*' } | ForEach-Object { Write-Host ('[start_iris_v2.bat] killing orphan cognition PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+call :log "sweep 2/3: orphan cognition (claude.exe under Wren-Companion)..."
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object { $_.CommandLine -like '*Wren-Companion*' } | ForEach-Object { $m = '[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] killing orphan cognition PID ' + $_.ProcessId; Write-Host $m; if ($env:IRISLOG) { Add-Content -Path $env:IRISLOG -Value $m } ; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
 REM --- Kill any stale ORB APP too (Zeke directive 2026-07-08): a ghost iris-control
 REM --- wedged at its splash screen holds the app's single-instance lock, so every
@@ -85,26 +109,32 @@ if exist "D:\Wren-Companion\state\iris.pid" del /q "D:\Wren-Companion\state\iris
 REM --- Backstop: free the ports in case a WORKER survived the name-kill (Wren's
 REM --- parent/worker scar: a kill that misses the port-holder leaves a zombie on the
 REM --- port and the fresh bind fails). Port-free is the real gate, the name-kill is best-effort.
-powershell -NoProfile -Command "foreach ($p in 5876,8769,8770) { Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }"
+call :log "sweep 3/3: freeing ports 5876 8769 8770..."
+powershell -NoProfile -Command "foreach ($p in 5876,8769,8770) { Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $m = '[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] freeing port ' + $p + ' held by PID ' + $_.OwningProcess; Write-Host $m; if ($env:IRISLOG) { Add-Content -Path $env:IRISLOG -Value $m } ; Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }"
 
 REM --- Brief settle so the OS releases ports + camera/mic before relaunch.
 timeout /t 2 /nobreak >nul
+call :log "sweeps done, stack is clean. Starting services..."
 
 REM Voice stack (StyleTTS2 mouth :8769 + voice daemon :8770) via the watchdog,
 REM same as start_iris.bat. The watchdog has a named-mutex singleton guard, so a
 REM second launch is a safe no-op if it's already up from a prior boot.
+call :log "service: voice watchdog (mouth 8769 + daemon 8770)"
 start "iris-voice-watchdog" /B "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\voice_watchdog.py"
 
 REM Runtime loop-liveness watchdog (2026-07-19: a deadline-less body_dock gRPC
 REM wedged the whole runtime event loop on deployment eve). Watches the loop
 REM heartbeat file; on a wedge it DMs Zeke, writes an auto-handoff note, and
 REM cleanly restarts this stack. Named-mutex singleton = safe double-launch.
+call :log "service: runtime loop-liveness watchdog"
 start "iris-runtime-watchdog" /B "D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\iris_runtime_watchdog.py"
 
 REM Post-office (letters :5877) + monitor. Added 2026-07-06: no launcher started it,
 REM so any boot without a manual run left the letters channel dead. Idempotent
 REM (port-probe + pidfile inside); .venv python (system py lacks fastapi).
+call :log "service: post-office stack (letters 5877) - Wren's lifeline"
 call "D:\Wren-Companion\start_postoffice_stack.bat"
+call :log "service: post-office stack returned."
 
 REM Vector brain bridge (:8772) — Iris IS the robot's knowledge graph (2026-07-13).
 REM Idempotent: port-probe skips the launch if :8772 already answers.
@@ -128,6 +158,26 @@ REM --- at least sees the orb (and its dead-body state) rather than nothing.
 start "iris-orb-launcher" /B powershell -NoProfile -Command "$ok=$false; for($i=0; $i -lt 60 -and -not $ok; $i++){ try{ (New-Object Net.Sockets.TcpClient('127.0.0.1',5876)).Close(); $ok=$true }catch{ Start-Sleep -Seconds 3 } }; Start-Process 'D:\Wren-Companion\apps\ava-control\src-tauri\target\release\iris-control.exe'"
 
 REM The host IS the cognition. Run it in the foreground so this window is Iris.
-"D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\iris_body_host.py"
+REM stdout STAYS on the console (that window is Iris talking, do not swallow it);
+REM only stderr is teed into the launcher log, so a traceback that kills the host
+REM on an unattended boot is still readable tomorrow.
+call :log "starting iris_body_host.py in the FOREGROUND (model=%IRIS_MODEL%). Host stderr follows in this log."
+"D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\iris_body_host.py" 2>>"%IRISLOG%"
+set "RC=%ERRORLEVEL%"
+call :log "iris_body_host.py EXITED rc=%RC% (if this lands seconds after the start line, the host never really came up)"
+call :log "launcher END."
 
-endlocal
+REM `endlocal & exit /b %RC%` on ONE line: the whole line is parsed (and %RC%
+REM expanded) before endlocal discards the local scope. Also guards the fallthrough
+REM into :log below - never let execution walk into a subroutine.
+endlocal & exit /b %RC%
+
+REM ---------------------------------------------------------------------------
+REM :log <message>  - timestamped line to BOTH console and %IRISLOG%.
+REM Always pass the message QUOTED; %~1 strips the quotes. Keep messages free of
+REM & | > < ^ characters - cmd parses those before the subroutine ever sees them.
+REM ---------------------------------------------------------------------------
+:log
+echo [%DATE% %TIME%] %~1
+>>"%IRISLOG%" echo [%DATE% %TIME%] %~1
+exit /b 0
