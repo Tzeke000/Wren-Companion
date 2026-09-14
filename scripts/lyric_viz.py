@@ -2342,9 +2342,18 @@ class Renderer:
         spin turns these EDGE-ON for half of every revolution, where they
         collapse to a line and effectively disappear — so they get a gentle
         oscillation instead. Found by rendering the heart at 0/90/180/270 and
-        looking: two of the four angles were an invisible slab."""
+        looking: two of the four angles were an invisible slab.
+
+        2026-09-14: `logo3d` belongs here too and was missing. Zeke's Tzeke000
+        mark is a flat PNG, so it hit the exact failure this predicate exists
+        to prevent — on the "yeah!" TikTok cut the helmet went edge-on twice a
+        revolution and collapsed to a red splinter. `is_head` already
+        special-cases logo3d the same way; this just completes the pair, so the
+        logo now ROCKS instead of revolving. The helmet is his faceless-artist
+        brand mark — it vanishing on a loop is worse than it vanishing on any
+        other shape."""
         if not spec.startswith("model:"):
-            return False
+            return spec == "logo3d"
         return bool(self.poses().get(spec.split(":", 1)[1], {}).get("flat"))
 
     def _model_mesh(self, spec: str):
