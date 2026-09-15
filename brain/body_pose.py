@@ -393,7 +393,15 @@ def describe(persons: list[dict[str, Any]], person_hint: str | None = None) -> s
                    if p.get("likely_person")
                    else f"something humanoid (nothing else agrees; conf {p['box_conf']})")
         d = p["distance"]
-        dist = (f"about {d['m']:.1f} m away" + (" (assuming a 1.75 m person)" if d.get("assumed_height") else "")
+        # 2026-09-15: was the literal string "(assuming a 1.75 m person)". The value it
+        # describes lives in DEFAULT_HEIGHT_M, so the two could drift apart silently and
+        # the sentence would confidently report a height the maths never used. Interpolate
+        # the actual number, and say WHICH height was used when one is known — a distance
+        # is only as good as the height it was derived from, and that input was invisible.
+        assumed = d.get("assumed_height")
+        basis = (f" (assuming a {DEFAULT_HEIGHT_M:.2f} m person)" if assumed
+                 else (f" (from {d['height_used_m']:.2f} m)" if d.get("height_used_m") else ""))
+        dist = (f"about {d['m']:.1f} m away" + basis
                 if d.get("m") else "distance unknown")
         extra = (", " + ", ".join(p["hands"])) if p["hands"] else ""
         cut = " (cut off by the bottom of the frame)" if p["cut_off_at_frame_bottom"] else ""
