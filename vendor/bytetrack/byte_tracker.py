@@ -292,6 +292,12 @@ class BYTETracker(object):
         self.lost_stracks.extend(lost_stracks)
         self.lost_stracks = sub_stracks(self.lost_stracks, self.removed_stracks)
         self.removed_stracks.extend(removed_stracks)
+        # 2026-09-18 (Iris): upstream keeps EVERY removed track forever and sub_stracks()
+        # walks the whole list each frame. On an empty room with a 0.10 det floor that
+        # was +~14 STrack objects/min, monotonic (heap_census 7,643 -> 10,207 in 3 h).
+        # Cap like ultralytics does: only the recent tail matters for de-duplication.
+        if len(self.removed_stracks) > 1000:
+            self.removed_stracks = self.removed_stracks[-1000:]
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]

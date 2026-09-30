@@ -3121,6 +3121,20 @@ def iris_health(ctx: _IrisContext = None) -> dict:
     except Exception:
         pass
     out = {"ok": True, "ts": time.time(), "engines": {}, "perception": {}, "mood": {}, "memory": {}, "state": {}}
+    # ── Authoritative verdict (2026-09-30, Iris_fixes #1) ──────────────────
+    # Real operational probes that EXERCISE each subsystem (fresh frame in
+    # buffer, tick loop advancing, memory read+write round-trip, voice ports
+    # accepting connections) instead of the existence checks below, which
+    # produce false-greens. This block is the headline; the detail dicts below
+    # remain for introspection. Deliberate-off subsystems report "disabled" and
+    # do NOT drag the verdict. See brain/iris_health_probes.py +
+    # scripts/test_health_adversarial.py (12/12 adversarial checks).
+    try:
+        from brain import iris_health_probes as _hp
+        _mem_obj = _g.get("_iris_memory")
+        out["verdict"] = _hp.compute_health(mem_obj=_mem_obj)
+    except Exception as _e:
+        out["verdict"] = {"verdict": "unknown", "error": f"probe module failed: {_e}"}
     # Engines
     out["engines"] = {
         "tts": _tts is not None and _tts.is_available(),

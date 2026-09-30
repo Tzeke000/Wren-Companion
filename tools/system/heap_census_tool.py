@@ -98,6 +98,29 @@ def _heap_census_fn(*_args: Any, **kwargs: Any) -> dict[str, Any]:
                 big.append({"type": type(o).__name__, "len": len(o),
                             "sample_key_or_item": repr(
                                 next(iter(o), None))[:80]})
+                # 2026-09-18: a 51k-entry dict of "source:bucket:ms:hex" keys showed
+                # up here; one sample key cannot tell WHICH producer fills it or
+                # how old it is. For string-keyed dicts, add a prefix histogram
+                # and the oldest/newest millisecond field. Still read-only.
+                if isinstance(o, dict):
+                    try:
+                        import datetime as _dt
+                        ks = [k for k in o.keys() if isinstance(k, str)]
+                        pref = Counter(":".join(k.split(":")[:2]) for k in ks)
+                        ms = []
+                        for k in ks:
+                            parts = k.split(":")
+                            if len(parts) >= 4 and parts[2].isdigit():
+                                ms.append(int(parts[2]))
+                        big[-1]["str_keys"] = len(ks)
+                        big[-1]["key_prefix_top5"] = pref.most_common(5)
+                        if ms:
+                            big[-1]["oldest_key_iso"] = _dt.datetime.fromtimestamp(
+                                min(ms) / 1000).isoformat(timespec="seconds")
+                            big[-1]["newest_key_iso"] = _dt.datetime.fromtimestamp(
+                                max(ms) / 1000).isoformat(timespec="seconds")
+                    except Exception as e:
+                        out["errors"].append(f"container keys: {e!r}")
         out["big_containers"] = sorted(big, key=lambda d: -d["len"])[:10]
     except Exception as e:
         out["errors"].append(f"containers: {e!r}")
