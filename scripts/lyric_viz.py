@@ -293,7 +293,7 @@ NBARS = 40
 # every centrepiece visualization Renderer._viz can dispatch to. Single source
 # of truth so --viz validation can't drift from what the renderer supports.
 VIZ_MODES = ("radial", "bars_center", "bars", "wave", "tunnel", "supernova",
-             "kaleido", "ncs_ring", "tn_blob", "mcat_bars")
+             "kaleido", "ncs_ring", "tn_blob", "mcat_bars", "symbiote")
 
 
 def _ema(x: np.ndarray, tau_s: float, fps: int) -> np.ndarray:
@@ -1060,6 +1060,7 @@ class Renderer:
     _rot: float = 0.0                       # accumulated 3D rotation
     _shapes: "list | None" = None           # parsed shape list (set in __post_init__)
     _shape_last: int = -1                   # last slot index, for swap logging
+    _symb: "dict | None" = None             # symbiote viz state (droplets, tendrils, plate)
 
     # -- setup ------------------------------------------------------------
     def __post_init__(self):
@@ -1578,6 +1579,8 @@ class Renderer:
             self._viz_tn_blob(img, i, a)
         elif v == "mcat_bars":
             self._viz_mcat_bars(img, i, a)
+        elif v == "symbiote":
+            self._viz_symbiote(img, i, a)
         else:
             self._viz_bars_bottom(img, i, a)
         if self.style.particles:
@@ -1673,6 +1676,147 @@ class Renderer:
         cv2.circle(layer, (cx, cy), int(R0 * 0.94),
                    tuple(float(x) for x in col), 2, cv2.LINE_AA)
         img += layer + cv2.GaussianBlur(layer, (0, 0), 7) * (0.28 + 0.42 * a.rms[i])
+
+    def _viz_symbiote(self, img: np.ndarray, i: int, a: Analysis) -> None:
+        """SYMBIOTE -- Zeke 2026-09-18: "black liquid, almost like the Venom
+        symbiote, reacting to music" for the deathstep single "yeah!".
+
+        A black thing cannot be drawn ADDITIVELY on a black frame, so this viz
+        breaks the renderer's usual rule in two places: it lays a dim plate
+        under itself (a black mass needs something to be darker THAN), and the
+        mass OCCLUDES (img *= 1-S) before its highlights are added. Everything
+        that reads as "wet black" is the highlights, not the black:
+
+          body      = smoothed polar silhouette: spectrum lobes (as tn_blob)
+                      + a slow organic wobble + 7 drifting TENDRILS whose
+                      length rides the bass (and the drop);
+          droplets  = spawned on kicks, thrown outward, pulled back by a
+                      spring, merged into the body through a BLURRED HEIGHT
+                      FIELD -- the blur radius is the viscosity, so blobs
+                      neck and re-join like goo instead of popping;
+          shading   = normals from the height gradient -> Blinn specular
+                      (tight white-blue streak = wet), a broad oily sheen in
+                      the style's 2nd colour, and a fresnel RIM in the style's
+                      accent so the edge is always drawn.
+
+        Field is computed at 1/3 res and cubic-upsampled; the plate is cached."""
+        q = 3
+        w, h = self.W // q, self.H // q
+        st = self._symb
+        if st is None:
+            rng = np.random.default_rng(3)
+            yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+            Y, X = np.ogrid[0:self.H, 0:self.W]
+            d = np.sqrt(((X - self.W / 2) / (self.W / 2)) ** 2
+                        + ((Y - self.H * 0.45) / (self.H / 2)) ** 2)
+            g = np.clip(1.0 - d / 1.25, 0, 1)[..., None].astype(np.float32) ** 1.4
+            c_in = np.array((52.0, 46.0, 60.0), np.float32)
+            c_out = np.array((9.0, 8.0, 12.0), np.float32)
+            st = self._symb = {
+                "rng": rng, "xx": xx, "yy": yy, "drops": [],
+                "ang": rng.uniform(0, 2 * np.pi, 7),
+                "spin": rng.uniform(-0.7, 0.7, 7),
+                "last_kick": -99, "kick_env": 0.0,
+                "plate": c_out + (c_in - c_out) * g,
+            }
+        xx, yy = st["xx"], st["yy"]
+        rng = st["rng"]
+        rms, bass, high = float(a.rms[i]), float(a.bass[i]), float(a.high[i])
+        drop, kick = bool(a.drop[i]), bool(a.kick[i])
+        t = i / self.fps
+        st["kick_env"] = max(st["kick_env"] * 0.80, 1.0 if kick else 0.0)
+        ke = st["kick_env"]
+        cx, cy = w / 2.0, h * 0.45
+        R0 = h * 0.155 * (1.0 + 0.30 * bass + 0.12 * rms + 0.10 * ke)
+
+        # -- silhouette: spectrum lobes + wobble + tendrils ------------------
+        n = 180
+        half = n // 2
+        idx = (np.arange(half) * NBARS) // half
+        mag = a.bars[i, idx].astype(np.float32)
+        k = np.hanning(15).astype(np.float32); k /= k.sum()
+        mag = np.convolve(np.concatenate([mag[-14:], mag, mag[:14]]), k,
+                          "same")[14:-14]
+        mag = np.concatenate([mag, mag[::-1]])
+        th = np.linspace(-np.pi / 2, 1.5 * np.pi, n, endpoint=False)
+        wob = 0.09 * np.sin(3 * th + t * 1.3) + 0.05 * np.sin(5 * th - t * 0.9)
+        rr = R0 * (1.0 + wob + 0.85 * mag * (0.35 + 0.65 * rms))
+        st["ang"] += st["spin"] * (1.0 / self.fps) * (0.25 + 1.6 * bass)
+        tend = np.zeros(n, np.float32)
+        for ang in st["ang"]:
+            dth = np.angle(np.exp(1j * (th - ang)))
+            tend += np.exp(-(dth / 0.12) ** 2)
+        L = R0 * (0.95 * bass + (0.55 if drop else 0.0) + 0.30 * high + 0.35 * ke)
+        rr = rr + L * np.clip(tend, 0, 1) ** 1.3
+        poly = np.stack([cx + rr * np.cos(th), cy + rr * np.sin(th)], 1)
+        mask = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(mask, [poly.astype(np.int32).reshape(-1, 1, 2)], 255)
+        dist = cv2.distanceTransform(mask, cv2.DIST_L2, 3) / max(1.0, R0 * 0.85)
+        np.clip(dist, 0, 1, out=dist)
+        hfield = 1.0 - (1.0 - dist) ** 2          # rounded dome, curvature everywhere
+        # wet surface ripple: slow interference pattern, louder with rms
+        hfield += (0.05 + 0.06 * rms) * (np.sin(xx * 0.11 + t * 1.7)
+                                         * np.sin(yy * 0.13 - t * 1.1)) * (dist > 0)
+
+        # -- droplets: thrown on kicks, sprung back, merged through the blur --
+        if kick and i - st["last_kick"] > 3:
+            st["last_kick"] = i
+            for _ in range(2 + int(4 * bass)):
+                ang = rng.uniform(0, 2 * np.pi)
+                sp = (0.9 + 1.6 * bass) * R0 * 0.075
+                st["drops"].append([cx + np.cos(ang) * R0 * 0.9,
+                                    cy + np.sin(ang) * R0 * 0.9,
+                                    np.cos(ang) * sp, np.sin(ang) * sp, 0.0,
+                                    R0 * rng.uniform(0.22, 0.42)])
+        keep = []
+        for dr in st["drops"]:
+            dr[4] += 1
+            dr[0] += dr[2]; dr[1] += dr[3]
+            dr[2] += (cx - dr[0]) * 0.0055; dr[3] += (cy - dr[1]) * 0.0055
+            dr[2] *= 0.986; dr[3] *= 0.986
+            r = dr[5]
+            hfield += 0.80 * np.exp(-((xx - dr[0]) ** 2 + (yy - dr[1]) ** 2)
+                                    / (2.0 * (r * 0.75) ** 2))
+            if dr[4] < 110 and np.hypot(dr[0] - cx, dr[1] - cy) > R0 * 0.55:
+                keep.append(dr)
+        st["drops"] = keep[-40:]
+
+        # -- viscosity + shading ---------------------------------------------
+        hb = cv2.GaussianBlur(hfield, (0, 0), 3.2)
+        sil = np.clip((hb - 0.16) * 8.0, 0, 1)
+        gx = cv2.Sobel(hb, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(hb, cv2.CV_32F, 0, 1, ksize=3)
+        s_ = 9.0
+        nz = 1.0 / np.sqrt(1.0 + (gx * s_) ** 2 + (gy * s_) ** 2)
+        nx, ny = -gx * s_ * nz, -gy * s_ * nz
+        lx, ly, lz = -0.42, -0.62, 0.66
+        ln = float(np.sqrt(lx * lx + ly * ly + lz * lz)); lx, ly, lz = lx / ln, ly / ln, lz / ln
+        hx, hy, hz = lx, ly, lz + 1.0
+        hn = float(np.sqrt(hx * hx + hy * hy + hz * hz)); hx, hy, hz = hx / hn, hy / hn, hz / hn
+        ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0, 1)
+        ndoth = np.clip(nx * hx + ny * hy + nz * hz, 0, 1)
+        spec = ndoth ** 70 * (0.75 + 0.55 * high + 0.4 * ke)
+        sheen = ndoth ** 28 * 0.14
+        # rim = a THIN band around the silhouette threshold, not the whole
+        # outer slope (v2's (1-nz)^2.5 painted a pale halo ring)
+        rim = np.clip(1.0 - np.abs(hb - 0.24) / 0.09, 0, 1) ** 1.5 * (0.6 + 0.5 * rms)
+
+        def up(z):
+            return cv2.resize(z, (self.W, self.H), interpolation=cv2.INTER_CUBIC)
+        S = up(sil)[..., None]
+        pal0 = self._pal(); pal1 = self._pal(1)
+        img *= 0.30                                   # dim whatever bg was drawn
+        img += st["plate"] * (0.75 + 0.45 * rms + 0.30 * ke)
+        rim_col = np.array((150.0, 165.0, 200.0), np.float32) * 0.7 + pal0 * 0.3
+        shade = (up(ndotl)[..., None] * np.array((16.0, 13.0, 20.0), np.float32)
+                 + up(spec)[..., None] * np.array((228.0, 236.0, 255.0), np.float32)
+                 + up(sheen)[..., None] * pal1 * 0.45
+                 + up(rim)[..., None] * rim_col)
+        img *= (1.0 - S * 0.985)                      # the mass occludes
+        img += S * shade
+        # stash for symbiote_post(): re-occlude AFTER the style's frame-wide
+        # flash / rgb-split in _fx, or a kick paints the black mass red
+        st["post"] = (S, shade)
 
     def _viz_mcat_bars(self, img: np.ndarray, i: int, a: Analysis) -> None:
         """Monstercat's CLASSIC format — the only one of these archetypes with
@@ -2953,7 +3097,18 @@ class Renderer:
             self._viz_shape(img, i, a)
         self._corner(img, i, a)
         self._lyrics(img, i, t, a)
+        _pre = None
+        if self._symb is not None and self._symb.get("post") is not None:
+            _pre = img.copy()
         img = self._fx(img, i, a)
+        if _pre is not None:
+            # symbiote_post: inside the mass keep the PRE-fx pixels (the black,
+            # the highlights AND the title drawn over it); outside keep the
+            # style's flash / glitch / rgb-split. A kick no longer paints the
+            # mass red, and the title is not buried.
+            S, _shade = self._symb["post"]
+            img = _pre * S + img * (1.0 - S)
+            self._symb["post"] = None
         if self.bloom > 0:
             self._bloom(img, i, a)
         if self._viz_flash > 0.01:
@@ -3241,7 +3396,51 @@ def encode(out: Path, frames_iter, fps: int, audio_pcm: np.ndarray, sr: int,
 
 # ---------------------------------------------------------------------------
 
+def _analyze_cached(audio: Path, fps: int) -> tuple[Analysis, np.ndarray, int]:
+    """analyze() with a per-track cache on D: — profiled 2026-09-18: a 2 s test
+    render spent 456 of 519 s inside analyze() (librosa's numba gufuncs
+    recompile every run; the wav read alone took 100 s) and ~0.13 s/frame on
+    the actual frames. Iterating on a look was analysis-bound. Key = file
+    name + size + mtime + fps, so a re-exported master invalidates itself."""
+    try:
+        st = audio.stat()
+        cdir = REPO / "state" / "tzeke_songs" / ".analysis_cache"
+        cdir.mkdir(parents=True, exist_ok=True)
+        key = f"{audio.stem}_{st.st_size}_{int(st.st_mtime)}_{fps}"
+        cpath = cdir / (re.sub(r"[^A-Za-z0-9_.-]", "_", key) + ".npz")
+        if cpath.is_file():
+            d = np.load(str(cpath), allow_pickle=False)
+            fields = [f for f in Analysis.__dataclass_fields__]
+            kw = {f: (float(d[f]) if f == "bpm" else d[f]) for f in fields}
+            print(f"[lyric_viz] analysis: cache hit ({cpath.name})")
+            return Analysis(**kw), d["_pcm"], int(d["_sr"])
+    except Exception as e:  # cache is an optimisation, never a failure
+        print(f"[lyric_viz] analysis cache read skipped: {e!r}")
+        cpath = None
+    analysis, pcm, sr = analyze(audio, fps)
+    try:
+        if cpath is not None:
+            payload = {f: getattr(analysis, f) for f in Analysis.__dataclass_fields__}
+            payload["bpm"] = np.array(analysis.bpm, np.float64)
+            payload["_pcm"] = pcm
+            payload["_sr"] = np.array(sr, np.int64)
+            np.savez(str(cpath), **payload)
+            print(f"[lyric_viz] analysis: cached -> {cpath.name}")
+    except Exception as e:
+        print(f"[lyric_viz] analysis cache write skipped: {e!r}")
+    return analysis, pcm, sr
+
+
 def main() -> int:
+    # 2026-09-18: a full-song render at Normal priority starved the body's vision
+    # pipeline (live_analyze 25 ms -> 3.3 s; the attention layer stopped registering
+    # Zeke while he was in the room). Renders are batch work: run them below the
+    # runtime, always. Harmless when psutil is missing or on non-Windows.
+    try:
+        import psutil as _ps
+        _ps.Process().nice(_ps.BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--audio", required=True, type=Path)
     ap.add_argument("--lyrics", type=Path, default=None)
@@ -3408,7 +3607,7 @@ def main() -> int:
                          "(photosensitivity-safe; everything else unchanged)")
     ap.add_argument("--viz", default="",
                     help="override the style's centerpiece visualization: "
-                         "radial|bars_center|bars|wave|tunnel|supernova|kaleido"
+                         "radial|bars_center|bars|wave|tunnel|supernova|kaleido|symbiote"
                          ". COMMA-LIST to ROTATE through several on the beat "
                          "grid (see --viz-every), e.g. "
                          "'radial,tunnel,kaleido,bars_center'")
@@ -3496,7 +3695,7 @@ def main() -> int:
         else:
             lines = lines_from_transcript(heard)
 
-    analysis, pcm, sr = analyze(args.audio, args.fps)
+    analysis, pcm, sr = _analyze_cached(args.audio, args.fps)
     if sr > 48000:
         # hi-res masters (Zeke's love the mirror.wav is 192kHz float) break the
         # AAC encoder (avcodec_open2 err 22, caps at 96k) — resample to 48k.

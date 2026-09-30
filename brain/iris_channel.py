@@ -175,6 +175,22 @@ async def emit(content: str, source: str = "iris", **meta: str) -> bool:
             if now < _subsumption_until_ts:
                 return False
 
+    # pending_leak_2026-09-18: the session and rate-limit checks used to run
+    # AFTER habituation. A producer retrying one gated event at poll rate
+    # (camera loop, 1 Hz) then paid a habituation knockdown + a pending-action
+    # entry per retry, pinned its own bucket at the floor, and - because no
+    # ambient emit ever passed the gate again - the 60 s sweep never ran:
+    # 51,676 pending entries (49,654 of them iris-camera:zeke->no_face) and
+    # 18 h with no camera transition delivered. Side-effect-free drops go
+    # first now; the rate-limit slot is consumed only on an actual send.
+    with _session_lock:
+        session = _session
+    if session is None:
+        return False
+    limit = _rate_limits.get(source)
+    if limit is not None and (now - _last_emit_ts.get(source, 0.0)) < limit:
+        return False
+
     # Habituation gate (ambient only). Bucket key is (source, semantic_bucket).
     # Bucket comes from meta["habituation_bucket"] if provided, else from a
     # composite of meta["from_state"]+meta["to_state"] (for face transitions
@@ -202,29 +218,20 @@ async def emit(content: str, source: str = "iris", **meta: str) -> bool:
             import uuid as _uuid
             event_id = f"{source}:{bucket}:{int(now * 1000)}:{_uuid.uuid4().hex[:8]}"
             s = _hab.score(key, base_priority=1.0, event_id=event_id, now=now)
+            # Sweep BEFORE the floor check: a gated event still registered a
+            # pending entry, and gated events were the only kind for 18 h.
+            _hab.sweep_expired(now=now)
             if s < _HABITUATION_GATE_FLOOR:
                 return False
-            # Sweep expired actions opportunistically to bound pending dict
-            # size. Cheap — most calls find nothing to sweep.
-            _hab.sweep_expired(now=now)
         except Exception as e:
             # Habituation should never crash the channel. Log once and skip.
             print(f"[iris_channel] habituation gate error (skipped): {e!r}",
                   file=sys.stderr, flush=True)
 
-    # Rate-limit gate (per source)
-    limit = _rate_limits.get(source)
+    # Rate-limit slot is consumed here, after every gate passed (the check
+    # itself moved above the habituation block - see pending_leak_2026-09-18).
     if limit is not None:
-        last = _last_emit_ts.get(source, 0.0)
-        if (now - last) < limit:
-            return False
         _last_emit_ts[source] = now
-
-    # Snapshot the session under the lock; do I/O outside it
-    with _session_lock:
-        session = _session
-    if session is None:
-        return False
 
     # Stringify meta values (channel protocol requires string values)
     str_meta = {k: str(v) for k, v in meta.items() if v is not None}

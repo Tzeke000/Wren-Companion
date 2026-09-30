@@ -399,6 +399,18 @@ function Is-CCRunning {
 }
 
 # ---- Main loop ----
+# ---- Single-instance guard (2026-09-17) ----
+# The 09-12 cold boot spawned TWO of these (Iris-Watchdog-Ensure's logon + 10-min
+# triggers fired at once; ensure_watchdog.ps1 is probe-then-spawn with no lock) and
+# every restart until 09-17 ran twice: double port sweep, tier-3 bare-CLI twins.
+# A named mutex makes any second instance exit at once, whoever spawned it.
+$script:_wdMutexCreated = $false
+$script:_wdMutex = New-Object System.Threading.Mutex($true, "Global\IrisWatchdog_WrenCompanion", [ref]$script:_wdMutexCreated)
+if (-not $script:_wdMutexCreated) {
+    Write-WatchLog "another iris_watchdog.ps1 already holds the mutex - this instance exits (single-instance guard, 2026-09-17)"
+    exit 0
+}
+
 Write-WatchLog "watchdog starting (trigger=$TRIGGER_FILE inbox=$INBOX_DIR poll=${POLL_INTERVAL_S}s debounce=${DEBOUNCE_S}s)"
 
 $tmpDir = Split-Path $TRIGGER_FILE -Parent

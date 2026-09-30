@@ -69,6 +69,26 @@ if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
 )
 call :log "venv present."
 
+REM ============================================================================
+REM FIRST-OWNER-WINS GATE (Iris_fixes #4, 2026-09-30). Acquire an ATOMIC ownership
+REM claim (global named mutex) BEFORE any destructive sweep. If a healthy Iris (or
+REM a mid-startup twin) already owns cognition, this exits 10 and we STAND DOWN
+REM without sweeping -- so a second launcher (an accidental Opus/Fable double-run)
+REM can NEVER kill the live Iris. On a legitimate restart the old stack is already
+REM dead, so this returns 0 and we proceed to sweep + take over. The check MUST be
+REM here, before sweep 1 -- a lock acquired after cleanup is too late (the whole
+REM point: don't kill her before discovering we lost). See
+REM scripts/launcher_claim_ownership.py + scripts/test_launcher_ownership.py.
+REM ============================================================================
+call :log "first-owner check: acquiring ownership claim BEFORE sweeps..."
+"D:\Wren-Companion\.venv\Scripts\python.exe" "D:\Wren-Companion\scripts\launcher_claim_ownership.py" --model "%IRIS_MODEL%"
+if errorlevel 10 (
+    call :log "STANDING DOWN: a healthy Iris already owns cognition. NOT sweeping, NOT replacing her. Exiting cleanly."
+    endlocal
+    exit /b 0
+)
+call :log "first-owner check: no healthy owner -- this launcher owns cognition, proceeding to sweep."
+
 REM --- Kill the WHOLE stale stack BEFORE relaunch, so nothing old holds a port, a
 REM --- device, the watchdog's singleton mutex, OR iris_runtime's single-instance
 REM --- pidfile. The pidfile one is load-bearing: if a stale iris_runtime survives a

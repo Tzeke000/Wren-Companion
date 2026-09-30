@@ -450,6 +450,14 @@ def _mood_loop(root: Path) -> None:
 _camera_last_id: str = "init"  # sentinel; first real read sets it
 _camera_last_emit_ts: float = 0.0
 _camera_poll_interval_s = 1.0
+# pending_leak_2026-09-18: a transition whose emit keeps failing (rate
+# limit, no session, habituated) was retried every tick forever; each
+# retry habituated the bucket further, so it could never succeed, and the
+# state machine stayed stuck at the OLD state (zeke->no_face pending for
+# 18 h; his return could not fire because observed == last). After this
+# many failed attempts the transition is accepted unsent.
+_CAM_EMIT_RETRY_BUDGET = 120
+_camera_emit_fail_count = 0
 
 # Hysteresis tuning
 _CAM_CONF_LOW = 0.30   # below this = "no face" for hysteresis purposes
@@ -464,7 +472,7 @@ _camera_pending_count: int = 0     # consecutive ticks supporting the candidate
 
 
 def _camera_loop(g: dict[str, Any]) -> None:
-    global _camera_last_id, _camera_last_emit_ts
+    global _camera_last_id, _camera_last_emit_ts, _camera_emit_fail_count
     global _camera_pending_id, _camera_pending_count
     print("[attention_sources] camera watcher started", file=sys.stderr, flush=True)
 
@@ -566,7 +574,19 @@ def _camera_loop(g: dict[str, Any]) -> None:
                 _camera_last_id = observed
                 _camera_last_emit_ts = now
                 _camera_pending_count = 0
-            # else: don't update — channel may not be attached, retry next tick.
+                _camera_emit_fail_count = 0
+            else:
+                # Channel may not be attached / rate-limited / habituated:
+                # retry next tick, but not forever (pending_leak_2026-09-18).
+                _camera_emit_fail_count += 1
+                if _camera_emit_fail_count >= _CAM_EMIT_RETRY_BUDGET:
+                    print(f"[attention_sources] camera transition {_camera_last_id}->{observed} "
+                          f"accepted UNSENT after {_camera_emit_fail_count} failed emits",
+                          file=sys.stderr, flush=True)
+                    _camera_last_id = observed
+                    _camera_last_emit_ts = now
+                    _camera_pending_count = 0
+                    _camera_emit_fail_count = 0
 
         except Exception as e:
             print(f"[attention_sources] camera_loop error: {e!r}",
@@ -584,11 +604,13 @@ def _camera_loop(g: dict[str, Any]) -> None:
 
 _time_last_attach_ts_seen: float = 0.0
 _time_poll_interval_s = 30.0
+_TIME_EMIT_RETRY_BUDGET = 12   # 6 min of 30 s retries, then mark the attach seen
+_time_emit_fail_count = 0
 _TIME_ORIENTATION_GAP_THRESHOLD_S = 1800.0  # 30 min
 
 
 def _time_loop(root: Path) -> None:
-    global _time_last_attach_ts_seen
+    global _time_last_attach_ts_seen, _time_emit_fail_count
     print("[attention_sources] time watcher started", file=sys.stderr, flush=True)
 
     while True:
@@ -659,6 +681,15 @@ def _time_loop(root: Path) -> None:
             )
             if ok:
                 _time_last_attach_ts_seen = last_attach
+                _time_emit_fail_count = 0
+            else:
+                _time_emit_fail_count += 1
+                if _time_emit_fail_count >= _TIME_EMIT_RETRY_BUDGET:
+                    print("[attention_sources] time orientation dropped after "
+                          f"{_time_emit_fail_count} failed emits (pending_leak_2026-09-18)",
+                          file=sys.stderr, flush=True)
+                    _time_last_attach_ts_seen = last_attach
+                    _time_emit_fail_count = 0
 
         except Exception as e:
             print(f"[attention_sources] time_loop error: {e!r}",
