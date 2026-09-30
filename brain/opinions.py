@@ -48,19 +48,25 @@ def _save(base_dir: Path, st: dict[str, Any]) -> None:
 
 
 def _topic_freq(base_dir: Path, topic: str) -> int:
-    p = base_dir / "chatlog.jsonl"
-    if not p.is_file():
-        return 0
+    # Iris_fixes #8: chatlog.jsonl is the Ava-era log; on the Iris host the conversation lives
+    # in state/transcript.jsonl. Count both so an opinion can actually form here.
     t = (topic or "").lower().strip()
     c = 0
-    for line in p.read_text(encoding="utf-8", errors="replace").splitlines()[-400:]:
+    for p in (base_dir / "chatlog.jsonl", base_dir / "state" / "transcript.jsonl"):
+        if not p.is_file():
+            continue
         try:
-            row = json.loads(line)
-            content = str(row.get("content") or "").lower()
-            if t and t in content:
-                c += 1
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()[-400:]
         except Exception:
             continue
+        for line in lines:
+            try:
+                row = json.loads(line)
+                content = str(row.get("content") or "").lower()
+                if t and t in content:
+                    c += 1
+            except Exception:
+                continue
     return c
 
 
@@ -101,20 +107,24 @@ def form_opinion(topic: str, context: str, g: dict[str, Any]) -> dict[str, Any] 
             )
         )
     except Exception:
-        op = asdict(
-            Opinion(
-                topic=topic[:120],
-                stance="I think balance and clarity usually lead to better outcomes.",
-                confidence=0.56,
-                reasoning="This is a provisional stance derived from repeated conversation context.",
-                formed_from=context[:240],
-                ts_formed=time.time(),
-                times_expressed=0,
-            )
-        )
+        # Iris_fixes #8 (Zeke): "Remove or tighten generic fallback opinions that can
+        # accidentally become persistent beliefs after an LLM failure." Before this, a
+        # timeout wrote "I think balance and clarity usually lead to better outcomes."
+        # at 0.56 confidence — above get_opinion's 0.5 bar — as a PERMANENT opinion on
+        # any topic. Now an LLM failure forms no opinion at all.
+        return None
     existing.append(op)
     st["opinions"] = existing[-80:]
     _save(base_dir, st)
+    # Iris_fixes #8: an opinion is a belief of kind=opinion — register it so it enters the
+    # evidence → confidence → challenge → revision lifecycle instead of freezing here.
+    try:
+        from brain import belief_lifecycle
+        belief_lifecycle.hold(op["topic"], op["stance"], kind="opinion", source_kind="derived",
+                              source_ref="opinions.form_opinion", confidence=op["confidence"],
+                              note=op["reasoning"][:200])
+    except Exception:
+        pass
     return op
 
 

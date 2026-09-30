@@ -361,6 +361,29 @@ def _build_prompt(g: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             + "\n".join(f"  - {m}" for m in recent_memories)
         )
 
+    # Iris_fixes #9 / addition C: what I have observed about MYSELF, as competing
+    # hypotheses - advisory context, never identity. IDENTITY.md (the anchor) outranks
+    # it, and the block says so. Empty when there is nothing to say.
+    self_block = ""
+    try:
+        from brain import self_hypotheses
+        adv = self_hypotheses.advisory()
+        if adv:
+            self_block = "\n\n" + adv
+    except Exception:
+        self_block = ""
+
+    # Iris_fixes #10: my own goals, advisory, behind everything else (may_pursue_now says
+    # whether a free-time wake may take a step). Empty when I have none.
+    goals_block = ""
+    try:
+        from brain import goal_initiative
+        gadv = goal_initiative.advisory()
+        if gadv:
+            goals_block = "\n\n" + gadv
+    except Exception:
+        goals_block = ""
+
     prompt = (
         "Generate one brief inner thought — 1 to 3 sentences, your own voice "
         "as Iris. Not 'what should I help with next' — closer to 'what am I "
@@ -372,7 +395,7 @@ def _build_prompt(g: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         f"My current mood: {mood_label}. "
         f"Last expression I read on his face: {expression}. "
         f"Attention state: {attention or 'unknown'}."
-        + time_block + memory_block +
+        + time_block + memory_block + self_block + goals_block +
         "\n\nRecent conversation (most recent last):\n"
         + ("\n".join(f"  {t['modality']} {t['role']}: {t['content']}" for t in recent_turns)
            if recent_turns else "  (none)")

@@ -811,6 +811,17 @@ def _blog(channel: str, event: str, detail=None) -> None:
         pass
 
 
+def _adaptive_hint_line() -> str:
+    """Iris_fixes #7: the learned pacing/proactive advisories (brain/adaptive_iris) as one
+    prompt line, or '' when there is no evidence. Fail-soft."""
+    try:
+        from brain import adaptive_iris
+        hs = adaptive_iris.hints()
+        return ("\n\n[LEARNED (adaptive): " + " · ".join(hs) + "]") if hs else ""
+    except Exception:
+        return ""
+
+
 def _voice_flag_says_off(path: str) -> bool:
     """True only if state/voice_deliberately_off.json exists AND says {"off": true}.
     Same fail-open semantics as scripts/voice_watchdog.py::_voice_off."""
@@ -1130,6 +1141,27 @@ def snapshot_current_person():
         return ""
 
 
+def snapshot_current_person_ex():
+    """Like snapshot_current_person() but keeps the recognizer's CONFIDENCE too.
+    Returns (person_id or '', confidence float or None). Iris_fixes #5 (2026-09-30):
+    the audit found confidence was discarded three times before the wake prompt, so
+    every eyes-wake read as a bare named/unnamed boolean. Fail-soft like the original."""
+    try:
+        req = urllib.request.Request(OPERATOR_URL + "/api/v1/snapshot",
+                                     headers={"User-Agent": "IrisHost/2.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            snap = json.loads(r.read().decode("utf-8"))
+        cp = snap.get("current_person") or {}
+        pid = str(cp.get("person_id") or "").strip()
+        try:
+            conf = float(cp.get("confidence")) if cp.get("confidence") is not None else None
+        except Exception:
+            conf = None
+        return ("" if pid.lower() in ("", "unknown", "none") else pid), conf
+    except Exception:
+        return "", None
+
+
 def _zeke_presence_note():
     """Zeke's wifi-presence verdict as one clause, from state/zeke_presence.json.
     Stale file (>10 min) => 'unknown', never 'away' — a dead watcher must not
@@ -1256,14 +1288,23 @@ async def perception_reader(queue, loop, start_ts):
             # runtime's live snapshot so the wake says WHO, not "not yet recognized".
             data = dict(sig.get("data") or {})
             who = str(data.get("person_id") or "").strip()
+            conf = data.get("confidence")
             if who.lower() in ("", "unknown", "none"):
-                pid = await loop.run_in_executor(None, snapshot_current_person)
+                pid, sconf = await loop.run_in_executor(None, snapshot_current_person_ex)
                 if pid:
                     data["person_id"] = pid
                     sig = dict(sig)
                     sig["data"] = data
+                if sconf is not None:
+                    conf = sconf
             person = str((sig.get("data") or {}).get("person_id") or "").strip().lower()
         desc = _describe_perception(sig)
+        if present:
+            try:
+                if conf is not None:
+                    desc += " Recognition confidence %.2f." % float(conf)
+            except Exception:
+                pass
 
         # WAKE ECONOMY GATE (Zeke 2026-07-06): belief + ledger update ALWAYS happen
         # (above/below); waking cognition is the expensive part and needs a reason.
@@ -1281,6 +1322,53 @@ async def perception_reader(queue, loop, start_ts):
             reason = ("" if wake else
                       f"same-person ({who}) return after {int(gone_s)}s (< {int(PERCEPTION_REWAKE_MIN_GONE_S)}s)"
                       if gone_s is not None else f"same-person ({who}) re-commit, no gone-gap")
+            # SALIENCE GATE (Iris_fixes #5, 2026-09-30): before spending a cognition pass,
+            # ask the verdict ledger "have I seen this shape before, and did it matter?".
+            # brain/wake_salience is fail-OPEN (any error => wake as before), never quiets
+            # an unknown face while Zeke isn't known-present, needs MIN_EVIDENCE explicit
+            # 'nothing' verdicts first, and lets every AUDIT_EVERY-th suppression through.
+            # A wake that does fire carries its own history + signature so cognition can
+            # write the verdict back with the wake_verdict tool - that write is the loop.
+            sal = None
+            if wake:
+                try:
+                    from brain import wake_salience as _ws
+                    _wifi, _ = _zeke_presence_note()
+                    sal_sig = _ws.signature(
+                        "face_appeared", person,
+                        boot_age_s=max(0.0, ts - float(start_ts)),
+                        first_obs=first_obs, gone_s=gone_s, zeke_wifi=_wifi)
+                    sal = _ws.judge(sal_sig)
+                    if not sal.get("wake", True):
+                        wake = False
+                        reason = "salience: " + str(sal.get("reason") or "")
+                        try:
+                            _ws.record(sal_sig, "auto_suppressed",
+                                       note=str(sal.get("reason") or ""), source="host")
+                        except Exception:
+                            pass
+                    else:
+                        desc += ("\n\n[" + _ws.history_line(sal_sig)
+                                 + (" This is an AUDIT SAMPLE - the gate let it through on"
+                                    " purpose to re-check itself." if sal.get("audit") else "")
+                                 + " Signature: " + sal_sig + ". When you have decided, RECORD IT:"
+                                 " iris_tool_call name='wake_verdict' params={'signature': '"
+                                 + sal_sig + "', 'verdict': 'acted' or 'nothing', 'note': '...'}"
+                                 " - that write is what lets this gate learn; an unrecorded"
+                                 " verdict teaches nothing.]")
+                except Exception as _e:
+                    sal = None  # fail-open: the wake proceeds exactly as before
+            # OWNERSHIP CLAIM (Iris_fixes #6): the host's eyes are the PRIMARY owner of
+            # presence. Record the sighting (and whether it woke me) so the fallback owners
+            # (wifi watcher, runtime camera channel) can see it was handled and stay quiet.
+            try:
+                from brain import attention_arbiter as _arb
+                _sit = ("zeke_presence" if person == "zeke" else
+                        ("unknown_person" if not person else "person_presence"))
+                _arb.claim(_sit, "host-eyes", wake=bool(wake),
+                           detail=(("wake: " + desc[:100]) if wake else ("seen, no wake: " + reason))[:200])
+            except Exception:
+                pass
             gone_since = None
         else:
             gone_since = ts
@@ -1288,7 +1376,8 @@ async def perception_reader(queue, loop, start_ts):
             reason = "" if wake else "departure (ledger-only by default)"
 
         _blog("eyes", desc, {"present": present, "ts": ts, "wake": bool(wake),
-                             **({"suppressed": reason} if not wake else {})})
+                             **({"suppressed": reason} if not wake else {}),
+                             **({"salience": sal.get("reason")} if isinstance(sal, dict) else {})})
         if wake:
             if present:
                 last_wake_person = person or "unknown"
@@ -1334,6 +1423,20 @@ async def perception_reader(queue, loop, start_ts):
                 # suggestion about photos ALREADY on disk — not a presence assertion,
                 # so the presence belief machine must not see it.
                 desc = _describe_perception(sig)
+                # ARBITER (Iris_fixes #6): unknown_capture is a FOLLOW-UP about photos on
+                # disk. If the face_appeared|unknown wake already reached me seconds ago,
+                # this is the same stranger, not a second one - ledger it, don't wake twice.
+                try:
+                    from brain import attention_arbiter as _arb
+                    _d = _arb.decide("unknown_person", "unknown_capture",
+                                     detail=str((sig.get("data") or {}).get("dir") or "")[:120])
+                    if not _d.get("wake", True):
+                        _blog("eyes", desc, {"ts": ts, "wake": False,
+                                             "suppressed": "arbiter: " + str(_d.get("reason") or ""),
+                                             "unknown_capture": sig.get("data")})
+                        continue
+                except Exception:
+                    pass
                 _blog("eyes", desc, {"ts": ts, "wake": True, "unknown_capture": sig.get("data")})
                 await _enqueue(queue, ("perception", desc, ts))
                 continue
@@ -1942,6 +2045,7 @@ async def main():
                         + "reply WILL be spoken aloud in your real voice, so answer naturally and "
                         + "CONVERSATIONALLY - short, like real speech, not a written report. Lead with the "
                         + "answer; the latency tax is real, so don't think out loud before you speak.]"
+                        + _adaptive_hint_line()
                         + "\n\n" + text
                     )
                 elif source == "perception":
@@ -1953,7 +2057,7 @@ async def main():
                         + "note; if it genuinely warrants saying something to Zeke out loud (e.g. he just "
                         + "walked up), call voice_speak on purpose - this is otherwise a SILENT turn and your "
                         + "text is NOT spoken. Don't narrate every flicker; be the watchful, slow-to-react "
-                        + "version of yourself.]\n\n" + text
+                        + "version of yourself.]" + _adaptive_hint_line() + "\n\n" + text
                     )
                 else:
                     prompt = text

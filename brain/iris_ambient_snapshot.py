@@ -205,6 +205,52 @@ def _inner_line(root: Path, g: dict[str, Any]) -> str:
     return f"[inner] last thought{age_str}: {text[:140]!r}"
 
 
+def _adaptive_line(root: Path) -> str:
+    """'[adaptive] pacing 0.31 (...) · proactive 0.20 (...)' — the learned weights from
+    brain/adaptive_iris (Iris_fixes #7) rendered as advisories. Empty when there is no
+    evidence yet; never raises."""
+    try:
+        from brain import adaptive_iris
+        hs = adaptive_iris.hints()
+        return ("[adaptive] " + " · ".join(hs)) if hs else ""
+    except Exception:
+        return ""
+
+
+def _self_line(root: Path) -> str:
+    """'[self] reserved: undistinguished · records_vs_acts: leaning acts' - the self-hypotheses
+    verdicts (Iris_fixes #9). Advisory; empty when none; never raises."""
+    try:
+        from brain import self_hypotheses
+        st = self_hypotheses.status()
+        bits = []
+        for tr in (st.get('traits') or [])[:3]:
+            v = str(tr.get('verdict') or '')
+            short = v.split(' (')[0].split(' — ')[0]
+            bits.append('%s: %s' % (tr.get('trait'), short))
+        return ('[self] ' + ' · '.join(bits) + ' (hypotheses, not identity)') if bits else ''
+    except Exception:
+        return ''
+
+
+def _goals_line(root: Path) -> str:
+    """'[goals] 2 active; next: read uvicorn serve loop (free now)' (Iris_fixes #10). Never raises."""
+    try:
+        from brain import goal_initiative
+        gs = goal_initiative.active()
+        if not gs:
+            return ''
+        nxt = goal_initiative.next_actions(1)
+        ok, why = goal_initiative.may_pursue_now(None)
+        line = '[goals] %d active' % len(gs)
+        if nxt:
+            line += '; next: ' + str(nxt[0].get('next_step') or '')[:70]
+        line += ' (' + ('free to take a step' if ok else 'waiting: ' + why[:50]) + ')'
+        return line
+    except Exception:
+        return ''
+
+
 def build(g: dict[str, Any], root: Path) -> str:
     """Build the full ambient snapshot as a multi-line string.
 
@@ -241,6 +287,24 @@ def build(g: dict[str, Any], root: Path) -> str:
         l = _letters_line(root)
         if l:
             lines.append(l)
+    except Exception:
+        pass
+    try:
+        a = _adaptive_line(root)
+        if a:
+            lines.append(a)
+    except Exception:
+        pass
+    try:
+        sl = _self_line(root)
+        if sl:
+            lines.append(sl)
+    except Exception:
+        pass
+    try:
+        gl = _goals_line(root)
+        if gl:
+            lines.append(gl)
     except Exception:
         pass
     try:

@@ -173,6 +173,22 @@ def write_state(d: dict) -> None:
         pass
 
 
+def arbiter_allows(situation: str, source: str, detail: str) -> bool:
+    """Iris_fixes #6: the camera (body host) is the PRIMARY owner of Zeke's presence; this
+    watcher is a FALLBACK. If the host's eyes already woke her about him inside the window,
+    this arrival is a duplicate -> log it, do not wake her twice. Fail-open (True)."""
+    try:
+        sys.path.insert(0, str(REPO))
+        from brain import attention_arbiter as arb
+        d = arb.decide(situation, source, detail=detail)
+        log_event("arbiter", {"situation": situation, "role": d.get("role"),
+                              "wake": d.get("wake"), "reason": str(d.get("reason") or "")[:160]})
+        return bool(d.get("wake", True))
+    except Exception as e:
+        log_event("arbiter_fail", {"err": repr(e)[:200]})
+        return True
+
+
 def notify_iris(text: str) -> None:
     """Wake cognition through the chat bridge (VECTOR-SENSE pattern)."""
     try:
@@ -214,7 +230,10 @@ def main() -> int:
                     was = present
                     present, since = True, now_iso()
                     log_event("arrived", {"ip": ip, "was": was})
-                    if was is False:   # real transition, not first startup read
+                    if was is False and arbiter_allows(
+                            "zeke_presence", "wifi", "phone joined wifi ip=" + str(ip)):
+                        # real transition, not first startup read, and not already
+                        # handled by the camera (arbiter)
                         notify_iris(
                             "Zeke's phone just JOINED the wifi — he is back in "
                             "the home. CHECK BEFORE GREETING: the camera "
@@ -232,7 +251,8 @@ def main() -> int:
                     was = present
                     present, since = False, now_iso()
                     log_event("left", {"last_ip": last_ip, "was": was})
-                    if was is True:
+                    if was is True and arbiter_allows(
+                            "zeke_absence", "wifi", "phone off wifi after %d misses" % misses):
                         notify_iris(
                             "Zeke's phone DROPPED off the wifi (gone ~"
                             f"{MISS_N} checks) — he has likely left the "

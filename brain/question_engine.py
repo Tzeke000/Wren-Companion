@@ -101,7 +101,15 @@ class QuestionEngine:
         return any(kw in win for kw in _BUSY_KEYWORDS)
 
     def cooldown_remaining(self) -> float:
-        return max(0.0, _COOLDOWN_BETWEEN_QUESTIONS_SEC - (time.time() - self._last_question_ts))
+        # Iris_fixes #7: the cooldown is a PROACTIVE threshold, so the learned
+        # proactive-trigger usefulness scales it (0.5 neutral → ×1; low usefulness →
+        # up to ×3 longer; high → ×0.5). No evidence → ×1, i.e. the old behaviour.
+        try:
+            from brain import adaptive_iris
+            scale = float(adaptive_iris.cooldown_scale())
+        except Exception:
+            scale = 1.0
+        return max(0.0, _COOLDOWN_BETWEEN_QUESTIONS_SEC * scale - (time.time() - self._last_question_ts))
 
     # ── candidate selection ────────────────────────────────────────────────────
 
