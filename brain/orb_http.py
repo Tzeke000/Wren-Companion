@@ -739,6 +739,12 @@ def signals_since(after: float = 0.0, types: str = "") -> dict:
     face_lost). FAIL-OPEN: a missing/var bus returns an empty list, never an error."""
     bus = _g.get("_signal_bus")
     now = time.time()
+    # Iris_fixes #6: this poll IS the body host's eyes heartbeat. attention_arbiter reads the
+    # stamp so the runtime's own camera channel stands by while the host (primary) is alive.
+    try:
+        _g["_host_eyes_poll_ts"] = now
+    except Exception:
+        pass
     if bus is None:
         return {"ok": True, "signals": [], "now": now}
     try:

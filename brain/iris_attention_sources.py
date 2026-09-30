@@ -556,6 +556,28 @@ def _camera_loop(g: dict[str, Any]) -> None:
                 f"Face transition: {_camera_last_id} -> {observed}",
             )
 
+            # ARBITER (Iris_fixes #6): the body host's eyes poller is the PRIMARY owner of
+            # presence; this channel emit was a second system deciding the same event. Stand
+            # by while the host is alive (it polled /api/v1/signals within HOST_EYES_ALIVE_S)
+            # or already claimed the situation; emit only as the FALLBACK. Fail-open.
+            try:
+                from brain import attention_arbiter as _arb
+                _sit = ("zeke_presence" if observed == "zeke" else
+                        "unknown_person" if observed == "unknown_face" else "camera_transition")
+                _alive, _age = _arb.host_eyes_alive(g, now=now)
+                _d = _arb.decide(_sit, "runtime-camera", detail=desc, primary_alive=_alive)
+            except Exception:
+                _d = {"wake": True, "role": "error"}
+            if not _d.get("wake", True):
+                print(f"[attention_sources] camera transition {_camera_last_id}->{observed} "
+                      f"left to the host ({_d.get('role')}: {_d.get('reason')})",
+                      file=sys.stderr, flush=True)
+                _camera_last_id = observed
+                _camera_last_emit_ts = now
+                _camera_pending_count = 0
+                _camera_emit_fail_count = 0
+                continue
+
             emit_content = (
                 f"Camera: {desc} (confidence={confidence:.2f}). "
                 f"Surfaced for ambient awareness; call mcp__iris__screen_grab "

@@ -216,6 +216,12 @@ def prioritize_curiosities(g: dict[str, Any]) -> list[dict[str, Any]]:
         thought_score = min(1.0, float(row.get("times_thought_about") or 1) / 8.0)
         pri = float(row.get("priority") or 0.4)
         score = 0.4 * recency_score + 0.3 * thought_score + 0.3 * pri
+        # Iris_fixes #10: a topic linked to one of MY goals gets a bounded boost (<= 0.2).
+        try:
+            from brain import goal_initiative
+            score += float(goal_initiative.curiosity_boost(str(row.get("topic") or "")))
+        except Exception:
+            pass
         scored.append((score, row))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [r for _, r in scored[:3]]

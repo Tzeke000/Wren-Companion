@@ -170,6 +170,20 @@ def do_leisure_activity(g: dict[str, Any], base: Path) -> str:
     except ImportError:
         weights.pop("play_dino_game", None)
 
+    # Iris_fixes #10: one of MY goals may claim a free-time slot - bounded (about a third
+    # of slots at most, never twice within an hour) and only when goal_initiative's
+    # precedence check says nothing else needs me. Fail-open: no candidate, no change.
+    goal_cand = None
+    try:
+        from brain import goal_initiative
+        goal_cand = goal_initiative.leisure_candidate(g)
+        if goal_cand:
+            share = float(goal_cand.get("weight_share") or 0.0)
+            others = float(sum(weights.values())) or 1.0
+            weights["pursue_goal_step"] = max(1.0, others * share / max(1e-6, (1.0 - share)))
+    except Exception:
+        goal_cand = None
+
     activities = list(weights.keys())
     probs = [weights[a] for a in activities]
     total = sum(probs)
@@ -178,7 +192,29 @@ def do_leisure_activity(g: dict[str, Any], base: Path) -> str:
     chosen = random.choices(activities, weights=probs)[0]
 
     notes = ""
-    if chosen == "journal_entry":
+    if chosen == "pursue_goal_step":
+        # The step itself is cognition's to take: hand it to me as an LLM-bridge request
+        # (non-blocking - the Stop hook / idle nudge delivers it) and record the slot.
+        try:
+            from brain import goal_initiative, iris_llm
+            gl = (goal_cand or {}).get("goal") or {}
+            rid = iris_llm.submit(
+                "[FREE-TIME GOAL STEP - from the leisure chooser, not Zeke. Precedence check passed: "
+                + str((goal_cand or {}).get("why") or "") + ".]" + "\n"
+                + "One of your own goals has a next step waiting:" + "\n"
+                + "  goal: " + str(gl.get("description") or "") + "\n"
+                + "  next step: " + str(gl.get("next_step") or "") + "\n"
+                + "Take the step now if it is safe and small enough for one turn (read, measure, draft); "
+                + "then RECORD it: iris_tool_call name='goal' params={'action':'step','id':'" + str(gl.get("id") or "")
+                + "','note':'<what you actually did>','next_step':'<the next one>'}. If it is not the moment, "
+                + "reply with one line saying why and take no step - that is a fine outcome. Reply via llm_reply.",
+                kind="goal_step", requester="leisure",
+                context={"goal_id": gl.get("id"), "next_step": gl.get("next_step")})
+            goal_initiative.mark_leisure_goal()
+            notes = "handed goal step to cognition (request %s): %s" % (rid, str(gl.get("next_step") or "")[:100])
+        except Exception as e:
+            notes = "goal step hand-off failed: %r" % (e,)
+    elif chosen == "journal_entry":
         notes = _journal_entry(g, base)
     elif chosen == "browse_curiosity_topic":
         notes = _browse_curiosity(g)

@@ -180,24 +180,16 @@ def _has_opinion_basis_contradicting(g: dict[str, Any], user_input: str) -> tupl
             break
     if matched_pattern is None:
         return False, ""
+    # Iris_fixes #8: this used to parse state/opinions.json as {topic: body} — a shape the
+    # writer (opinions.py) never produced ({"opinions": [...]}), so Track A could never fire.
+    # Beliefs (incl. opinions, kind=opinion) now live in brain/belief_lifecycle; ask it.
     try:
-        from pathlib import Path as _P
-        base = _P(g.get("BASE_DIR") or ".")
-        opinions_p = base / "state" / "opinions.json"
-        if opinions_p.exists():
-            data = json.loads(opinions_p.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data:
-                # Find an opinion topically connected to the claim
-                claim_words = set(re.findall(r"\b\w{4,}\b", text_l))
-                for topic, body in data.items():
-                    topic_l = topic.lower()
-                    body_str = str(body) if not isinstance(body, dict) else str(body.get("opinion") or body.get("text") or "")
-                    if any(w in topic_l or w in body_str.lower() for w in claim_words):
-                        return True, f"Stored opinion on '{topic}': {body_str[:120]}"
+        from brain import belief_lifecycle
+        for b in belief_lifecycle.contradictions_for(user_input or ""):
+            return True, f"Stored belief on '{b['subject']}' (conf {b['effective_confidence']:.2f}): {b['statement'][:120]}"
     except Exception:
         pass
     return False, ""
-
 
 def check_for_disagreement(
     g: dict[str, Any],

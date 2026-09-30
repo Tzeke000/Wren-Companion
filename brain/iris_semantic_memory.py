@@ -151,6 +151,14 @@ def search(query: str, k: int = 5,
                 "tags": tags,
                 "distance": float(dists[i]) if i < len(dists) else 0.0,
             })
+        # Iris_fixes #7: memory usefulness → retrieval ORDER. Blend chroma distance with
+        # each hit's effective (access-boosted, decayed) importance; blend strength is the
+        # learned memory_usefulness weight, and with no evidence the order is untouched.
+        try:
+            from brain import adaptive_iris
+            out = adaptive_iris.rerank_memories(out)
+        except Exception:
+            pass
         # Phase 45: retrieval strengthens. Bump access metadata for each
         # hit. Doesn't fail the search if record_access errors.
         try:
