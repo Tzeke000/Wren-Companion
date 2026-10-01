@@ -1150,6 +1150,7 @@ def _battery_watch_loop() -> None:
     while True:
         level = volts = on_charger = None
         ok = False
+        err = None   # 2026-10-01 (1.3): why the read failed, surfaced in the json
         try:
             d = requests.get(f"{WIREPOD_SDK}/get_battery",
                              params={"serial": SERIAL}, timeout=8).json()
@@ -1160,8 +1161,9 @@ def _battery_watch_loop() -> None:
             last_on_charger = on_charger
             lost_streak = 0   # contact restored — next loss alarms promptly again
             COOLDOWN["lost_contact"] = 600.0
-        except Exception:
+        except Exception as e:
             ok = False
+            err = repr(e)[:200]
         try:
             # ATOMIC write (2026-07-31). This was a bare write_text, which
             # truncates-then-fills and leaves a window where a concurrent
@@ -1176,7 +1178,8 @@ def _battery_watch_loop() -> None:
             tmp = BATTERY_JSON.with_suffix(".json.tmp")
             tmp.write_text(_json.dumps(
                 {"ok": ok, "level": level, "volts": volts,
-                 "on_charger": on_charger, "ts": time.time()}), encoding="utf-8")
+                 "on_charger": on_charger, "ts": time.time(),
+                 "error": err}), encoding="utf-8")
             tmp.replace(BATTERY_JSON)
         except Exception:
             pass
