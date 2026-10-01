@@ -1038,6 +1038,34 @@ def _prior_handoff_block():
         return ""
 
 
+async def _supervised(name, factory, *, backoff_s=5.0):
+    """Keep a long-lived task alive (2026-10-01, the dead eye poller). A task held in `tasks` that
+    raises dies SILENTLY - asyncio only reports an unretrieved exception when the task object is
+    garbage-collected, and ours never are. This logs the traceback, ledgers it, DMs Zeke ONCE per
+    task name, waits `backoff_s` and runs the factory again. CancelledError passes through."""
+    warned = False
+    while True:
+        try:
+            await factory()
+            print("\n[host] task " + name + " returned; restarting in " + str(backoff_s) + "s", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            import traceback
+            print("\n[host] TASK DIED: " + name + ": " + repr(e) + "\n" + traceback.format_exc(),
+                  file=sys.stderr, flush=True)
+            _blog("host", "task died", {"task": name, "error": repr(e)[:300]})
+            if _hh is not None and not warned:
+                warned = True
+                try:
+                    _hh.discord_send(load_bot_token(), DISCORD_CHANNEL_ID,
+                                     "\u26a0 host task `" + name + "` died (" + repr(e)[:120]
+                                     + ") - respawning it; traceback in state/launcher_boot.log")
+                except Exception:
+                    pass
+        await asyncio.sleep(backoff_s)
+
+
 _HOLD_REF = {"turn": None}   # set by hold_sentinel so the CLI stderr tap can reach the detector
 
 
@@ -1384,11 +1412,17 @@ async def perception_reader(queue, loop, start_ts):
           + "; hysteresis lost=" + str(PERCEPTION_CONFIRM_LOST_S) + "s appear="
           + str(PERCEPTION_CONFIRM_APPEAR_S) + "s).")
 
-    async def _commit(sig, present, ts):
+    async def _commit_inner(sig, present, ts):
         nonlocal announced_present, last_wake_person, gone_since
         first_obs = announced_present is None
         announced_present = present
         person = ""
+        # 2026-10-01: these were only assigned on the 'present' branch; the departure branch
+        # then raised UnboundLocalError at the ledger write and KILLED the whole eye poller.
+        sal = None
+        conf = None
+        wake = False
+        reason = ""
         if present:
             # The appear held its window — the recognizer has had time to converge.
             # If the signal's own person_id is still unnamed, upgrade it from the
@@ -1489,6 +1523,16 @@ async def perception_reader(queue, loop, start_ts):
             if present:
                 last_wake_person = person or "unknown"
             await _enqueue(queue, ("perception", desc, ts))
+
+    async def _commit(sig, present, ts):
+        """Fail-soft wrapper (2026-10-01): a commit error is logged + ledgered, never fatal to the eyes."""
+        try:
+            await _commit_inner(sig, present, ts)
+        except Exception as e:
+            import traceback
+            print("\n[host] perception commit error (non-fatal): " + repr(e) + "\n" + traceback.format_exc(),
+                  file=sys.stderr, flush=True)
+            _blog("eyes", "commit error (non-fatal)", {"ts": ts, "present": present, "error": repr(e)[:300]})
 
     while True:
         await asyncio.sleep(PERCEPTION_POLL_INTERVAL)
@@ -2036,7 +2080,8 @@ async def main():
                 except Exception as e:
                     print("[host] voice ears: OFF - daemon ping failed: " + repr(e), file=sys.stderr)
                 if daemon_up:
-                    tasks.append(asyncio.create_task(voice_reader(queue, loop, mic_gate)))
+                    tasks.append(asyncio.create_task(_supervised(
+                        "voice_reader", lambda: voice_reader(queue, loop, mic_gate))))
                     if MIC_WARDEN_ON:
                         tasks.append(asyncio.create_task(mic_warden(loop, mic_gate, turn)))
                         print("[host] mic warden: ON - continuous mouth-gate (1/s daemon poll).")
@@ -2052,7 +2097,10 @@ async def main():
             # Gated on PERCEPTION_ON; fail-soft if the operator endpoint isn't up yet (the
             # self-heal attach may still be settling - the poller just retries each tick).
             if PERCEPTION_ON and PERCEPTION_WAKE_SIGNALS:
-                tasks.append(asyncio.create_task(perception_reader(queue, loop, start_ts)))
+                # Respawn passes time.time() (not start_ts) so a restarted poller never replays
+                # the signal history since boot as fresh wakes.
+                tasks.append(asyncio.create_task(_supervised(
+                    "perception_reader", lambda: perception_reader(queue, loop, time.time()))))
             else:
                 print("[host] perception eyes: OFF - IRIS_PERCEPTION disabled or no wake signals.",
                       file=sys.stderr)
@@ -2065,7 +2113,8 @@ async def main():
                 except Exception as e:
                     baseline = None
                     print("[host] discord baseline fetch failed (will still poll): " + repr(e), file=sys.stderr)
-                tasks.append(asyncio.create_task(discord_poller(token, queue, loop, baseline)))
+                tasks.append(asyncio.create_task(_supervised(
+                    "discord_poller", lambda: discord_poller(token, queue, loop, baseline))))
                 print("[host] discord inbound: ON - polling for DMs from Zeke every "
                       + str(int(POLL_INTERVAL)) + "s.")
             else:
@@ -2079,14 +2128,16 @@ async def main():
                 except Exception as e:
                     letter_baseline = None
                     print("[host] postoffice baseline fetch failed (will still poll): " + repr(e), file=sys.stderr)
-                tasks.append(asyncio.create_task(letters_poller(secret, queue, loop, letter_baseline)))
+                tasks.append(asyncio.create_task(_supervised(
+                    "letters_poller", lambda: letters_poller(secret, queue, loop, letter_baseline))))
                 print("[host] letter inbound: ON - polling the post-office every "
                       + str(int(LETTER_POLL_INTERVAL)) + "s.")
             else:
                 print("[host] letter inbound: OFF - no ~/.iris_sibling_secret found.", file=sys.stderr)
-            tasks.append(asyncio.create_task(llm_pending_poller(queue, loop, turn)))
+            tasks.append(asyncio.create_task(_supervised(
+                "llm_pending_poller", lambda: llm_pending_poller(queue, loop, turn))))
             if turn.hold is not None:
-                tasks.append(asyncio.create_task(hold_sentinel(turn, loop)))
+                tasks.append(asyncio.create_task(_supervised("hold_sentinel", lambda: hold_sentinel(turn, loop))))
                 print("[host] hold sentinel: ON - an active turn silent " + str(int(_hh.HOLD_AFTER_S))
                       + "s with no tool in flight => state/cognition_held.json + one Discord DM (round-2 fix 1.2).")
             print("[host] llm-pending idle nudge: ON - polling state/iris_llm every "

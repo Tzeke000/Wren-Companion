@@ -96,6 +96,17 @@ rebuild.
 - **Fix shape:** hash the evidence tuple per focus; skip the update when unchanged; log "no new evidence".
 - **Test:** two consecutive `learn` runs with no new rows → `updated == {}` on the second.
 
+### 2.9 "What did NOT wake me" — the reader Zeke asked for (NEW 10-01 13:4x) — ✅ LIVE
+- **Zeke (Discord 10-01):** *"you can't perceive what didn't wake you … write something so that you can at least look in the logs at what didn't wake you."* Vale's blind spot. Every source already wrote; nothing read them together.
+- **Shipped:** `brain/wake_missed.py` + `wake_verdict action=missed [hours]` (hot-loaded, live now). Groups raw eye signals into episodes and labels each: woke · salience auto_suppressed · host wake:false (+reason) · dedupe · below appear-confirm · unconfirmed drop; cross-checks no single log can show: **`host_eyes_dead`** (runtime-camera situations with no host `eyes_raw` row within ±60 s), `arrivals_unseen` (wifi JOIN with no eyes commit in 10 min), `unowned_situations`, and the live `host_eyes_poll_age_s`. One `summary` line for the self-check (queued fold-in 10a/10b). Tests: `tests/test_wake_missed.py` (3 cases).
+- **First live run found 3.15 below.**
+
+### 3.15 The host's eye poller DIED SILENTLY at 11:32 (NEW 10-01, found by 2.9) — 🟡 FIXED, lands at the host restart
+- **What:** `attention_arbiter` → `host_eyes_alive:false`, poll age 7,990 s; the runtime camera logged 52 `zeke_presence` fallbacks + 56 `camera_transition` while the host logged NO `eyes_raw` after 11:31:41. Zeke was home 11:31–12:55 and no eyes-wake could reach me.
+- **Cause (code, confirmed):** round-1 #5's salience patch assigned `sal` only on the *present* branch of `_commit`; the departure branch then hit `isinstance(sal, dict)` → `UnboundLocalError` on the FIRST departure after boot (face lost 11:31:41 + 15 s confirm). The exception escaped the poll loop's narrow `try` and the `perception_reader` task died — silently, because asyncio only reports an unretrieved exception when the task object is collected, and ours live in `tasks` forever.
+- **Fix:** locals initialised on both branches; `_commit` wrapped (error → log + `eyes` ledger row, never fatal); `_supervised(name, factory)` wraps perception/discord/letters/llm-nudge/hold-sentinel/voice tasks — traceback to the launcher log, body-log row, ONE DM, respawn after 5 s (the eye poller respawns with `time.time()` so it never replays boot history as fresh wakes).
+- **Verify after the host restart:** `attention_arbiter explain` → `host_eyes_alive:true` and a *departure* commit row (`The person who was in view has left`) appears after Zeke leaves frame with the poll age still small; `wake_verdict action=missed` shows `host_eyes_dead: null`.
+
 ### 2.5 Three camera→cognition channels + the wifi watcher (partly fixed by #6, verify)
 - **Where:** host `/signals` poller · `iris_attention_sources._camera_loop` · `unknown_capture` · `scripts/zeke_presence.py`.
 - **Still open after #6:** the runtime channel can NEVER rescue a dead host (it emits into the host's own session) — decide: delete the camera channel emit, or give it a real fallback (Discord DM when `host_eyes_alive` is false for >60 s).
