@@ -993,6 +993,29 @@ LLM_PENDING_TTL_S = float(os.environ.get("IRIS_LLM_PENDING_TTL_S", "600"))
 _LLM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "iris_llm")
 
 
+def _prior_handoff_block():
+    """Round-2 fix 3.3 (2026-10-01): state/handoff.json was write-only — the runtime rewrote it
+    every 5 min and nothing ever read it. The host now reads it ONCE at boot and prepends a short
+    labelled block to the FIRST turn. It is the runtime's last snapshot (mood, anchors, tasks),
+    not live state and not the cognition handoff (that is the memory note CORE marks READ FIRST)."""
+    try:
+        from pathlib import Path as _P
+        from brain import handoff as _ho
+        h = _ho.read_handoff(_P(REPO_ROOT))
+        if not h:
+            return ""
+        age_s = max(0.0, time.time() - float(h.get("ts") or 0.0))
+        body = _ho.handoff_summary_for_prompt(h)
+        if not body:
+            return ""
+        return ("[PRIOR-PROCESS HANDOFF - the runtime's last state/handoff.json snapshot, written "
+                + str(int(age_s // 60)) + " min before this boot. It is what was true THEN, not now; "
+                "the cognition handoff is the memory note CORE marks READ FIRST.]\n" + body[:1500])
+    except Exception as e:
+        print("[host] prior handoff read failed (non-fatal): " + repr(e), file=sys.stderr)
+        return ""
+
+
 _HOLD_REF = {"turn": None}   # set by hold_sentinel so the CLI stderr tap can reach the detector
 
 
@@ -2047,6 +2070,7 @@ async def main():
             print("[host] connected. Orb/Discord/letters wake me; my words stream to the mouth as sentences land.")
             print("[host] (type here, or 'quit' to exit.)\n", flush=True)
 
+            first_turn = True   # round-2 fix 3.3: prior-process handoff rides the first prompt only
             while True:
                 entry = await queue.get()
                 _prio, _seq, item = entry[0], entry[1], entry[2]
@@ -2168,6 +2192,12 @@ async def main():
                     )
                 else:
                     prompt = text
+                if first_turn:
+                    first_turn = False
+                    _hb = _prior_handoff_block()
+                    if _hb:
+                        prompt = _hb + "\n\n" + prompt
+                        print("[host] prior-process handoff prepended to the first turn (" + str(len(_hb)) + " chars).", flush=True)
 
                 # Live-conversation turns (voice, terminal) go into the shared
                 # transcript so the orb's history stays current on the new pipeline.

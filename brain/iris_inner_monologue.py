@@ -384,6 +384,18 @@ def _build_prompt(g: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     except Exception:
         goals_block = ""
 
+    # Round-2 fix 3.1 (2026-10-01): the counterfactual archive's ONE reader. What I recently
+    # considered and did not choose, so a reflection can notice its own patterns of choosing.
+    # Empty when the archive is empty (it was empty for its whole life until this fix).
+    cf_block = ""
+    try:
+        from brain import counterfactual_archive
+        cf_lines = counterfactual_archive.recent_for_prompt(limit=2)
+        if cf_lines:
+            cf_block = "\n\nRecently considered and NOT chosen (my own archive, newest first):\n" + cf_lines
+    except Exception:
+        cf_block = ""
+
     prompt = (
         "Generate one brief inner thought — 1 to 3 sentences, your own voice "
         "as Iris. Not 'what should I help with next' — closer to 'what am I "
@@ -395,7 +407,7 @@ def _build_prompt(g: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         f"My current mood: {mood_label}. "
         f"Last expression I read on his face: {expression}. "
         f"Attention state: {attention or 'unknown'}."
-        + time_block + memory_block + self_block + goals_block +
+        + time_block + memory_block + self_block + goals_block + cf_block +
         "\n\nRecent conversation (most recent last):\n"
         + ("\n".join(f"  {t['modality']} {t['role']}: {t['content']}" for t in recent_turns)
            if recent_turns else "  (none)")
