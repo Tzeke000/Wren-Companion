@@ -301,12 +301,50 @@ def _health_ok(port: int, timeout: float = 2.0) -> bool:
         return False
 
 
-def _post_speak(ctx, text: str) -> str:
+_VE_MOD = None
+
+
+def _ve():
+    """brain/voice_emotion.py (round-2 fix 2.1), loaded by path and cached; None if unavailable."""
+    global _VE_MOD
+    if _VE_MOD is None:
+        try:
+            import importlib.util as _ilu
+            spec = _ilu.spec_from_file_location("iris_voice_emotion", r"D:\Wren-Companion\brain\voice_emotion.py")
+            mod = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _VE_MOD = mod
+        except Exception as e:
+            print(f"[wren-voice-core] voice_emotion unavailable ({e!r}); plain speak only", file=sys.stderr)
+            _VE_MOD = False
+    return _VE_MOD or None
+
+
+def _item_fields(item):
+    """A play_queue item is a plain str (legacy) or {text, emotion, intensity} (round-2 fix 2.1)."""
+    ve = _ve()
+    if ve is not None:
+        return ve.item_fields(item)
+    if isinstance(item, dict):
+        return str(item.get("text") or ""), None, None
+    return str(item or ""), None, None
+
+
+def _post_speak(ctx, text: str, emotion=None, intensity=None) -> str:
     """POST one chunk of text to the mouth (ctx.server_url + '/') and return its reply.
-    Blocks until playback finishes or /stop aborts it."""
-    data = text.encode("utf-8")
+    Blocks until playback finishes or /stop aborts it. With an emotion riding along the body
+    is JSON {text, emotion, intensity} (round-2 fix 2.1); without one it is the old text/plain
+    body, byte-identical."""
+    if emotion:
+        import json as _json
+        data = _json.dumps({"text": text, "emotion": str(emotion),
+                            "intensity": 0.5 if intensity is None else float(intensity)}).encode("utf-8")
+        ctype = "application/json; charset=utf-8"
+    else:
+        data = text.encode("utf-8")
+        ctype = "text/plain; charset=utf-8"
     req = _req.Request(ctx.server_url + "/", data=data,
-                       headers={"Content-Type": "text/plain; charset=utf-8"},
+                       headers={"Content-Type": ctype},
                        method="POST")
     try:
         with _req.urlopen(req, timeout=180) as resp:
@@ -848,10 +886,13 @@ def cmd_speak(ctx, args: dict) -> str:
     Otherwise returns immediately with a '[queued]' prefix.
 
     Actual playback is done by the daemon's worker calling play_one().
+    Optional args {"emotion": str, "intensity": 0..1} ride to the mouth (round-2 fix 2.1).
     """
     text = (args.get("text") or "").strip()
     if not text:
         return "[voice_speak] nothing to say"
+    emotion = (str(args.get("emotion") or "").strip() or None)
+    intensity = args.get("intensity")
     # MOUTH MUTE (2026-07-13, echo-source hunt): voice_control.json {"mouth_muted":
     # true} silences EVERY playback path through the daemon — voice-turn streaming,
     # host auto-cues, stall bridge, deliberate voice_speak — because behavioral
@@ -876,7 +917,7 @@ def cmd_speak(ctx, args: dict) -> str:
     # play — and a concurrent listen's drain-gate (`while ctx.speaking`) then opens the mic
     # onto my own voice (self-listen, real on speakers-no-AEC). put()-first means the worker
     # always sees the queued item, so it never spuriously clears the flag. (2026-06-29 race fix.)
-    ctx.play_queue.put(text)
+    ctx.play_queue.put({"text": text, "emotion": emotion, "intensity": intensity} if emotion else text)
     ctx.speaking = True
     if args.get("wait"):
         try:
@@ -990,7 +1031,7 @@ def _cancel_stall_bridge(ctx) -> None:
         pass
 
 
-def play_one(ctx, text: str) -> None:
+def play_one(ctx, item) -> None:
     """Speak one chunk via the mouth server. Called by the daemon's playback worker.
     Blocks until playback finishes (the server holds the connection open until done).
     Does not raise — failures are swallowed so the worker loop stays alive.
@@ -999,9 +1040,10 @@ def play_one(ctx, text: str) -> None:
     speaker RIGHT NOW; ctx.played_chunks accumulates fully-played chunks for the current
     barge-in hold window (reset in cmd_bargein_hold). On a barge, _on_barge snapshots
     the cursor so the returned marker can say exactly where Zeke cut me off."""
+    text, _emotion, _intensity = _item_fields(item)   # str (legacy) or dict (round-2 fix 2.1)
     ctx.now_playing = text
     try:
-        _post_speak(ctx, text)
+        _post_speak(ctx, text, _emotion, _intensity)
         # Only count as fully heard if a barge didn't kill this chunk mid-play
         # (_on_barge sets bargein_fired BEFORE hitting /stop, so this is race-safe).
         if not getattr(ctx, "bargein_fired", False):

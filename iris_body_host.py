@@ -328,13 +328,18 @@ def daemon_cmd(cmd, args=None, timeout=5.0):
         return buf.decode("utf-8", "replace").strip()
 
 
-def speak(text):
-    """Enqueue one finished sentence on the daemon's play queue. Non-fatal."""
+def speak(text, emotion=None, intensity=None):
+    """Enqueue one finished sentence on the daemon's play queue. Non-fatal.
+    emotion/intensity (round-2 fix 2.1) ride to the mouth; None = base prosody."""
     text = (text or "").strip()
     if not text:
         return
     try:
-        daemon_cmd("speak", {"text": text})
+        _args = {"text": text}
+        if emotion:
+            _args["emotion"] = str(emotion)
+            _args["intensity"] = 0.5 if intensity is None else float(intensity)
+        daemon_cmd("speak", _args)
     except Exception as e:
         print("\n[host] speak failed (non-fatal): " + repr(e), file=sys.stderr)
 
@@ -991,6 +996,23 @@ LLM_PENDING_MIN_AGE_S = float(os.environ.get("IRIS_LLM_PENDING_MIN_AGE_S", "30")
 # expires them and nothing on the v2 host calls it. Expire here so the nudge is about live callers.
 LLM_PENDING_TTL_S = float(os.environ.get("IRIS_LLM_PENDING_TTL_S", "600"))
 _LLM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "iris_llm")
+
+
+def _turn_emotion():
+    """Round-2 fix 2.1: my live mood (brain/mood_core) -> (emotion, intensity) for this voice
+    turn's sentences. Fail-soft: (None, 0.5) = base prosody. IRIS_VOICE_EMOTION=0 disables."""
+    try:
+        from brain import voice_emotion as _ve
+        if not _ve.ENABLED:
+            return None, 0.5
+        from brain import mood_core as _mc
+        emo, inten = _ve.mood_to_emotion(_mc.load_mood())
+        if emo:
+            print("[host] voice turn emotion: " + str(emo) + " @" + str(round(inten, 2)), flush=True)
+        return emo, inten
+    except Exception as e:
+        print("[host] turn emotion read failed (non-fatal): " + repr(e), file=sys.stderr)
+        return None, 0.5
 
 
 def _prior_handoff_block():
@@ -1690,6 +1712,9 @@ class _TurnState:
         self.muted_by_flag = False      # the flag went ON mid-turn; later sentences were withheld
         self.hold = _hh.HoldDetector() if _hh else None
         self.voice_flag = _hh.VoiceFlagCache() if _hh else None
+        # Round-2 fix 2.1: this voice turn's emotion (from mood_core) rides on every sentence.
+        self.emotion = None
+        self.intensity = 0.5
 
     def begin(self, speak_out, source, route_to_discord=False):
         self.speak_out = speak_out
@@ -1775,7 +1800,7 @@ async def stream_consumer(client, turn, boundary):
                                     turn.muted_by_flag = True
                                     turn.route_to_discord = True
                                     continue
-                                speak(s)
+                                speak(s, turn.emotion, turn.intensity)
             elif isinstance(msg, AssistantMessage):
                 for block in getattr(msg, "content", []) or []:
                     if isinstance(block, ToolUseBlock):
@@ -1805,7 +1830,7 @@ async def stream_consumer(client, turn, boundary):
                             turn.muted_by_flag = True
                             turn.route_to_discord = True
                         else:
-                            speak(buf)
+                            speak(buf, turn.emotion, turn.intensity)
                     buf = ""
                 if turn.active:
                     # Heads-down completion cue: silent turn + real work + I never
@@ -2239,6 +2264,7 @@ async def main():
                     # (see stream_consumer; this is the off-by-one fix's ordering half).
                     await boundary.wait()
                     turn.begin(speak_out, source, route_to_discord)
+                    turn.emotion, turn.intensity = _turn_emotion() if speak_out else (None, 0.5)
                     # Receipt marker (Zeke 2026-07-08: "i cant tell if youre thinking or
                     # have received from me") - one immediate line so the gap between
                     # his enter-press and my first text is visibly MINE, not dead air.
