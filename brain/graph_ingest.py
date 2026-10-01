@@ -38,6 +38,7 @@ import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -54,8 +55,94 @@ _SKIP_STEMS = {"memory", "index_archive"}  # MEMORY.md + index_archive.md = inde
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")
 _FM_FIELD_RE = re.compile(r"^(name|alias|type)\s*:\s*(.+?)\s*(?:#.*)?$", re.MULTILINE)
 
-_thread_started = False
-_thread_lock = threading.Lock()
+# Survive importlib.reload (brain_hot_swap re-executes this module into the same
+# dict): keep the live thread flag, lock and caches instead of resetting them —
+# otherwise a reload could start a SECOND rescan thread.
+_thread_started = globals().get("_thread_started", False)
+_thread_lock = globals().get("_thread_lock") or threading.Lock()
+
+
+# ── Write batching (round-2 fix 1.1, 2026-10-01) ────────────────────────────
+# Measured 10-01: state/concept_graph.json (~570 KB) was rewritten ~104× per
+# 60 s cycle — one tmp+replace per add_edge re-fire — ~3.6 GB/h of disk writes
+# that changed nothing. Every ingest pass now runs inside _deferred(): one
+# write per pass, and a pass whose sources are unchanged writes nothing.
+
+@contextmanager
+def _deferred(cg: Any):
+    """Batch every graph save inside the block into ONE write.
+
+    Prefers ConceptGraph.deferred_save() (class support lands at the first
+    restart after 2026-10-01). For a live instance of the OLDER class it
+    intercepts `_save` on the INSTANCE (shadowing the class method) and flushes
+    once at exit — so brain_hot_swap of this module alone stops the storm.
+    """
+    ds = getattr(cg, "deferred_save", None)
+    if callable(ds):
+        with ds():
+            yield cg
+        return
+    try:
+        already = "_save" in vars(cg)
+    except TypeError:
+        already = True
+    if already or not callable(getattr(cg, "_save", None)):
+        yield cg  # nested block, or not a ConceptGraph — nothing to batch
+        return
+    state = {"dirty": False}
+
+    def _mark_dirty(*_a: Any, **_k: Any) -> None:
+        state["dirty"] = True
+
+    cg._save = _mark_dirty
+    try:
+        yield cg
+    finally:
+        try:
+            del cg._save
+        except AttributeError:
+            pass
+        if state["dirty"]:
+            try:
+                cg._save()
+            except Exception as e:  # noqa: BLE001
+                _log(f"deferred flush failed (non-fatal): {e!r}")
+
+
+_dyn_cache: dict[str, Any] = globals().get("_dyn_cache") or {}
+
+
+def _load_if_changed(key: str, path: Path, *, sig: Any = None, lines: bool = False) -> Any:
+    """Read a dynamic source only when it changed since the last ingest.
+
+    Unchanged → {} (or [] with lines=True) so the caller's loop is a no-op.
+    Missing → FileNotFoundError, exactly like the read_text it replaces.
+    Change = (mtime_ns, size), or with `sig` a function of the parsed payload
+    (the mood file rewrites every 5 s but its rounded top-8 weights rarely move).
+    """
+    st = path.stat()
+    stamp: Any = (st.st_mtime_ns, st.st_size)
+    if sig is None:
+        if _dyn_cache.get(key) == stamp:
+            return [] if lines else {}
+        if lines:
+            out: Any = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        else:
+            out = json.loads(path.read_text(encoding="utf-8"))
+        _dyn_cache[key] = stamp
+        return out
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    s = sig(payload)
+    if _dyn_cache.get(key) == s:
+        return {}
+    _dyn_cache[key] = s
+    return payload
+
+
+def _mood_sig(payload: Any) -> tuple:
+    weights = (payload or {}).get("emotion_weights") or {}
+    top = sorted(weights.items(), key=lambda kv: float(kv[1] or 0), reverse=True)[:8]
+    return tuple((str(k), round(float(v or 0), 2)) for k, v in top if float(v or 0) >= 0.02)
 
 
 def _log(msg: str) -> None:
@@ -151,7 +238,14 @@ def _save_state(root: Path, mtimes: dict[str, float]) -> None:
 def ingest_all(cg: Any, root: Path | str, notes_dir: Path | None = None,
                force: bool = False) -> dict[str, Any]:
     """Sync changed profile/memory files into the concept graph. Idempotent —
-    find_or_create + add_edge both dedupe. Never raises."""
+    find_or_create + add_edge both dedupe. Never raises. ONE graph write per
+    pass (round-2 fix 1.1)."""
+    with _deferred(cg):
+        return _ingest_all_impl(cg, root, notes_dir, force)
+
+
+def _ingest_all_impl(cg: Any, root: Path | str, notes_dir: Path | None = None,
+                     force: bool = False) -> dict[str, Any]:
     try:
         root = Path(root)
         ndir = Path(notes_dir) if notes_dir else _DEFAULT_NOTES_DIR
@@ -260,6 +354,14 @@ def _link_to_person(cg: Any, node_id: str, person_id: str, rel: str, strength: f
 
 
 def ingest_dynamic(cg: Any, root: Path | str) -> dict[str, Any]:
+    """Curiosities + episodes + anchor moments + mood → graph. ONE graph write
+    per pass, and a section whose source file is unchanged is skipped entirely
+    (round-2 fix 1.1). See _ingest_dynamic_impl for the directive history."""
+    with _deferred(cg):
+        return _ingest_dynamic_impl(cg, root)
+
+
+def _ingest_dynamic_impl(cg: Any, root: Path | str) -> dict[str, Any]:
     """Curiosities + episodes + anchor moments → curiosity/event nodes.
 
     Zeke 2026-07-08 (looking at the freshly-ingested brain tab): "what about
@@ -275,7 +377,7 @@ def ingest_dynamic(cg: Any, root: Path | str) -> dict[str, Any]:
 
         # Curiosities — state/curiosity_topics.json {topics:[{topic,priority,resolved}]}
         try:
-            raw = json.loads((root / "state" / "curiosity_topics.json").read_text(encoding="utf-8"))
+            raw = _load_if_changed("curiosity_topics", root / "state" / "curiosity_topics.json")
             for t in raw.get("topics") or []:
                 label = _short_label(t.get("topic"))
                 if not label:
@@ -300,7 +402,7 @@ def ingest_dynamic(cg: Any, root: Path | str) -> dict[str, Any]:
             if not path.is_file():
                 continue
             try:
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = _load_if_changed(fname, path, lines=True)
             except Exception:
                 continue
             for line in lines[-200:]:  # cap: newest 200 per store
@@ -328,7 +430,7 @@ def ingest_dynamic(cg: Any, root: Path | str) -> dict[str, Any]:
         # all be in here"). Only meaningful weights; strength tracks the weight
         # so the felt blend is readable off the edges.
         try:
-            mood = json.loads((root / "state" / "iris_mood.json").read_text(encoding="utf-8"))
+            mood = _load_if_changed("iris_mood", root / "state" / "iris_mood.json", sig=_mood_sig)
             weights = mood.get("emotion_weights") or {}
             top = sorted(weights.items(), key=lambda kv: float(kv[1] or 0), reverse=True)
             for name, w in top[:8]:
@@ -360,11 +462,17 @@ def ingest_dynamic(cg: Any, root: Path | str) -> dict[str, Any]:
 # graph node whose slug appears in it. Unused nodes then sink naturally via
 # decay; used ones surface. No cognition involved.
 
-_transcript_cursor: dict[str, int] = {}
+_transcript_cursor: dict[str, int] = globals().get("_transcript_cursor") or {}
 
 
 def activate_from_text(cg: Any, text: str, cap: int = 20) -> int:
-    """Activate nodes whose slug appears (word-boundary-safe) in `text`."""
+    """Activate nodes whose slug appears (word-boundary-safe) in `text`.
+    ONE graph write per call (round-2 fix 1.1)."""
+    with _deferred(cg):
+        return _activate_from_text_impl(cg, text, cap)
+
+
+def _activate_from_text_impl(cg: Any, text: str, cap: int = 20) -> int:
     try:
         hay = "-" + re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-") + "-"
         if len(hay) <= 2:

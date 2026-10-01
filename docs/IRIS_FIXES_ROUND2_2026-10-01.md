@@ -33,7 +33,10 @@ rebuild.
 
 ## 1. P1 — costing us something today
 
-### 1.1 `graph-ingest` write storm — ~60 MB/min of pointless disk writes
+### 1.1 `graph-ingest` write storm — ~60 MB/min of pointless disk writes — ✅ CLOSED 2026-10-01 09:4x
+- **Shipped:** `ConceptGraph.deferred_save()` (one write per block, re-entrant) + `graph_ingest._deferred()` wrapping every pass (with an instance-level `_save` interception for a LIVE instance of the old class, so the hot swap alone stopped it — no restart); `add_node(existing)` no longer writes twice; `ingest_dynamic` skips any section whose source is unchanged (`(mtime_ns, size)` per store; the mood file by its rounded top-8 weights); `graph_ingest` module state survives `importlib.reload` (no twin rescan thread).
+- **Proof:** `scripts/cg_churn.py 80` → **25 → 1** mtime changes per 80 s, live, same probe, same morning. `tests/test_graph_ingest_write_storm.py` — 10 adversarial cases (one-write-then-zero, changed source, mood drift vs real shift, old-class fallback + cleanup, nested blocks, exception mid-block still flushes, add_node double-write, ingest_all, activate_from_text, reload keeps thread flag) — all green. The self-cron (item 5) re-measures every 3 h.
+- **Side effect, intended:** archived dynamic nodes are no longer un-archived every minute by a no-op re-ingest, so `decay_unused_nodes` finally sticks for curiosity/event/emotion nodes until their source actually changes.
 - **Where:** `brain/concept_graph.py::add_node` (saves on the *existing-node* path, a no-op), `add_edge` (saves per call); `brain/graph_ingest.py::ingest_dynamic` runs every 60 s and `find_or_create`s ~100 existing curiosity/dynamic nodes + `_link_to_person` edges.
 - **Measured 10-01 05:3x–06:5x:** `state/concept_graph.json` (567 KB) rewritten **104–106 times per 60 s cycle** (tmp + replace each) — ~3.6 GB/h on D:, all day, plus the CPU of `json.dumps` ×100/min. Attributed via per-thread system time → native tid → `thread_table` → `graph-ingest`.
 - **Why it matters:** SSD wear, CPU, and it is the disease in miniature — a writer with no reader, done earnestly.
