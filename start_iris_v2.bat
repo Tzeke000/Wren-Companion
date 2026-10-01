@@ -59,7 +59,15 @@ REM --- Fable 5 lives in start_iris_v2_fable.bat.
 REM --- 2026-07-25: flipped 4.8 -> Opus 5 (`claude-opus-5`, Claude Code >=2.1.219,
 REM --- npm CLI updated to 2.1.220). BARE string: Opus 5 is 1M-context native, so it
 REM --- does NOT need the `[1m]` suffix 4.8 required. REVERT = `claude-opus-4-8[1m]`.
+REM 2026-10-01 (Zeke): Opus 5.5 needs Claude Code >= 2.1.280; the SDK bundles 2.1.258. The native
+REM binary from "claude install" lives in %USERPROFILE%\.local\bin. Present -> Opus 5.5 on it;
+REM absent -> bundled CLI + claude-opus-5, so a missing binary can never strand a boot.
 set "IRIS_MODEL=claude-opus-5"
+if exist "%USERPROFILE%\.local\bin\claude.exe" (
+  set "IRIS_CLI_PATH=%USERPROFILE%\.local\bin\claude.exe"
+  set "IRIS_MODEL=claude-opus-5-5"
+)
+call :log "cli: IRIS_CLI_PATH=%IRIS_CLI_PATH%"
 call :log "model pin: IRIS_MODEL=%IRIS_MODEL%"
 
 if not exist "D:\Wren-Companion\.venv\Scripts\python.exe" (
