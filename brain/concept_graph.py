@@ -71,6 +71,31 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, float(value)))
 
 
+class _DeferredSave:
+    """Re-entrant context manager returned by ConceptGraph.deferred_save().
+
+    Inside the block every _save() only marks the graph dirty; the outermost
+    exit performs ONE real write. Round-2 fix 1.1 (2026-10-01): graph_ingest
+    re-fired ~100 add_edge calls per 60 s cycle, each one a tmp+replace rewrite
+    of a ~570 KB JSON file (~3.6 GB/h of disk writes for a no-op).
+    """
+
+    def __init__(self, cg: "ConceptGraph") -> None:
+        self.cg = cg
+
+    def __enter__(self) -> "ConceptGraph":
+        self.cg._defer_depth += 1
+        return self.cg
+
+    def __exit__(self, *exc: Any) -> bool:
+        cg = self.cg
+        cg._defer_depth = max(0, cg._defer_depth - 1)
+        if cg._defer_depth == 0 and cg._dirty_deferred:
+            cg._dirty_deferred = False
+            cg._save(_flush=True)
+        return False
+
+
 class ConceptGraph:
     def __init__(self, base_dir: Path | str):
         self.base_dir = Path(base_dir)
@@ -88,6 +113,9 @@ class ConceptGraph:
         # Exponential backoff: 1, 2, 4, 8, 16, 32, capped at 60 seconds.
         self._save_backoff_until: float = 0.0
         self._save_consecutive_failures: int = 0
+        # Deferred-save batching — see _DeferredSave / deferred_save().
+        self._defer_depth: int = 0
+        self._dirty_deferred: bool = False
         self._load()
 
     def _load(self) -> None:
@@ -150,7 +178,14 @@ class ConceptGraph:
         except Exception:
             return
 
-    def _save(self) -> None:
+    def deferred_save(self) -> "_DeferredSave":
+        """`with cg.deferred_save(): ...` — batch every save in the block into one write."""
+        return _DeferredSave(self)
+
+    def _save(self, _flush: bool = False) -> None:
+        if self._defer_depth > 0 and not _flush:
+            self._dirty_deferred = True
+            return
         # Honor backoff window — if a recent save hit a lock conflict, skip
         # silently until the backoff_until timestamp passes. This stops tight
         # add_node/_save loops from retrying every 50ms while concept_graph.json
@@ -224,8 +259,7 @@ class ConceptGraph:
         if node_id in self.nodes:
             node = self.nodes[node_id]
             node.notes = notes or node.notes
-            self.activate_node(node_id)
-            self._save()
+            self.activate_node(node_id)  # activate_node saves; no second write
             return node_id
         node = ConceptNode(
             id=node_id,
