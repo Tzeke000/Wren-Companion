@@ -248,6 +248,29 @@ def infer_kind(user_msg: str, ava_reply: str = "") -> str:
     return "connection"
 
 
+# Round-2 fix 3.14 (2026-10-01): the auto-detector had been marking MACHINE prompts as anchor
+# moments — on 10-01 86 of the 92 anchors on disk began with a bracket tag (TOWER SENTINEL,
+# VECTOR SENSE/HEARD/PILOT, ZEKE PRESENCE watcher, LLM-BRIDGE ...). A sentinel line is not a
+# vivid moment with a person. Anything that announces itself as automated is skipped.
+_MACHINE_TAG_RE = re.compile(r"^\s*\[(?:[A-Z][A-Z0-9 /_\-]{2,}|[A-Za-z ]*(?:automated|watcher|sentinel|bridge|nudge))", re.IGNORECASE)
+_MACHINE_PHRASES = ("automated", "not zeke", "network watcher", "self-check", "llm-bridge", "stop hook",
+                    "scene memory", "tower sentinel", "vector sense", "vector heard", "vector pilot",
+                    "zeke presence", "reflection", "generate one brief inner thought")
+
+
+def is_machine_prompt(text: str) -> bool:
+    """True when the 'user turn' is a bracket-tagged machine prompt, not a person speaking."""
+    s = str(text or "").lstrip()
+    if not s:
+        return False
+    head = s[:220].lower()
+    if s.startswith("[") and any(p in head for p in _MACHINE_PHRASES):
+        return True
+    if _MACHINE_TAG_RE.match(s[:120]) and any(p in head for p in _MACHINE_PHRASES):
+        return True
+    return False
+
+
 def auto_detect_anchor_in_turn(
     person_id: str,
     user_msg: str,
@@ -262,6 +285,8 @@ def auto_detect_anchor_in_turn(
     classifier to be more nuanced.
     """
     if not user_msg or not ava_reply:
+        return None
+    if is_machine_prompt(user_msg):
         return None
     if not is_anchor_worthy(user_msg) and not is_anchor_worthy(ava_reply):
         return None
