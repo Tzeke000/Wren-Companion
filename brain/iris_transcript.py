@@ -17,6 +17,7 @@ disk forever (cheap), the orb just gets the most recent slice.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -61,6 +62,14 @@ def append(
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            # Round-2 fix 3.9 (2026-10-01): fsync each turn. The power-loss zero-fill that left
+            # 12,889 NUL bytes mid-file (every reader silently skipped them) came from unflushed
+            # pages; one fsync per conversation turn bounds the loss to the last entry.
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
     return entry
 
 
