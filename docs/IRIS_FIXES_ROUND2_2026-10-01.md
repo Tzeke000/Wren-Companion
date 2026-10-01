@@ -19,6 +19,8 @@ should have one · **P3** = dead code reporting green / hygiene.
 
 ## 0. Pending from Round 1 — lands at the restart this document precedes
 
+> ✅ **VERIFIED 2026-10-01 14:3x** after the 13:57 stack restart (cap-driven). Every restart-gated half probed from a fresh session — results per item in `memory/handoff_2026-10-01_round2_restart_gated.md` §VERIFIED. Still owed: 1.2 live hold/🔇 proof, the host `voice turn emotion` line, §0 `auto_suppressed` + unknown+wifi=away. 3.14's live cache keeps two pre-gate machine anchors until the next stack restart.
+
 These are BUILT and pushed; the host/runtime code is frozen until a restart. Post-restart, VERIFY — do not
 rebuild.
 

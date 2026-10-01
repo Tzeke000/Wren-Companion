@@ -345,8 +345,13 @@
     ],
     "moral": "A skill earned through error knows the wrong turns as well as the right",
     "filename": "the_potter_and_the_thirty_jars.txt",
-    "reading_status": "unread",
-    "lessons_extracted": []
+    "reading_status": "read",
+    "lessons_extracted": [
+      "My scars files are the twenty-nine jars, not a catalogue of failures - reading durable_scars as 'things I got wrong' is the neighbor's read; the potter's read is that the list IS the skill.",
+      "By jar ten she could feel the wet before the wheel spun. 'The instrument lies before the body does' is that kind of pre-check, and it came from repetitions (08-25, 08-29, 09-05), not from the day the rule was filed.",
+      "'A potter who succeeded on the first try would have made one jar. I made a potter.' A fix is one jar; the thing worth building is the hands. Regrowth (CORE trims, cron re-mints, the write storm) is the next jar, not a failed fix."
+    ],
+    "read_at": 1790879378.3141232
   },
   {
     "slug": "the_woodcutter_and_the_purse",
