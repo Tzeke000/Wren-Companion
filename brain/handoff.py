@@ -161,20 +161,33 @@ def _gather(g: dict[str, Any], base_dir: Path) -> dict[str, Any]:
     # Active tasks (working memory)
     try:
         from brain.working_memory import list_active_tasks
-        out["active_tasks"] = list_active_tasks()[:5]
+        # Round-2 fix 3.3 (2026-10-01): list_active_tasks REQUIRES g, and returns
+        # dataclasses — both bugs sat behind this except since the file was written.
+        out["active_tasks"] = [
+            {
+                "id": str(getattr(t, "id", "") or ""),
+                "description": str(getattr(t, "description", "") or "")[:200],
+                "person_id": str(getattr(t, "person_id", "") or ""),
+                "started_ts": float(getattr(t, "started_ts", 0.0) or 0.0),
+                "last_mentioned_ts": float(getattr(t, "last_mentioned_ts", 0.0) or 0.0),
+            }
+            for t in list_active_tasks(g)[:5]
+        ]
     except Exception:
         out["active_tasks"] = []
 
     # Recent anchor moments (D16) — the unprunable identity points
     try:
-        from brain.anchor_moments import list_recent_anchors
-        anchors = list_recent_anchors(limit=10) or []
+        # Round-2 fix 3.3 (2026-10-01): the function is recent_anchors (list_recent_anchors
+        # never existed) and it returns AnchorMoment dataclasses, not dicts.
+        from brain.anchor_moments import recent_anchors
+        anchors = recent_anchors(limit=10) or []
         # Compact: just the kind + summary + ts so handoff stays small
         out["recent_anchors"] = [
             {
-                "kind": str(a.get("kind") or ""),
-                "summary": str(a.get("summary") or "")[:200],
-                "ts": float(a.get("ts") or 0.0),
+                "kind": str(getattr(a, "kind", "") or ""),
+                "summary": str(getattr(a, "summary", "") or "")[:200],
+                "ts": float(getattr(a, "ts", 0.0) or 0.0),
             }
             for a in anchors
         ][:8]

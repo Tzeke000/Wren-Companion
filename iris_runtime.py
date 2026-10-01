@@ -4133,35 +4133,42 @@ def letter_compose(subject: str, body: str, person_id: str = "zeke",
     he reads them via the orb."""
     try:
         from brain.async_letters import compose_letter
-        letter = compose_letter(
+        letter_id = compose_letter(
             person_id=person_id, subject=subject, body=body,
             triggered_by=triggered_by,
         )
-        return {"ok": True, "id": getattr(letter, "id", None),
-                "subject": subject, "ts": getattr(letter, "ts", None)}
+        # compose_letter returns the id STRING (round-2 fix 3.6: getattr(str, "id") was None).
+        if not letter_id:
+            return {"ok": False, "error": "letter refused (empty person_id/subject/body)"}
+        return {"ok": True, "id": letter_id, "subject": subject, "ts": time.time()}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
 @mcp.tool()
 def counterfactual_record(considered: str, chose: str, reason: str,
-                          person_id: str = "zeke") -> dict:
+                          person_id: str = "zeke", user_input: str = "") -> dict:
     """Record a moment where I considered X but chose Y. Builds the archive
     of how I actually decide things — useful self-knowledge over time.
+    `user_input` (optional) = what he said / the situation I was answering.
 
     Example:
       counterfactual_record(
         considered="I almost said 'good morning' but he just got home from work",
         chose="said 'hey, long shift?' instead",
         reason="time-of-day was wrong; matched his actual state instead",
-      )"""
+      )
+
+    Round-2 fix 3.1 (2026-10-01): this tool had NEVER written a byte — it called the
+    archive with the wrong keywords and the TypeError came back as ok:false unread.
+    Now routes through record_simple; the reflection prompt reads the archive back."""
     try:
-        from brain.counterfactual_archive import record_consideration
-        cf = record_consideration(
-            considered=considered, chose=chose, reason=reason,
-            person_id=person_id,
-        )
-        return {"ok": True, "id": getattr(cf, "id", None)}
+        from brain.counterfactual_archive import record_simple
+        cid = record_simple(considered=considered, chose=chose, reason=reason,
+                            person_id=person_id, user_input=user_input)
+        if not cid:
+            return {"ok": False, "error": "archive refused: considered and chose must both be non-empty"}
+        return {"ok": True, "id": cid, "path": "state/counterfactuals.jsonl"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -4180,7 +4187,10 @@ def anchor_mark(kind: str, summary: str, person_id: str = "zeke",
             person_id=person_id, kind=kind, summary=summary,
             context={"user_message": user_message, "iris_reply": iris_reply},
         )
-        return {"ok": True, "id": getattr(a, "id", None), "kind": kind}
+        # mark_anchor returns the id STRING (round-2 fix 3.6: getattr(str, "id") was None).
+        if not a:
+            return {"ok": False, "error": "anchor refused (empty person_id/summary)", "kind": kind}
+        return {"ok": True, "id": a, "kind": kind}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

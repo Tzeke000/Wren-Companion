@@ -179,13 +179,49 @@ def record_consideration(
     return cid
 
 
+def record_simple(*, considered: str, chose: str, reason: str = "", person_id: str = "",
+                  user_input: str = "") -> str:
+    """Tool-shaped entry (round-2 fix 3.1, 2026-10-01). The `counterfactual_record` MCP tool had
+    called record_consideration with the wrong keywords since it was written, the TypeError came
+    back as {ok:false} and nobody read it — the archive never held a byte. Maps the tool's
+    (considered, chose, reason) onto the archive's (user_input, considered[], chosen, why_chosen).
+    `user_input` defaults to the considered text so a bare call still records. Returns the id,
+    or "" when the archive refuses (empty chose/considered)."""
+    considered = str(considered or "").strip()
+    chose = str(chose or "").strip()
+    return record_consideration(
+        user_input=str(user_input or "").strip() or considered,
+        considered=[{"option": considered, "rejected_reason": str(reason or "").strip()}] if considered else [],
+        chosen=chose,
+        why_chosen=str(reason or ""),
+        person_id=str(person_id or ""),
+    )
+
+
+def recent_for_prompt(*, limit: int = 2, person_id: str | None = None) -> str:
+    """ONE reader (round-2 fix 3.1): the most recent considered-but-not-chosen moments as short
+    lines for the reflection prompt. "" when the archive is empty."""
+    rows = recent_counterfactuals(limit=limit, person_id=person_id)  # newest first
+    lines: list[str] = []
+    for cf in rows:
+        opts = [str(o.get("option") or "")[:90] for o in (cf.considered_options or []) if isinstance(o, dict)]
+        opt = opts[0] if opts else ""
+        if not opt and not cf.chosen_reply:
+            continue
+        why = f" ({cf.why_chosen[:80]})" if cf.why_chosen else ""
+        lines.append(f"  - considered: {opt or '?'} -> chose: {cf.chosen_reply[:90]}{why}")
+    return "\n".join(lines)
+
+
 def recent_counterfactuals(*, limit: int = 20, person_id: str | None = None) -> list[Counterfactual]:
+    # Newest first, with insertion order as the tie-break: time.time() ties are real on Windows
+    # (ms granularity) and a stable sort on ts alone returned the OLDEST of a tied run.
     with _lock:
-        items = list(_cache)
+        items = list(enumerate(_cache))
     if person_id is not None:
-        items = [c for c in items if c.person_id == person_id]
-    items.sort(key=lambda c: c.ts, reverse=True)
-    return items[:int(limit)]
+        items = [(i, c) for i, c in items if c.person_id == person_id]
+    items.sort(key=lambda ic: (float(ic[1].ts or 0.0), ic[0]), reverse=True)
+    return [c for _, c in items[:int(limit)]]
 
 
 def list_for_person(person_id: str) -> list[Counterfactual]:

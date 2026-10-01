@@ -162,7 +162,10 @@ class PersonRegistry:
         try:
             import avaagent
             return avaagent.load_profile_by_id(person_id) or {}
-        except Exception:
+        except (Exception, SystemExit):
+            # avaagent's single-instance guard calls sys.exit(1) at import when :5876 is taken.
+            # A profile lookup must never take the calling PROCESS down (found 2026-10-01: a
+            # test process importing brain.handoff died here with no output at all).
             return {}
 
     def _resolve_trust(self, person_id: str, profile: dict[str, Any]) -> str:
