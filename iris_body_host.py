@@ -92,6 +92,15 @@ except Exception as e:  # pragma: no cover
     AssistantMessage = UserMessage = ToolUseBlock = ToolResultBlock = ()  # type: ignore
     _ACTIVITY = False
 
+# Round-2 fix 1.2 (2026-10-01): hold detector + voice->Discord fallback. Fail-soft: without
+# the module the host behaves exactly as before (no sentinel, no routing).
+try:
+    from brain import host_hold as _hh
+except Exception as e:  # pragma: no cover
+    print("[host] note: brain.host_hold unavailable (" + repr(e) + "); hold sentinel + voice->Discord routing disabled.",
+          file=sys.stderr)
+    _hh = None
+
 # ----------------------------------------------------------------- voice daemon (port/protocol = Wren's)
 DAEMON_ADDR = ("127.0.0.1", int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770")))
 SENTENCE_END = re.compile(r"[.!?…](\s|$)")   # candidate sentence boundary (… = ellipsis)
@@ -984,6 +993,59 @@ LLM_PENDING_TTL_S = float(os.environ.get("IRIS_LLM_PENDING_TTL_S", "600"))
 _LLM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "iris_llm")
 
 
+_HOLD_REF = {"turn": None}   # set by hold_sentinel so the CLI stderr tap can reach the detector
+
+
+def _cli_stderr(line):
+    """SDK stderr callback: keep every CLI line in the host log (as before) and let the
+    hold detector see the ones that name a rate/usage limit (round-2 fix 1.2)."""
+    try:
+        print(line.rstrip(), file=sys.stderr, flush=True)
+        t = _HOLD_REF.get("turn")
+        if t is not None and t.hold is not None and t.hold.note_stderr(line):
+            print("\n[cli-stderr] " + line.strip()[:200], flush=True)
+    except Exception:
+        pass
+
+
+async def hold_sentinel(turn, loop):
+    """Round-2 fix 1.2: the CONSUMER for cognition holds. On 09-30 the token cap held me 3.4 h
+    and nothing anywhere said so (the CLI retries internally; the host just waits on turn.done).
+    Every 15 s ask the detector; on 'held' write state/cognition_held.json + DM Zeke ONCE; on
+    'released' clear the flag + DM once with the duration. A stale flag from a dead host is
+    cleared at start (flags outlive reasons)."""
+    _HOLD_REF["turn"] = turn
+    token = load_bot_token()
+    try:
+        prev = _hh.clear_held_flag()
+        if prev:
+            print("[host] cleared a stale cognition_held.json from a previous host (since "
+                  + str(prev.get("since_iso")) + ").", flush=True)
+    except Exception:
+        pass
+    while True:
+        await asyncio.sleep(15.0)
+        try:
+            ev = turn.hold.check() if turn.hold is not None else None
+            if not ev:
+                continue
+            if ev["event"] == "held":
+                _hh.write_held_flag(ev)
+                _blog("cognition", "held", ev)
+                print("\n[host] HELD: " + str(ev.get("reason")), flush=True)
+                msg = _hh.format_held_message(ev)
+            else:
+                _hh.clear_held_flag()
+                _blog("cognition", "released", ev)
+                print("\n[host] RELEASED after " + _hh.human_duration(float(ev.get("duration_s") or 0)), flush=True)
+                msg = _hh.format_released_message(ev)
+            r = await loop.run_in_executor(None, lambda m=msg: _hh.discord_send(token, DISCORD_CHANNEL_ID, m))
+            if not r.get("ok"):
+                print("\n[host] hold DM failed (non-fatal): " + str(r), file=sys.stderr)
+        except Exception as e:
+            print("\n[host] hold sentinel error (non-fatal): " + repr(e), file=sys.stderr)
+
+
 async def llm_pending_poller(queue, loop, turn):
     """Idle-time leg for pending brain/* LLM requests (see block comment above)."""
     nudged: set = set()
@@ -1600,12 +1662,21 @@ class _TurnState:
         # voice_reader out of bargein_watch and made barge-in dead-mic). Same lesson
         # as the morning's gate-2 bug: two gate-mutators need an ownership protocol.
         self.speak_window = False
+        # Round-2 fix 1.2: hold detection + voice->Discord routing state.
+        self.route_to_discord = False   # this turn's final text goes to Discord (mouth flagged off)
+        self.muted_by_flag = False      # the flag went ON mid-turn; later sentences were withheld
+        self.hold = _hh.HoldDetector() if _hh else None
+        self.voice_flag = _hh.VoiceFlagCache() if _hh else None
 
-    def begin(self, speak_out, source):
+    def begin(self, speak_out, source, route_to_discord=False):
         self.speak_out = speak_out
         self.source = source
+        self.route_to_discord = bool(route_to_discord)
+        self.muted_by_flag = False
         self.done = asyncio.Event()
         self.active = True
+        if self.hold is not None:
+            self.hold.turn_started(source)
 
 
 async def stream_consumer(client, turn, boundary):
@@ -1659,6 +1730,8 @@ async def stream_consumer(client, turn, boundary):
                 if not turn.active:
                     print("\n[host] (background segment - stop-hook rewake)", flush=True)
             speaking_turn = turn.active and turn.speak_out
+            if turn.hold is not None and turn.active:
+                turn.hold.activity()
             if isinstance(msg, StreamEvent):
                 ev = msg.event or {}
                 if ev.get("type") == "content_block_delta":
@@ -1673,11 +1746,19 @@ async def stream_consumer(client, turn, boundary):
                         sentences, buf = drain_sentences(buf)   # keep buf bounded regardless
                         if speaking_turn:
                             for s in sentences:
+                                if turn.voice_flag is not None and turn.voice_flag.off():
+                                    # The mouth was flagged off mid-turn (quiet hours began while a
+                                    # held turn waited): withhold; the whole reply goes to Discord.
+                                    turn.muted_by_flag = True
+                                    turn.route_to_discord = True
+                                    continue
                                 speak(s)
             elif isinstance(msg, AssistantMessage):
                 for block in getattr(msg, "content", []) or []:
                     if isinstance(block, ToolUseBlock):
                         tool_calls += 1
+                        if turn.hold is not None and turn.active:
+                            turn.hold.tool_started()
                         if _is_speak_tool(block):
                             spoke_on_purpose = True
                         _sent = _discord_reply_text(block)
@@ -1690,18 +1771,25 @@ async def stream_consumer(client, turn, boundary):
             elif _ACTIVITY and isinstance(msg, UserMessage):
                 for block in getattr(msg, "content", []) or []:
                     if isinstance(block, ToolResultBlock):
+                        if turn.hold is not None and turn.active:
+                            turn.hold.tool_finished()
                         mark = "x" if getattr(block, "is_error", False) else "+"
                         print("  " + mark + " " + summarize_result(block), flush=True)
             elif isinstance(msg, ResultMessage):
                 if buf.strip():                              # flush trailing partial sentence
                     if speaking_turn:
-                        speak(buf)
+                        if turn.voice_flag is not None and turn.voice_flag.off():
+                            turn.muted_by_flag = True
+                            turn.route_to_discord = True
+                        else:
+                            speak(buf)
                     buf = ""
                 if turn.active:
                     # Heads-down completion cue: silent turn + real work + I never
                     # spoke on purpose => ping Zeke aloud so he knows I surfaced.
                     if (not turn.speak_out) and (not spoke_on_purpose) \
-                            and tool_calls >= HEADS_DOWN_MIN_TOOLS:
+                            and tool_calls >= HEADS_DOWN_MIN_TOOLS \
+                            and not (turn.voice_flag is not None and turn.voice_flag.off()):
                         try:
                             speak(HEADS_DOWN_CUE)
                         except Exception as e:
@@ -1717,6 +1805,20 @@ async def stream_consumer(client, turn, boundary):
                         # (e.g. the turn errored before sending).
                         said = sent_reply if (t_mod == "discord" and sent_reply) else full_text
                         transcript_append("assistant", said, t_mod)
+                    # Round-2 fix 1.2: a reply the mouth could not carry goes to Discord as text.
+                    if turn.route_to_discord and _hh is not None and full_text.strip():
+                        _why = ("quiet hours / mouth flagged off mid-reply" if turn.muted_by_flag
+                                else "mouth flagged off")
+                        try:
+                            _r = _hh.discord_send(load_bot_token(), DISCORD_CHANNEL_ID,
+                                                  _hh.format_routed_reply(full_text, _why))
+                        except Exception as _re:  # discord_send never raises; belt and braces
+                            _r = {"ok": False, "error": repr(_re)}
+                        print("\n[host] voice reply routed to Discord (" + _why + "): ok=" + str(_r.get("ok")), flush=True)
+                        _blog("voice", "reply routed to discord",
+                              {"why": _why, "ok": _r.get("ok"), "chars": len(full_text), "error": _r.get("error")})
+                    if turn.hold is not None:
+                        turn.hold.turn_ended()
                     turn.active = False
                     turn.done.set()
                 segment_open = False
@@ -1838,6 +1940,7 @@ async def main():
     model = os.environ.get("IRIS_MODEL") or None
     opts = ClaudeAgentOptions(
         include_partial_messages=True,
+        stderr=_cli_stderr if _hh is not None else None,   # round-2 fix 1.2: see _cli_stderr
         permission_mode="bypassPermissions",
         cwd=REPO_ROOT,
         setting_sources=["user", "project", "local"],  # load .mcp.json (iris, cloak) + discord plugin + CLAUDE.md
@@ -1934,6 +2037,10 @@ async def main():
             else:
                 print("[host] letter inbound: OFF - no ~/.iris_sibling_secret found.", file=sys.stderr)
             tasks.append(asyncio.create_task(llm_pending_poller(queue, loop, turn)))
+            if turn.hold is not None:
+                tasks.append(asyncio.create_task(hold_sentinel(turn, loop)))
+                print("[host] hold sentinel: ON - an active turn silent " + str(int(_hh.HOLD_AFTER_S))
+                      + "s with no tool in flight => state/cognition_held.json + one Discord DM (round-2 fix 1.2).")
             print("[host] llm-pending idle nudge: ON - polling state/iris_llm every "
                   + str(int(LLM_PENDING_POLL_S)) + "s (2026-09-08).")
 
@@ -2071,6 +2178,14 @@ async def main():
                 # Mechanical speak gate: the SOURCE decides whether my reply is voiced.
                 # Text sources stay silent (engine warm); I speak on purpose via voice_speak.
                 speak_out = source in SPEAK_SOURCES
+                # Round-2 fix 1.2: a speaking source whose mouth is flagged OFF (quiet hours, or
+                # Zeke's word) becomes a silent turn whose reply is routed to Discord.
+                route_to_discord = False
+                if speak_out and turn.voice_flag is not None:
+                    turn.voice_flag.invalidate()
+                    speak_out, route_to_discord = _hh.route_reply(source, SPEAK_SOURCES, turn.voice_flag.off())
+                    if route_to_discord:
+                        print("\n[host] voice flag is OFF - this voice reply goes to Discord, not the mouth.", flush=True)
                 # Ears stay OPEN during SILENT turns (Zeke fix 2026-06-29): a fam-chat letter
                 # or Discord message makes no sound, so shutting the mic for its whole duration
                 # was locking out / dropping Zeke's live voice. Now we only close the ears for a
@@ -2093,7 +2208,7 @@ async def main():
                     # segment - wait for the stream to reach a segment boundary first
                     # (see stream_consumer; this is the off-by-one fix's ordering half).
                     await boundary.wait()
-                    turn.begin(speak_out, source)
+                    turn.begin(speak_out, source, route_to_discord)
                     # Receipt marker (Zeke 2026-07-08: "i cant tell if youre thinking or
                     # have received from me") - one immediate line so the gap between
                     # his enter-press and my first text is visibly MINE, not dead air.
