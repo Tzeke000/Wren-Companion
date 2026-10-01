@@ -3162,10 +3162,20 @@ def iris_health(ctx: _IrisContext = None) -> dict:
         "concept_graph": _g.get("_concept_graph") is not None,
         "feature_flags": bool(_g.get("_feature_flags_ready")),
         "skill_sandbox": bool(_g.get("_skill_sandbox_ready")),
-        "identity_stability": bool(_g.get("_identity_stability_ready")),
-        "daily_practice": bool(_g.get("_daily_practice_ready")),
+        # Round-2 fix 3.2 (2026-10-01): these two are CONFIGURED at boot but nothing in the Iris
+        # process ever calls them (identity_stability.run_check has no caller and reads a
+        # self_narrative.json last written 2026-07-22; daily_practice has zero practices
+        # registered and run_due_practices is never invoked). Reporting `true` was a lie the
+        # self-check repeated every 3 h. "configured-unwired" is the honest value until a
+        # consumer exists; the verdict block never counted them anyway.
+        "identity_stability": "configured-unwired" if _g.get("_identity_stability_ready") else False,
+        "daily_practice": "configured-unwired" if _g.get("_daily_practice_ready") else False,
         "counterfactual_archive": bool(_g.get("_counterfactual_archive_ready")),
         "extraction_queue": bool(_g.get("_iris_extraction_queue_ready")),
+    }
+    out["subsystems_unwired"] = {
+        "identity_stability": "no caller; run_check() reads state/self_narrative.json (stale since 2026-07-22) - wire or retire",
+        "daily_practice": "zero practices registered; run_due_practices(g) is never called - wire or retire",
     }
     # Surface any bootstrap failures so I can see what didn't wire.
     failures = _g.get("_bootstrap_failures") or {}
@@ -4077,23 +4087,24 @@ def curriculum_read(slug: str) -> dict:
 def curriculum_record(slug: str, lessons_extracted: list[str],
                       reading_status: str = "read") -> dict:
     """Mark a curriculum entry as read and record what I extracted from it.
-    Mutates curriculum/foundation/_index.json."""
+
+    Round-2 fix 3.5 (2026-10-01): writes THROUGH brain.curriculum.mark_read, which updates the
+    entry file, the index AND state/learning/lessons.jsonl - the file sleep_mode's phase-3
+    handoff reads. Before this the tool patched only _index.json, so the lessons log never got
+    a row and the sleep handoff never saw a lesson. reading_status="reading" → mark_reading."""
     try:
-        import json as _j
-        idx_path = ROOT / "curriculum" / "foundation" / "_index.json"
-        if not idx_path.is_file():
-            return {"ok": False, "error": "curriculum index not found"}
-        idx = _j.loads(idx_path.read_text(encoding="utf-8"))
-        for e in idx:
-            if e.get("slug") == slug:
-                e["reading_status"] = reading_status
-                existing = list(e.get("lessons_extracted") or [])
-                existing.extend(str(l) for l in lessons_extracted)
-                e["lessons_extracted"] = existing
-                e["read_at"] = time.time()
-                idx_path.write_text(_j.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
-                return {"ok": True, "slug": slug, "lessons_count": len(existing)}
-        return {"ok": False, "error": f"no entry with slug={slug!r}"}
+        from brain import curriculum as _cur
+        status = str(reading_status or "read").strip().lower()
+        if status == "reading":
+            _cur.mark_reading(slug=slug)
+            return {"ok": True, "slug": slug, "reading_status": "reading"}
+        entry = _cur.mark_read(slug=slug, lessons_extracted=[str(l) for l in (lessons_extracted or [])])
+        return {"ok": True, "slug": slug, "reading_status": entry.get("reading_status", "read"),
+                "lessons_count": len(entry.get("lessons_extracted") or []),
+                "lessons_logged": len(lessons_extracted or []),
+                "lessons_log": str(_cur.LESSONS_LOG)}
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

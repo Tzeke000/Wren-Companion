@@ -172,6 +172,40 @@ def evidence_curiosity(root: Optional[str] = None, *, now: Optional[float] = Non
 
 
 # ---------------------------------------------------------------- the writer
+# ---------------------------------------------------------------- evidence signatures (round-2 fix 2.4)
+# learn() used to walk the EWMA toward the SAME target on every run — five runs on identical
+# evidence still moved the weights. The signature of the evidence that last moved each focus
+# lives in a sidecar (adaptive_learning.load_preferences() drops unknown keys, so it cannot ride
+# in the prefs file). Same signature → "no new evidence", weights untouched.
+def _sig_path(root: Optional[str]) -> str:
+    return _state(root, "learning", "adaptive_evidence_sig.json")
+
+
+def _load_sigs(root: Optional[str]) -> dict[str, list]:
+    try:
+        with open(_sig_path(root), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_sigs(root: Optional[str], sigs: dict[str, list]) -> None:
+    try:
+        p = _sig_path(root)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sigs, f, indent=2)
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def _evidence_sig(target: float, n: int) -> list:
+    return [round(float(target), 4), int(n)]
+
+
 def learn(root: Optional[str] = None, *, now: Optional[float] = None, dry_run: bool = False) -> dict[str, Any]:
     """Derive targets from evidence and EWMA them into adaptive_preferences.json.
     Returns {updated: {focus: {old, new, target, n}}, skipped: {focus: reason}, prefs}."""
@@ -186,12 +220,19 @@ def learn(root: Optional[str] = None, *, now: Optional[float] = None, dry_run: b
     }
     updated: dict[str, Any] = {}
     skipped: dict[str, str] = {}
+    prev_sigs = _load_sigs(root)
+    new_sigs: dict[str, list] = dict(prev_sigs)
 
     def _apply(key: str, target: Optional[float], n: int) -> None:
         focus = FOCUS[key]
         if target is None or n < MIN_EVIDENCE:
             skipped[focus] = "insufficient evidence (%d/%d)" % (n, MIN_EVIDENCE)
             return
+        sig = _evidence_sig(target, n)
+        if prev_sigs.get(focus) == sig:
+            skipped[focus] = "no new evidence (same %d observations, target %.3f) - weights left as they are" % (n, float(target))
+            return
+        new_sigs[focus] = sig
         old = float(prefs["weights"].get(focus, 0.5))
         new = al._ewma(old, float(target), ALPHA)
         prefs["weights"][focus] = new
@@ -212,7 +253,8 @@ def learn(root: Optional[str] = None, *, now: Optional[float] = None, dry_run: b
             skipped[focus] = "no honest evidence source in the Iris process (left neutral)"
     if updated and not dry_run:
         al.save_preferences(prefs)
-    return {"ok": True, "updated": updated, "skipped": skipped, "evidence": ev,
+        _save_sigs(root, new_sigs)
+    return {"ok": True, "updated": updated, "skipped": skipped, "evidence": ev, "evidence_sig_path": _sig_path(root),
             "before": before, "prefs": prefs, "dry_run": dry_run, "path": str(al.PREFERENCES_PATH)}
 
 
