@@ -717,7 +717,8 @@ def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> 
     Args:
         text: What to say.
         emotion: Label like calm, joy, curiosity, frustration, sadness. Defaults neutral.
-        intensity: 0.0..1.0 — strength of emotional modulation (only affects the piper fallback).
+        intensity: 0.0..1.0 — strength of emotional modulation. Round-2 fix 2.1 (2026-10-01): the
+            StyleTTS2 path now maps emotion+intensity to small prosody deviations too (was piper-only).
 
     Returns:
         {ok, spoke_ms, engine}  (engine == 'styletts2' when my real cloned voice played)
@@ -737,7 +738,11 @@ def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> 
     if _mouth_up():
         t0 = time.time()
         try:
-            payload = (_json.dumps({"cmd": "speak", "args": {"text": text}}) + "\n").encode("utf-8")
+            _args = {"text": text}
+            if emotion and str(emotion).strip().lower() != "neutral":
+                _args["emotion"] = str(emotion).strip()
+                _args["intensity"] = float(intensity)
+            payload = (_json.dumps({"cmd": "speak", "args": _args}) + "\n").encode("utf-8")
             with _socket.create_connection(("127.0.0.1", _dport), timeout=10.0) as s:
                 s.settimeout(240.0)
                 s.sendall(payload)

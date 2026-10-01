@@ -75,6 +75,56 @@ _SPEAK_LOCK = threading.Lock()
 _READY      = False
 _STOP       = threading.Event()
 
+# ── Emotion → prosody (round-2 fix 2.1, 2026-10-01) ──────────────────────────────
+# Optional per-request {emotion, intensity} → small, clamped deviations from the approved
+# base (BETA / SPEED / embedding_scale). No emotion, unknown label, or IRIS_VOICE_EMOTION=0
+# = byte-identical to the old path. The math lives in brain/voice_emotion.py.
+
+def _load_voice_emotion():
+    """brain/voice_emotion.py loaded BY PATH (no sys.path edits near StyleTTS2's own `models`)."""
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("iris_voice_emotion", r"D:\Wren-Companion\brain\voice_emotion.py")
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+try:
+    _VE = _load_voice_emotion()
+    _EMOTION_ON = bool(_VE.ENABLED)
+except Exception as _ee:
+    print(f"[styletts] emotion plumbing unavailable ({_ee!r}); base prosody only", flush=True)
+    _VE = None
+    _EMOTION_ON = False
+
+
+def _params_from_obj(obj) -> dict:
+    """Request body {emotion, intensity} → a complete params dict (base when absent/disabled)."""
+    base = {"speed": SPEED, "beta": BETA, "embedding_scale": 1.0, "label": "neutral", "applied": False}
+    if _VE is None or not isinstance(obj, dict):
+        return base
+    try:
+        return _VE.emotion_params(obj.get("emotion"), obj.get("intensity", 0.5),
+                                 base_speed=SPEED, base_beta=BETA, base_scale=1.0)
+    except Exception as e:
+        print(f"[styletts] emotion params failed ({e!r}); base", flush=True)
+        return base
+
+
+def _synth_kwargs(p) -> dict:
+    p = p or {}
+    return {"beta": float(p.get("beta", BETA)), "speed": float(p.get("speed", SPEED)),
+            "embedding_scale": float(p.get("embedding_scale", 1.0))}
+
+
+def _apply_seed(seed) -> None:
+    """A/B testing only: pin the diffusion noise so two emotions render from the same draw."""
+    if seed is None:
+        return
+    try:
+        torch.manual_seed(int(seed))
+    except Exception:
+        pass
+
 # ── Dependency imports (inside style-venv) ────────────────────────────────────────
 try:
     import numpy as np
@@ -629,9 +679,10 @@ def _play(arr: np.ndarray, pad_sec: float = 0.35) -> None:
     set_amplitude(0.0, force=True)   # settle the orb the instant playback ends
 
 
-def speak_progressive(text: str) -> dict:
+def speak_progressive(text: str, params: dict | None = None) -> dict:
     """Synthesize text in progressive chunks; play through persistent output stream.
-    Returns timing dict."""
+    Returns timing dict. `params` = emotion prosody kwargs (round-2 fix 2.1); None = base."""
+    _kw = _synth_kwargs(params)
     chunks = _split_progressive(text)
     if not chunks:
         return {"chars": 0, "first_audio_s": None, "total_s": 0.0}
@@ -646,7 +697,7 @@ def speak_progressive(text: str) -> dict:
             if _STOP.is_set():
                 break
             try:
-                arr = _synth(c, _ref_s)
+                arr = _synth(c, _ref_s, **_kw)
                 arr = np.clip(arr.astype(np.float32, copy=False), -1.0, 1.0)
             except Exception as e:
                 print(f"[styletts] synth failed for {c[:40]!r}: {e!r}", flush=True)
@@ -724,13 +775,14 @@ def speak_progressive(text: str) -> dict:
             "total_s": round(total_s, 1), "fillers": fillers}
 
 
-def speak_plain(text: str) -> dict:
+def speak_plain(text: str, params: dict | None = None) -> dict:
     """Synthesize the whole text at once (no chunking). Fallback path."""
+    _kw = _synth_kwargs(params)
     _STOP.clear()
     t0 = time.perf_counter()
     set_state("speaking", text[:400])
     try:
-        arr = _synth(text, _ref_s)
+        arr = _synth(text, _ref_s, **_kw)
         arr = np.clip(arr.astype(np.float32, copy=False), -1.0, 1.0)
         synth_s = time.perf_counter() - t0
         _play(arr)
@@ -814,14 +866,17 @@ class Handler(BaseHTTPRequestHandler):
                 obj = {"text": raw.strip()}
             stext = (obj.get("text") or "").strip()
             out_rate = int(obj.get("rate") or 8000)
+            sparams = _params_from_obj(obj)          # round-2 fix 2.1: /synth takes emotion too
+            sseed = obj.get("seed")
             if not stext:
                 self._send(400, "no text")
                 return
             try:
                 with _SPEAK_LOCK:   # serialize GPU use against live speech
                     parts = []
+                    _apply_seed(sseed)
                     for c in (_split_progressive(stext) or [stext]):
-                        a = _synth(c, _ref_s)
+                        a = _synth(c, _ref_s, **_synth_kwargs(sparams))
                         parts.append(np.clip(a.astype(np.float32, copy=False), -1.0, 1.0))
                 arr = np.concatenate(parts) if parts else np.zeros(0, np.float32)
                 if out_rate != SAMPLE_RATE and arr.size:
@@ -848,11 +903,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, f"synth error: {e!r}")
             return
         plain_mode = False
+        params = None
+        seed = None
         if raw.strip().startswith("{"):
             try:
                 obj = json.loads(raw)
                 text = (obj.get("text") or "").strip()
                 plain_mode = bool(obj.get("plain"))
+                params = _params_from_obj(obj)       # round-2 fix 2.1
+                seed = obj.get("seed")
             except Exception:
                 text = raw.strip()
         else:
@@ -864,11 +923,14 @@ class Handler(BaseHTTPRequestHandler):
         with _SPEAK_LOCK:
             try:
                 try:
-                    info = speak_plain(text) if plain_mode else speak_progressive(text)
+                    _apply_seed(seed)
+                    if params and params.get("applied"):
+                        print(f"[styletts] emotion {_VE.describe(params) if _VE else params}", flush=True)
+                    info = speak_plain(text, params) if plain_mode else speak_progressive(text, params)
                 except Exception as e:
                     print(f"[styletts] progressive failed ({e!r}); plain fallback",
                           flush=True)
-                    info = speak_plain(text)
+                    info = speak_plain(text, params)
                 fa = info.get("first_audio_s")
                 self._send(200,
                            f"[styletts2] spoke {info.get('chars', len(text))} chars "
@@ -913,7 +975,8 @@ def _warmup() -> None:
     _READY = True
     print(f"[styletts] ready — POST text to http://{HOST}:{PORT}/  "
           f"(speed={SPEED:.2f}, alpha={ALPHA}, beta={BETA}, "
-          f"steps={DIFFUSION_STEPS}, sr={SAMPLE_RATE})", flush=True)
+          f"steps={DIFFUSION_STEPS}, sr={SAMPLE_RATE}, "
+          f"emotion={'on' if _EMOTION_ON else 'off'})", flush=True)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────────
