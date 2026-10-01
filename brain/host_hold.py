@@ -120,6 +120,9 @@ class HoldDetector:
         self.stderr_hint: str | None = None
         self.stderr_hint_ts = 0.0
         self.hold_count = 0
+        self.api_error_hint: str | None = None   # 2026-10-01: last API error seen on the stream
+        self.api_error_ts = 0.0
+        self._pending: dict[str, Any] | None = None
 
     def _now(self, now: float | None) -> float:
         return self.clock() if now is None else now
@@ -157,6 +160,26 @@ class HoldDetector:
             return True
         return False
 
+    def api_error(self, kind: str, status: int | str | None = None,
+                  now: float | None = None) -> dict[str, Any] | None:
+        """An API error message arrived on the stream (rate_limit 429, overloaded 529, ...).
+        2026-10-01: the 15:35->18:40 hold was 42 such messages and this detector never fired, because
+        they arrived as AssistantMessages (counted as activity) and never touched stderr. They are NOT
+        output - they ARE the hold. Hold immediately; the event is handed to the next check() so the
+        flag/DM path stays single. Repeats while held are absorbed; real output releases as before."""
+        now = self._now(now)
+        self.api_error_hint = (str(kind) + (" (" + str(status) + ")" if status else "")).strip()[:120]
+        self.api_error_ts = now
+        if not self.turn_active or self.held_since is not None:
+            return None
+        self.held_since = now
+        self.hold_count += 1
+        ev = {"event": "held", "since": now, "silent_s": round(self.silent_for(now), 1),
+              "source": self.source, "hint": self.api_error_hint,
+              "reason": "API error on an active turn: " + self.api_error_hint}
+        self._pending = ev
+        return ev
+
     # query -------------------------------------------------------------------
     def silent_for(self, now: float | None = None) -> float:
         now = self._now(now)
@@ -164,6 +187,9 @@ class HoldDetector:
 
     def check(self, now: float | None = None) -> dict[str, Any] | None:
         now = self._now(now)
+        if self._pending is not None:          # an api_error() hold waiting for the flag/DM path
+            ev, self._pending = self._pending, None
+            return ev
         if self.held_since is None:
             if not self.turn_active or self.tools_in_flight > 0:
                 return None

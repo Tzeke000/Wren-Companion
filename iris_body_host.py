@@ -1823,7 +1823,14 @@ async def stream_consumer(client, turn, boundary):
                     print("\n[host] (background segment - stop-hook rewake)", flush=True)
             speaking_turn = turn.active and turn.speak_out
             if turn.hold is not None and turn.active:
-                turn.hold.activity()
+                _api_err = getattr(msg, "error", None) if isinstance(msg, AssistantMessage) else None
+                if _api_err:
+                    # 2026-10-01: a rate_limit/overloaded error message is NOT model output - it IS the
+                    # hold (42 of them = the 15:35->18:40 gap). Route it to the detector, not activity().
+                    turn.hold.api_error(str(_api_err))
+                    print("\n[host] API error on the stream: " + str(_api_err)[:120], flush=True)
+                else:
+                    turn.hold.activity()
             if isinstance(msg, StreamEvent):
                 ev = msg.event or {}
                 if ev.get("type") == "content_block_delta":
@@ -2030,6 +2037,12 @@ async def main():
     # pins Fable 5). Unset -> SDK falls back to the CLI default model, which is whatever
     # /model last saved - non-deterministic across launchers, so the bats always pin it.
     model = os.environ.get("IRIS_MODEL") or None
+    # 2026-10-01: IRIS_CLI_PATH lets a launcher run a NEWER native Claude Code than the SDK bundles
+    # (claude-opus-5-5 needs >= 2.1.280; the bundled CLI was 2.1.258). Unset -> SDK default lookup.
+    cli_path = os.environ.get("IRIS_CLI_PATH") or None
+    if cli_path and not os.path.isfile(cli_path):
+        print("[host] IRIS_CLI_PATH not found, using the SDK's bundled CLI: " + cli_path, flush=True)
+        cli_path = None
     opts = ClaudeAgentOptions(
         include_partial_messages=True,
         stderr=_cli_stderr if _hh is not None else None,   # round-2 fix 1.2: see _cli_stderr
@@ -2038,6 +2051,7 @@ async def main():
         setting_sources=["user", "project", "local"],  # load .mcp.json (iris, cloak) + discord plugin + CLAUDE.md
         system_prompt=SYSTEM_PROMPT,
         model=model,
+        cli_path=cli_path,
     )
 
     wait_for_mouth()
