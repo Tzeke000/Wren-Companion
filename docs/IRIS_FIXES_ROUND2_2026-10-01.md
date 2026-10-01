@@ -107,7 +107,9 @@ rebuild.
 - **Fix shape:** a supervisor thread in `brain/orb_http.start()` probing the OS listener every ~30 s; on loss → re-run `start()` (what `restart_orb_http` does by hand) and DM once.
 - **Test:** inject by closing the listening socket (test hook) → listener back within 60 s without a stack restart.
 
-### 2.7 Scene captions that time out are never drained
+### 2.7 Scene captions that time out are never drained — ✅ BUILT 10-01 10:0x (lands at the stack restart)
+- **Fixed:** a timed-out caption is retried up to `CAPTION_RETRY_MAX=2` times, each ≥ `CAPTION_RETRY_GAP_S=600` later and ONLY when `iris_time` shows a cognition session attached within 300 s (a retry during a hold would just time out again); frames a backfill already settled are dropped from the retry list; `_retry_timeouts` runs at the top of every sample tick and re-asks ONE frame per tick under the normal rate gate. A person in frame halves the caption gap (`CAPTION_PERSON_GAP_S=60` vs 120). The manual `scene_memory action=backfill` + self-check 9b stay as the catch-all. Tests: `tests/test_scene_caption_retry.py` (3 cases: timeout→queued→waits for attach→succeeds; bounded attempts + backfilled frames dropped; person-in-frame gap).
+- **Verify after the stack restart:** `scene_memory status` shows `caption_retries` climbing after the next hold and `wordless` empties within ~10 min of cognition returning.
 - **Where:** `brain/scene_memory.py` (`CAPTION_MAX_PER_DAY=60`, `MIN_GAP_S=120`, 540 s timeout → `caption_status:"timeout"`); drain only via manual `scene_memory action=backfill`.
 - **Fix shape:** the self-cron (9b) already backfills after a hold; make `backfill` automatic at the first idle turn after any `timeout`, and raise the rate cap when a person is in frame.
 - **Test:** after a forced hold, `wordless` is empty within one idle turn.

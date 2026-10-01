@@ -43,6 +43,14 @@ MIN_GAP_S = 45.0            # between change-keyframes
 HOURLY_S = 3600.0           # diary frame even if nothing changed
 CAPTION_MIN_GAP_S = 120.0   # cognition wakes are not free
 CAPTION_MAX_PER_DAY = 60
+# Round-2 fix 2.7 (2026-10-01): a caption that timed out (cognition held / asleep) is not
+# abandoned — it is retried up to CAPTION_RETRY_MAX times, each at least CAPTION_RETRY_GAP_S
+# later and ONLY when cognition has attached within CAPTION_RETRY_ATTACH_S (so a hold does
+# not just time out again). A person in frame halves the caption gap: people are the news.
+CAPTION_RETRY_MAX = 2
+CAPTION_RETRY_GAP_S = 600.0
+CAPTION_RETRY_ATTACH_S = 300.0
+CAPTION_PERSON_GAP_S = 60.0
 CAPTION_TIMEOUT_S = 540.0   # the bridge's request TTL is 600 s; 240 s timed out 10/11 times
                             # on 09-02 while cognition was held for three hours
 HEAD_MOVE_DEG = 1.5
@@ -92,10 +100,11 @@ class SceneMemory:
         self._last_hourly_ts = 0.0
         self._captions: list[float] = []  # timestamps of captions requested today
         self._last_caption_ts = 0.0
+        self._retry: dict[str, float] = {}  # kid -> not-before ts (round-2 fix 2.7)
         self.records: dict[str, dict[str, Any]] = {}
         self.order: list[str] = []
         self.stats = {"samples": 0, "self_motion_skips": 0, "commits": 0,
-                      "captions": 0, "caption_timeouts": 0, "last_diff": None,
+                      "captions": 0, "caption_timeouts": 0, "caption_retries": 0, "last_diff": None,
                       "last_sample_ts": None, "started_ts": None}
         self._load_index()
 
@@ -207,6 +216,7 @@ class SceneMemory:
         return moved
 
     def _tick(self, first: bool) -> None:
+        self._retry_timeouts(time.time())
         from brain import frame_store
         res = frame_store.get_buffered_frame(max_age_sec=3.0)
         frame = res.frame
@@ -309,7 +319,8 @@ class SceneMemory:
         rec = self.records.get(kid)
         if rec is None:
             return
-        if (now - self._last_caption_ts) < CAPTION_MIN_GAP_S or self._captions_today() >= CAPTION_MAX_PER_DAY:
+        gap = CAPTION_PERSON_GAP_S if (rec.get("sensors") or {}).get("faces") else CAPTION_MIN_GAP_S
+        if (now - self._last_caption_ts) < gap or self._captions_today() >= CAPTION_MAX_PER_DAY:
             rec["caption_status"] = "skipped_rate"
             self._append({"id": kid, "_update": True, "caption_status": "skipped_rate"})
             return
@@ -343,9 +354,16 @@ class SceneMemory:
             words = None
             _log(f"caption error: {e!r}")
         if not words:
+            attempts = int(rec.get("caption_attempts") or 0) + 1
+            rec["caption_attempts"] = attempts
             rec["caption_status"] = "timeout"
             self.stats["caption_timeouts"] += 1
-            self._append({"id": kid, "_update": True, "caption_status": "timeout"})
+            self._append({"id": kid, "_update": True, "caption_status": "timeout", "caption_attempts": attempts})
+            if attempts <= CAPTION_RETRY_MAX:
+                self._retry[kid] = time.time() + CAPTION_RETRY_GAP_S
+                _log(f"caption timeout for {kid} (attempt {attempts}); retry queued")
+            else:
+                _log(f"caption timeout for {kid} (attempt {attempts}); giving up - backfill only")
             return
         words = words.strip()
         if words.lower().startswith("skip"):
@@ -353,6 +371,50 @@ class SceneMemory:
             self._append({"id": kid, "_update": True, "caption_status": "skipped"})
             return
         self.set_words(kid, words, source="caption")
+
+    def _cognition_recent(self, now: float) -> bool:
+        """True when a cognition session attached within CAPTION_RETRY_ATTACH_S (a retry during a hold
+        would only time out again)."""
+        try:
+            from brain import iris_time
+            ts = float((iris_time.get_state() or {}).get("last_session_attached_ts") or 0.0)
+        except Exception:
+            return False
+        return ts > 0 and (now - ts) <= CAPTION_RETRY_ATTACH_S
+
+    def _retry_timeouts(self, now: float, *, sync: bool = False) -> str | None:
+        """Round-2 fix 2.7: re-ask for ONE timed-out caption when its wait is over, cognition is
+        awake and the rate gate allows. Returns the kid retried, else None. `sync` = run the caption
+        inline (tests); the live tick spawns the usual thread."""
+        if not self._retry:
+            return None
+        due = [k for k, nb in self._retry.items() if nb <= now]
+        if not due:
+            return None
+        # Drop anything a backfill already settled.
+        for k in list(due):
+            r = self.records.get(k) or {}
+            if r.get("words") or r.get("caption_status") in ("done", "skipped", "none"):
+                self._retry.pop(k, None)
+                due.remove(k)
+        if not due:
+            return None
+        if not self._cognition_recent(now):
+            return None
+        if (now - self._last_caption_ts) < CAPTION_MIN_GAP_S or self._captions_today() >= CAPTION_MAX_PER_DAY:
+            return None
+        kid = due[0]
+        self._retry.pop(kid, None)
+        self._last_caption_ts = now
+        self._captions.append(now)
+        self.stats["caption_retries"] += 1
+        _log(f"retrying caption for {kid}")
+        if sync:
+            self._caption(kid)
+        else:
+            threading.Thread(target=self._caption, args=(kid,), daemon=True,
+                             name=f"scene_caption_retry_{kid}").start()
+        return kid
 
     def set_words(self, kid: str, words: str, source: str = "manual") -> dict[str, Any]:
         rec = self.records.get(kid)
