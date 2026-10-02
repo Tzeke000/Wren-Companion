@@ -48,6 +48,26 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SERIAL = "0dd1cdaf"
+
+
+def robot_ip() -> str:
+    """Vector's LAN IP — ONE source of truth: env IRIS_VECTOR_IP, else the SDK's own
+    ~/.anki_vector/sdk_config.ini (the file anki_vector.Robot() connects with).
+    2026-10-02: a base power outage reshuffled DHCP and moved him .27 -> .21; two
+    hardcoded '.27's kept pointing at nothing. Fallback only if the config is unreadable."""
+    import os, configparser
+    env = os.environ.get("IRIS_VECTOR_IP", "").strip()
+    if env:
+        return env
+    try:
+        c = configparser.ConfigParser()
+        c.read(os.path.expanduser("~/.anki_vector/sdk_config.ini"))
+        ip = (c[SERIAL].get("ip") if SERIAL in c else "") or ""
+        if ip.strip():
+            return ip.strip()
+    except Exception:
+        pass
+    return "10.0.0.21"
 FRAME_DIR = REPO / "state" / "vector"
 NERVES = FRAME_DIR / "nerves.json"
 # big-Iris's body commands, logged so the little brain (watch-mode) sees my ACTUAL
@@ -381,7 +401,7 @@ class BodySession:
             try:
                 import urllib.request
                 urllib.request.urlopen(
-                    "http://10.0.0.27:8888/consolevarset?"
+                    f"http://{robot_ip()}:8888/consolevarset?"
                     "key=CropScheduler_MaxMarkerDetectionDist_mm&value=2500",
                     timeout=3).read()
             except Exception:

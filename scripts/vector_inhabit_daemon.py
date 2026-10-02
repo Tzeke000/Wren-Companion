@@ -51,7 +51,11 @@ from brain import iris_chat
 iris_chat.configure(REPO)
 
 SERIAL = "0dd1cdaf"
-ROBOT_IP = os.environ.get("IRIS_VECTOR_IP", "10.0.0.27")   # for reachability triage
+try:   # one source of truth (sdk_config.ini) — 10-02 the DHCP lease moved him .27 -> .21
+    from brain.vector_session import robot_ip as _robot_ip
+    ROBOT_IP = _robot_ip()                                       # for reachability triage
+except Exception:
+    ROBOT_IP = os.environ.get("IRIS_VECTOR_IP", "10.0.0.21")
 POLL_S = 0.2
 LOG = REPO / "state" / "vector" / "inhabit_daemon.log"
 
