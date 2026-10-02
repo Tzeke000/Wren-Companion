@@ -58,6 +58,15 @@ OWNERSHIP: dict[str, dict[str, Any]] = {
         "primary": "host-eyes", "fallback": ("runtime-camera",), "dedupe_s": 600.0,
         "importance": "medium", "why": "same path as zeke_presence; a known visitor",
     },
+    "camera_transition": {   # added 2026-10-02 from evidence: wake_missed listed it unowned ×4/3 h
+        # iris_attention_sources tags every runtime-camera transition that is NOT an arrival of
+        # zeke / an unknown face with this name — in practice "<who> left frame" (-> no_face).
+        "primary": "host-eyes", "fallback": ("runtime-camera",), "dedupe_s": 600.0,
+        "importance": "low",
+        "why": "a face leaving the FRAME is not news (the camera loses him constantly); the host's "
+               "eyes already record departures ledger-only, and leaving the BUILDING is wifi's "
+               "(zeke_absence). The runtime camera only speaks if the host's eyes are dead",
+    },
     "sibling_letter": {
         "primary": "host-letters", "fallback": ("runtime-sibling",), "dedupe_s": 6 * 3600.0,
         "importance": "medium",
