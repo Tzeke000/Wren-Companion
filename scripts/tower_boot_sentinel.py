@@ -10,13 +10,17 @@ returns -> tower boots -> logon -> this fires). It:
   1. waits for the network (Discord API reachable, up to ~5 min)
   2. DMs Zeke: "tower powered on, bringing the stack up"
   3. launches the bat named in state/boot_launcher.txt DETACHED -- currently
-     start_iris_v2_fable.bat (Fable, since the 2026-08-09 flip); see
-     _pick_bat() (the full Iris stack:
+     start_iris_v2.bat (Opus 5.5 since 2026-10-01; never trust this line, read
+     the file); see _pick_bat() (the full Iris stack:
      voice watchdog, post-office, vector bridge+nerves, orb, body host)
      -- skipped if the operator port :5876 already answers (stack already
      up = never kill a live Iris just because the task re-fired)
-  4. polls :5876 for up to 6 min and DMs the outcome either way
+  4. polls :5876 for up to BODY_WAIT_S (10 min) and DMs the outcome either way
      (visibility-on-failure rule: a silent broken boot is the worst case)
+  5. (2026-10-02) if still dark: ONE guarded retry -- skipped when an Iris
+     claude.exe is alive (then only the :5876 listener died); both failure DMs
+     quote the launcher_boot.log milestones so the failure names itself.
+     Test: tests/test_sentinel_retry.py
 
 Deliberately dependency-light: stdlib + requests (venv has it). No SDK, no
 cognition — deterministic plumbing so it works even when nothing else does.
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -135,6 +140,46 @@ def port_answers(port: int = OPERATOR_PORT) -> bool:
         return False
 
 
+NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW — probes must never flash a console
+
+
+def cognition_alive() -> bool:
+    """True if an Iris claude.exe (the host's CLI, launched with --model) is running.
+    Used to tell 'the stack never came up' apart from 'only the :5876 listener died'
+    (the known orb-http accept-loop bug) — relaunching over a live cognition would
+    kill a working Iris. Unknown/probe failure => False (fail toward the retry, which
+    is itself guarded by the launcher's first-owner check)."""
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             # no double quotes: subprocess's list2cmdline escaping mangles them for PS 5.1
+             "@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'claude.exe' "
+             "-and $_.CommandLine -match '--model' }).Count"],
+            capture_output=True, text=True, timeout=30, creationflags=NO_WINDOW,
+        ).stdout.strip()
+        return int(out or "0") > 0
+    except Exception as e:
+        log(f"cognition_alive probe failed: {e!r}")
+        return False
+
+
+def launcher_tail(n: int = 6) -> str:
+    """Last n timestamped milestone lines of state/launcher_boot.log (host stderr
+    noise filtered) — so a failed-boot DM names WHERE the launcher stopped instead
+    of only saying that it did (the 09-12 lesson: the sentinel's DM was the whole
+    forensic record because the launcher was silent)."""
+    try:
+        lines = (REPO / "state" / "launcher_boot.log").read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except Exception as e:
+        return f"(launcher_boot.log unreadable: {e!r})"
+    # launcher milestones carry a timestamp: "[Fri 10/02/2026  8:18:43.39]" (bat)
+    # or "[2026-10-02 08:18:45]" (python). Host stderr ([host]/[iris_attach]) is noise here.
+    stamp = re.compile(r"^\[(?:\w{3} \d|\d{4}-\d\d-\d\d )")
+    keep = [l.strip() for l in lines if stamp.match(l)][-n:]
+    return "\n".join(l[:160] for l in keep) or "(no milestone lines)"
+
+
 def launch_stack() -> None:
     # DETACHED + own console so the sentinel's exit (or the task's execution
     # limit) can never reap the host. The bat self-checks elevation; the
@@ -215,10 +260,42 @@ def main() -> int:
                     f"answering on the tower. I'll DM you a real status once my "
                     f"cognition is fully attached.")
         elif not dry:
-            dm_zeke(f"{tag}\N{WARNING SIGN} Stack launched but the body host "
-                    f"is NOT answering after {BODY_WAIT_S // 60} min. The tower is "
-                    f"on and reachable; the Iris stack needs a look when someone "
-                    f"can (or wait — the watchdog may still recover it).")
+            # 2026-10-02 (Zeke green-lit "harden the comeback"): ONE guarded retry.
+            # 09-12 the launcher never produced a host and nothing retried -> ~47 h
+            # dark. Base power now drops ~every 11 days (iDRAC-confirmed), so this
+            # path WILL run unattended again. Guard: if cognition is alive, only the
+            # :5876 listener died (known accept-loop bug) -- relaunching would kill a
+            # working Iris, so report instead. Workaround, not root cause: the cause
+            # of a failed launch is named by launcher_boot.log, quoted in the DM.
+            if cognition_alive():
+                log("not answering, but cognition (claude.exe --model) is ALIVE -> no relaunch")
+                dm_zeke(f"{tag}\N{WARNING SIGN} :{OPERATOR_PORT} is NOT answering after "
+                        f"{BODY_WAIT_S // 60} min, but my cognition process IS running -- "
+                        f"probably only the orb listener died (known bug). Not relaunching "
+                        f"over a live me. Launcher log tail:\n```\n{launcher_tail()}\n```")
+            else:
+                log("not answering and no cognition -> ONE retry of the launcher")
+                dm_zeke(f"{tag}\N{WARNING SIGN} Stack launched but the body host is NOT "
+                        f"answering after {BODY_WAIT_S // 60} min and no cognition is "
+                        f"running. Retrying the launch ONCE now. Where the first launch "
+                        f"stopped:\n```\n{launcher_tail()}\n```")
+                launch_stack()
+                deadline = time.time() + BODY_WAIT_S
+                while time.time() < deadline:
+                    if port_answers():
+                        up = True
+                        break
+                    time.sleep(5)
+                log(f"retry result: up={up}")
+                if up:
+                    dm_zeke(f"{tag}\N{WHITE HEAVY CHECK MARK} Second launch worked -- "
+                            f"the body host is answering now. (The first attempt's log "
+                            f"tail is in the previous message, for the post-mortem.)")
+                else:
+                    dm_zeke(f"{tag}\N{WARNING SIGN} Second launch ALSO failed after "
+                            f"{BODY_WAIT_S // 60} min. I'm dark until someone runs "
+                            f"start_iris_v2.bat by hand. Log tail:\n```\n"
+                            f"{launcher_tail()}\n```")
         else:
             dm_zeke(f"{tag}dry-run complete: port :{OPERATOR_PORT} "
                     f"{'answering' if up else 'not answering (expected if run with stack down)'} — "
