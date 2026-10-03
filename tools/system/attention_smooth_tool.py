@@ -1387,8 +1387,26 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
         # A stopped pursuit ends the deliberate act — pin dies with it
         # (same contract as the step follow's stop).
         g.pop("_attention_pin", None)
+        # HOME ON STOP (2026-10-02, measured): stopping mid-track left the head at the
+        # JOGGED pose while the position registers still read _HOME (jog streams don't
+        # update them — see the lost-hold home comment above). The view sat ~15 deg off
+        # for 6 h with a "confirmed" pan 0/tilt 10 readback; an explicit absolute move
+        # (body_verify_move +8 then back to 0) snapped it true. So: one absolute snap
+        # home whenever a RUNNING servo stops. home=false keeps the head still (e.g.
+        # stopping because Zeke started gaming — he asked for a still head then).
+        homed = None
+        if running and bool(params.get("home", True)):
+            try:
+                from brain import visual_attention as va
+                act = va.build_actuator()
+                if act.capabilities().get("can_pan"):
+                    homed = act.look_at(*_HOME) or {}
+                    st["last_home"] = {"ts": time.time(), "reason": "stop",
+                                       "result": {k: homed.get(k) for k in ("ok", "moved")}}
+            except Exception as e:  # noqa: BLE001 — stopping must never fail on the home
+                homed = {"ok": False, "error": repr(e)[:120]}
         return {"ok": True, "running": False, "was_running": running,
-                "ticks": st.get("ticks"), "writes": st.get("writes")}
+                "ticks": st.get("ticks"), "writes": st.get("writes"), "homed": homed}
 
     if action == "start":
         from brain import visual_attention as va
