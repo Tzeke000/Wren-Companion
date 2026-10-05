@@ -119,6 +119,9 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # state/attention/servo_tune.json; for a week every restart came up at
     # gain 20 and stopped, re-applied by hand. Waits for a LIVE frame first.
     _try(g, "servo_autostart", lambda: _bootstrap_servo_autostart(g))
+    # 2026-10-05: self-healing supervisor for Zeke's month away (Vector senses, :5876
+    # listener, Discord pairing alert). Delayed so the body comes up before it judges it.
+    _try(g, "resilience_supervisor", lambda: _bootstrap_resilience(g))
 
     # App discovery — scans Start Menu / Desktop / Steam / Epic on a thread
     _try(g, "app_discoverer", lambda: _bootstrap_app_discoverer(g))
@@ -393,6 +396,14 @@ def _bootstrap_tool_registry(g: dict[str, Any]) -> None:
         g["_tool_registry_count"] = len(_REGISTRY)
     except Exception:
         g["_tool_registry_count"] = 0
+
+
+def _bootstrap_resilience(g: dict[str, Any]) -> None:
+    """Start brain/resilience_supervisor after an 8-minute delay (the Vector daemon,
+    camera and orb listener need minutes to come up; judging them earlier would heal
+    things that are merely still booting). Idempotent per process."""
+    from brain import resilience_supervisor as rs
+    rs.get(g).start(delay_s=8 * 60)
 
 
 def _bootstrap_servo_autostart(g: dict[str, Any]) -> None:
