@@ -51,7 +51,7 @@ def _act(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
                                source=str(params.get("source") or "iris"),
                                deadline_s=params.get("deadline_s"),
                                ref=params.get("ref"))
-            return {"ok": True, "id": r["id"], "lessons": r.get("lessons"),
+            return {"ok": True, "id": r["id"], "lessons": r.get("lessons"), "recipes": r.get("recipes"),
                     "loop_warning": r.get("loop_warning"),
                     "deadline_in_min": round((r["deadline_ts"] - time.time()) / 60.0, 1)}
         if a == "close":

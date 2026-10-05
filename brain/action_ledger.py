@@ -130,6 +130,14 @@ def open_action(*, kind: str, intent: str, expected: str, verify: Optional[dict]
         _save(d)
     out = dict(row)
     out["lessons"] = lessons_for(row["kind"])
+    # Voyager-style (10-05): verified recipes for this kind of intent come back WITH the
+    # lessons — what worked and what failed arrive together at the moment of starting.
+    try:
+        from brain import skill_library as _sl
+        out["recipes"] = [{k: r[k] for k in ("name", "score", "description", "steps")}
+                          for r in _sl.find(f"{kind} {intent}", k=3)]
+    except Exception:
+        out["recipes"] = []
     if len(recent_fail) >= RETRY_BUDGET:
         out["loop_warning"] = (f"this exact intent failed {len(recent_fail)}x in the last 7 days — "
                                f"change the approach, or close it as impossible with a reason")
