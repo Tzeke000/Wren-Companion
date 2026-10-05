@@ -306,13 +306,23 @@ def run_verifier(spec: Optional[dict], opened_ts: float = 0.0) -> dict:
                     return {"passed": True, "evidence": f"pid {pr.info['pid']} matches {needle!r}"}
             return {"passed": False, "evidence": f"no process matches {needle!r}"}
         if t == "git_pushed":
+            # 10-05 scar: `git status` walks the whole working tree (this repo's
+            # ignored state/ is huge) — it blew its 10 s timeout INSIDE the runtime and
+            # the Windows kill-then-communicate path then hung the tool call ~3 min.
+            # rev-list compares commits only: no index refresh, no tree walk, no
+            # grandchildren holding the pipes.
             import subprocess
-            out = subprocess.run(["git", "-C", spec.get("repo", str(_ROOT)), "status", "-sb"],
-                                 capture_output=True, text=True, timeout=10,
-                                 creationflags=0x08000000 if os.name == "nt" else 0).stdout
-            first = out.splitlines()[0] if out else ""
-            ahead = "ahead" in first
-            return {"passed": not ahead, "evidence": first}
+            repo = spec.get("repo", str(_ROOT))
+            cp = subprocess.run(["git", "--no-optional-locks", "-C", repo, "rev-list",
+                                 "--left-right", "--count", "HEAD...@{u}"],
+                                capture_output=True, text=True, timeout=8,
+                                stdin=subprocess.DEVNULL,
+                                creationflags=0x08000000 if os.name == "nt" else 0)
+            if cp.returncode != 0:
+                return {"passed": None, "evidence": f"rev-list failed: {cp.stderr.strip()[:160]}"}
+            ahead, behind = (int(x) for x in cp.stdout.split()[:2])
+            return {"passed": ahead == 0,
+                    "evidence": f"HEAD is {ahead} ahead / {behind} behind its upstream"}
         if t == "ptz_home":
             from tools.system.ptz_predict_tool import check_home_now
             r = check_home_now(source="action_ledger")
