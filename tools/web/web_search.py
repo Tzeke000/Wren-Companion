@@ -69,6 +69,28 @@ def _extract_results_from_html(html: str, max_results: int) -> list[dict[str, st
     return out[:max_results]
 
 
+def _wikipedia_search(q: str, limit: int) -> list[dict[str, str]]:
+    """Fallback when DuckDuckGo returns nothing (it CAPTCHA-blocks this box — CORE).
+    Wikipedia's public search API is free, keyless and not CAPTCHA-gated. Added
+    2026-10-05 so curiosity pursuits can reach SOME outside evidence."""
+    try:
+        r = requests.get("https://en.wikipedia.org/w/api.php",
+                         params={"action": "query", "list": "search", "srsearch": q,
+                                 "format": "json", "srlimit": max(1, min(limit, 10))},
+                         timeout=15, headers={"User-Agent": "Iris-companion/1.0 (personal, non-commercial)"})
+        hits = (r.json().get("query") or {}).get("search") or [] if r.ok else []
+        out = []
+        for h in hits[:limit]:
+            title = str(h.get("title") or "")
+            snippet = re.sub(r"<[^>]+>", "", str(h.get("snippet") or ""))
+            out.append({"title": title, "snippet": snippet,
+                        "url": "https://en.wikipedia.org/wiki/" + quote_plus(title.replace(" ", "_")),
+                        "source": "wikipedia"})
+        return out
+    except Exception:
+        return []
+
+
 def search(query: str, max_results: int = 5) -> list[dict[str, str]]:
     q = str(query or "").strip()
     limit = max(1, min(10, int(max_results or 5)))
@@ -92,6 +114,8 @@ def search(query: str, max_results: int = 5) -> list[dict[str, str]]:
         html_url = f"https://duckduckgo.com/html/?q={quote_plus(q)}"
         h = requests.get(html_url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         rows = _extract_results_from_html(h.text if h.ok else "", max_results=limit)
+    if not rows:
+        rows = _wikipedia_search(q, limit)
     _CACHE[q.lower()] = (now, rows)
     return rows
 

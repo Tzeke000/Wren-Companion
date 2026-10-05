@@ -66,7 +66,8 @@ def _ledger_close(row, verdict: str, result: dict) -> None:
     try:
         from brain import action_ledger as al
         outcome = {"match": "success", "at_home": "success",
-                   "mismatch": "failure", "off_home": "failure"}.get(verdict, "uncertain")
+                   "mismatch": "failure", "off_home": "failure",
+                   "refused": "failure"}.get(verdict, "uncertain")
         al.close_action(row["id"], outcome=outcome,
                         evidence={"verdict": verdict,
                                   "offset_deg": result.get("offset_deg"),

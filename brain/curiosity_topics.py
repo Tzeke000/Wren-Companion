@@ -263,26 +263,19 @@ def pursue_curiosity(topic_row: dict[str, Any], g: dict[str, Any]) -> str:
     topic = str(topic_row.get("topic") or "")
     base_dir = Path(g.get("BASE_DIR") or Path.cwd())
 
-    # Step 1: web search
+    # Step 1: web search. 2026-10-05 fix: this used to import a module that does
+    # not exist (tools.web.web_search_tool), so the search silently never ran and
+    # every "pursuit" was pure reflection. Call the registry tool directly.
     search_results = ""
     try:
-        import importlib
-        ws_mod = importlib.import_module("tools.web.web_search_tool") if True else None
-        # Try to find a web search tool
-        from tools.tool_registry import ToolRegistry
-        reg = g.get("_tool_registry")
-        if reg is not None:
-            search_fn = None
-            for name in ("web_search", "search_web", "duckduckgo_search"):
-                try:
-                    result = reg.run_tool(name, {"query": topic, "num_results": 3})
-                    if isinstance(result, dict) and result.get("results"):
-                        search_results = str(result["results"])[:800]
-                    break
-                except Exception:
-                    pass
+        from tools.tool_registry import _REGISTRY
+        td = _REGISTRY.get("web_search")
+        if td is not None:
+            result = td.handler({"query": topic, "max_results": 3}, g)
+            if isinstance(result, dict) and result.get("results"):
+                search_results = str(result["results"])[:800]
     except Exception:
-        pass
+        search_results = ""
 
     # Phase 22: route through iris_llm.
     try:
@@ -350,7 +343,8 @@ def pursue_curiosity(topic_row: dict[str, Any], g: dict[str, Any]) -> str:
 
     # Step 4: update topic state
     try:
-        _update_topic_after_pursuit(topic, learning, base_dir)
+        _update_topic_after_pursuit(topic, learning, base_dir,
+                                    had_evidence=bool(search_results))
     except Exception:
         pass
 
@@ -358,15 +352,19 @@ def pursue_curiosity(topic_row: dict[str, Any], g: dict[str, Any]) -> str:
     return learning
 
 
-def _update_topic_after_pursuit(topic: str, learning: str, base_dir: Path) -> None:
+def _update_topic_after_pursuit(topic: str, learning: str, base_dir: Path,
+                                had_evidence: bool = False) -> None:
     st = _load(base_dir)
     rows = list(st.get("topics") or [])
     for row in rows:
         if _topic_similarity(str(row.get("topic") or ""), topic) >= 0.7:
             row["times_thought_about"] = int(row.get("times_thought_about") or 0) + 1
-            # If learning seems satisfying (no "?" at end), mark resolved
-            if not learning.strip().endswith("?") and len(learning) > 100:
+            # 2026-10-05 (verification-first): a topic is RESOLVED only when the
+            # pursuit consulted outside evidence (a search result) — prose that merely
+            # sounds satisfied ("no '?' at the end") is not evidence of learning.
+            if had_evidence and not learning.strip().endswith("?") and len(learning) > 100:
                 row["resolved"] = True
+                row["resolved_with_evidence"] = True
             else:
                 # Deeper — add new curiosity thread
                 row["priority"] = min(1.0, float(row.get("priority") or 0.4) + 0.1)

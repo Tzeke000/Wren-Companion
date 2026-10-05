@@ -110,7 +110,8 @@ class LongHorizonPlanner:
                 "You are planning how to achieve a goal. "
                 "Break the goal into 3-6 concrete, achievable steps. "
                 "Reply as JSON only:\n"
-                '{"steps": [{"description": str, "tool_to_use": str or null, "estimated_duration": str}]}\n\n'
+                '{"steps": [{"description": str, "tool_to_use": str or null, '
+                '"expected": str (what you would OBSERVE if the step worked), "estimated_duration": str}]}\n\n'
                 f"GOAL: {str(goal)[:800]}\n"
                 f"CONTEXT: {str(context)[:600]}"
             )
@@ -131,6 +132,7 @@ class LongHorizonPlanner:
                                 "id": f"{plan_id}-{i}",
                                 "description": str(s.get("description") or "")[:300],
                                 "tool_to_use": str(s.get("tool_to_use") or "")[:80] if s.get("tool_to_use") else "",
+                                "expected": str(s.get("expected") or "")[:200],
                                 "estimated_duration": str(s.get("estimated_duration") or "")[:60],
                                 "status": "pending",
                                 "result": "",
@@ -182,28 +184,63 @@ class LongHorizonPlanner:
             if str(plan.get("status") or "") != "active":
                 return {"ok": False, "error": f"plan_status={plan.get('status')}"}
             steps = list(plan.get("steps") or [])
+            waiting = next((s for s in steps if str(s.get("status") or "") == "awaiting_evidence"), None)
+            if waiting is not None:
+                try:
+                    from brain import action_ledger as _al
+                    row = _al._load().get(str(waiting.get("action_id") or ""))
+                except Exception:
+                    row = None
+                if row is None or row.get("status") == "open":
+                    return {"ok": True, "waiting": True, "step_id": waiting.get("id"),
+                            "action_id": waiting.get("action_id"),
+                            "note": "step waits for its ledger action to close with evidence"}
+                waiting["status"] = {"success": "completed", "abandoned": "skipped"}.get(
+                    row.get("outcome"), "failed")
+                waiting["result"] = str(row.get("evidence") or row.get("reason") or "")[:300]
+                self._save(plans)
             step = next((s for s in steps if str(s.get("status") or "") == "pending"), None)
             if step is None:
-                plan["status"] = "completed"
+                # A plan with a failed step did not complete — say so (2026-10-05).
+                failed = [s for s in steps if str(s.get("status") or "") == "failed"]
+                plan["status"] = "failed" if failed else "completed"
                 notes = list(plan.get("progress_notes") or [])
-                notes.append(f"all steps completed at {time.strftime('%Y-%m-%d %H:%M')}")
+                notes.append(f"ended {plan['status']} at {time.strftime('%Y-%m-%d %H:%M')}"
+                             + (f" ({len(failed)} step(s) failed)" if failed else ""))
                 plan["progress_notes"] = notes[-20:]
                 self._save(plans)
                 return {"ok": True, "done": True, "plan_id": plan_id}
             step["status"] = "running"
             self._save(plans)
 
-        result = f"attempted: {step['description'][:200]}"
+        # 2026-10-05 (verification-first, Zeke+Vale research handoff): a step is
+        # completed only on EVIDENCE. A tool step runs its tool (the old code looked
+        # for tr.fn — ToolDef has .handler — so nothing ever ran, and every step was
+        # stamped "completed" anyway). A step with no tool can't be auto-completed:
+        # it opens an action in the ledger and waits for that to close with evidence.
+        status, result = "failed", ""
+        tool_name = str(step.get("tool_to_use") or "").strip()
         try:
-            tool_name = str(step.get("tool_to_use") or "").strip()
             if tool_name:
                 from tools.tool_registry import _REGISTRY
                 tr = _REGISTRY.get(tool_name)
-                if tr is not None and callable(getattr(tr, "fn", None)):
-                    out = tr.fn({"description": step["description"]}, {})
+                if tr is None:
+                    result = f"no tool named {tool_name!r}"
+                else:
+                    out = tr.handler(dict(step.get("params") or {"description": step["description"]}), {})
                     result = str(out)[:400]
+                    ok = not (isinstance(out, dict) and (out.get("ok") is False or out.get("error")))
+                    status = "completed" if ok else "failed"
+            else:
+                from brain import action_ledger as _al
+                act = _al.open_action(kind="plan_step", intent=step["description"][:200],
+                                      expected=str(step.get("expected") or
+                                                   f"observable evidence that: {step['description'][:160]}"),
+                                      source="planner", ref=f"plan:{plan_id}:{step.get('id')}")
+                status, result = "awaiting_evidence", f"ledger action {act['id']}"
+                step["action_id"] = act["id"]
         except Exception as e:
-            result = f"error: {str(e)[:180]}"
+            status, result = "failed", f"error: {str(e)[:180]}"
 
         with self._lock:
             plans = self._load()
@@ -211,14 +248,17 @@ class LongHorizonPlanner:
             if plan is not None:
                 for s in plan.get("steps") or []:
                     if s.get("id") == step.get("id"):
-                        s["status"] = "completed"
+                        s["status"] = status
                         s["result"] = result[:300]
+                        if step.get("action_id"):
+                            s["action_id"] = step["action_id"]
                         break
                 notes = list(plan.get("progress_notes") or [])
-                notes.append(f"[{time.strftime('%H:%M')}] {step['description'][:60]}: done")
+                notes.append(f"[{time.strftime('%H:%M')}] {step['description'][:60]}: {status}")
                 plan["progress_notes"] = notes[-20:]
                 self._save(plans)
-        return {"ok": True, "step_id": step.get("id"), "result": result}
+        return {"ok": status != "failed", "step_id": step.get("id"),
+                "status": status, "result": result}
 
     def check_progress(self, plan_id: str) -> dict[str, Any]:
         plan = self.get_plan(plan_id)

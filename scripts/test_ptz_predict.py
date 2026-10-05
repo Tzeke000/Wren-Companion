@@ -117,7 +117,7 @@ check("occluded home not misread as off_home", j["verdict"] in ("at_home", "unce
       f"{j['verdict']} {j.get('offset_deg')}")
 
 print("== 11. record() moves register_trust ==")
-with tempfile.TemporaryDirectory() as td:
+with tempfile.TemporaryDirectory(dir=str(Path(__file__).resolve().parent.parent / "scratch" / "tmp")) as td:
     tdp = Path(td)
     pp.MODEL_PATH, pp.LOG_PATH = tdp / "m.json", tdp / "l.jsonl"
     pp._ATT = tdp
