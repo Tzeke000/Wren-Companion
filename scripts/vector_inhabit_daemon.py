@@ -951,18 +951,46 @@ def _nervous_loop(robot, alive: dict) -> None:
                         tmp.replace(LATEST_FRAME)
                         cam["last_frame"] = t0
                     elif (t0 - cam.get("last_frame", cam.get("born", t0))) > 30.0 \
-                            and (t0 - cam.get("last_kick", 0.0)) > 60.0:
+                            and (t0 - cam.get("last_kick", 0.0)) > 60.0 \
+                            and not cam.get("kick_inflight"):
                         # SELF-HEALING EYE (2026-07-23): observe-conn camera
                         # feeds init fine but sometimes never produce a frame
                         # (2nd+ daemon boot of the day). Re-kick the feed —
                         # dry >30s, at most once/min, all guarded.
+                        # 2026-10-05 FIX: the kick ran INLINE and close_camera_feed()
+                        # -> image_streaming_enabled() is a blocking gRPC call with no
+                        # timeout. It never returned (py-spy: vector-nervous parked in
+                        # camera.py:466), freezing THIS WHOLE LOOP at 08:45 — no senses,
+                        # no stream, no frames for hours. The kick now runs on its own
+                        # daemon thread; if it hangs, only the kick hangs (one in flight
+                        # at a time) and the senses keep flowing.
                         cam["last_kick"] = t0
+                        cam["kick_inflight"] = True
+
+                        def _kick(robot=robot, cam=cam):
+                            try:
+                                try:
+                                    robot.camera.close_camera_feed()
+                                except Exception:
+                                    pass
+                                robot.camera.init_camera_feed()
+                                log("nervous system: camera feed re-kicked (dry >30s)")
+                            except Exception as e:  # noqa: BLE001
+                                log(f"nervous system: camera re-kick failed: {e!r}"[:200])
+                            finally:
+                                cam["kick_inflight"] = False
+
                         try:
-                            robot.camera.close_camera_feed()
+                            import threading as _thr
+                            _thr.Thread(target=_kick, daemon=True,
+                                        name="vector-cam-kick").start()
                         except Exception:
-                            pass
-                        robot.camera.init_camera_feed()
-                        log("nervous system: camera feed re-kicked (dry >30s)")
+                            cam["kick_inflight"] = False  # never latch on a failed start
+                    elif cam.get("kick_inflight") and (t0 - cam.get("last_kick", t0)) > 120.0 \
+                            and not cam.get("kick_hang_logged"):
+                        cam["kick_hang_logged"] = True
+                        log("nervous system: camera re-kick HUNG >120s inside the SDK — "
+                            "senses keep flowing; camera stays dry until a daemon restart")
                 except Exception:
                     pass
             # snapshot @5Hz: latest + 1s trends + battery + expression
