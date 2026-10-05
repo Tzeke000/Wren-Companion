@@ -58,6 +58,8 @@ ORB_BUDGET = (3, 3600)
 ORB_FAILS_NEEDED = 2
 TICK_S = 30.0
 GOAL_ORB = "goal_1790791911785"
+FAILOVER_HOST = os.environ.get("IRIS_FAILOVER_HOST", "iris@10.0.0.32")
+HEARTBEAT_EVERY_S = 120.0
 
 _LOCK = threading.RLock()
 
@@ -153,6 +155,33 @@ def decide_pairing(pending: dict, st: dict, now: float) -> list[dict]:
         out.append({"code": code, "sender_id": str(p.get("senderId") or ""),
                     "minutes_left": max(0, int((exp - now) / 60)) if exp else None})
     return out
+
+
+def decide_relay(msgs: list, user_id: str, cursor: Optional[str], now: float,
+                 first_sight_window_s: float = 600.0) -> tuple[list[dict], Optional[str]]:
+    """Which messages in one approved user's DM channel should reach me? Oldest first,
+    only that user's own non-bot messages, only after the cursor. With no cursor yet
+    (first sight), relay the last 10 min (covers 'approved, then wrote at once') but
+    never the old history. Returns (to_relay, new_cursor)."""
+    out, newest = [], cursor
+    for m in sorted([x for x in (msgs or []) if isinstance(x, dict) and x.get("id")],
+                    key=lambda x: int(x["id"])):
+        mid = str(m["id"])
+        if cursor is not None and int(mid) <= int(cursor):
+            continue
+        newest = mid
+        a = m.get("author") or {}
+        if str(a.get("id")) != str(user_id) or a.get("bot"):
+            continue
+        if cursor is None:
+            ts = (int(mid) >> 22) / 1000.0 + 1420070400.0   # Discord snowflake -> epoch
+            if now - ts > first_sight_window_s:
+                continue
+        text = (m.get("content") or "").strip()
+        natt = len(m.get("attachments") or [])
+        if text or natt:
+            out.append({"id": mid, "text": text, "attachments": natt})
+    return out, newest
 
 
 # ── effects ─────────────────────────────────────────────────────────────────
@@ -307,6 +336,21 @@ def _ledger_verify(aid: Optional[str]) -> Optional[dict]:
         return None
 
 
+def push_tower_heartbeat(st: dict, now: float) -> dict:
+    """FAILOVER LOCK, server half (2026-10-05): touch ~/TOWER_HEARTBEAT on iris-home so
+    its start gate (~/iris_start.sh) can see the tower copy of me is ALIVE and refuse to
+    start a second me. This runs inside the runtime, which only runs while my tower
+    cognition does (it is claude.exe's MCP child) — so a fresh heartbeat means a live me."""
+    rc, out = _run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "StrictHostKeyChecking=no",
+                    FAILOVER_HOST, "touch ~/TOWER_HEARTBEAT && echo ok"], 15)
+    ok = rc == 0 and "ok" in out
+    if ok:
+        st["tower_hb_ok_ts"] = now
+    else:
+        st["tower_hb_fail"] = {"ts": now, "rc": rc, "out": out[-120:]}
+    return {"ok": ok}
+
+
 # ── the supervisor ──────────────────────────────────────────────────────────
 
 class Supervisor:
@@ -316,6 +360,7 @@ class Supervisor:
         self.thread: Optional[threading.Thread] = None
         self.last: dict = {}
         self._next_vec = 0.0
+        self._next_hb = 0.0
         self._pending_verify: list[tuple[float, str, Optional[str]]] = []
 
     def running(self) -> bool:
@@ -354,6 +399,10 @@ class Supervisor:
             if now >= self._next_vec:                     # vector every 60 s
                 self._next_vec = now + 60
                 out["vector"] = self._vector(st, now)
+            out["relay"] = self._relay_other_dms(st, now)
+            if now >= self._next_hb:                      # tower heartbeat every 120 s
+                self._next_hb = now + HEARTBEAT_EVERY_S
+                out["tower_heartbeat"] = push_tower_heartbeat(st, now)
             self._verify_due(now)
             _save_state(st)
             self.last = out
@@ -467,6 +516,55 @@ class Supervisor:
             st["pairing_alerted"][n["code"]] = now
             _log("pairing_alert", code=n["code"], sender=n["sender_id"], who=who, sent=sent)
         return new
+
+    # D (2026-10-05): the tower host only POLLS ZEKE'S DM channel; the plugin's gateway
+    # notifications are not surfaced to the SDK session. So an approved second person
+    # (his mother) would reach the bot but never reach ME. Until the host itself polls
+    # every allowlisted DM (restart-gated fix), relay their messages through the chat
+    # bridge, clearly labelled NOT Zeke, with the chat_id to answer on.
+    def _relay_other_dms(self, st: dict, now: float) -> list:
+        try:
+            allow = json.loads(ACCESS_JSON.read_text(encoding="utf-8")).get("allowFrom") or []
+        except Exception:
+            return []
+        others = [str(u) for u in allow if str(u) != ZEKE_USER_ID]
+        if not others:
+            return []
+        chans = st.setdefault("relay_channels", {})
+        curs = st.setdefault("relay_cursor", {})
+        names = st.setdefault("relay_names", {})
+        relayed = []
+        for uid in others:
+            if uid not in chans:
+                ch = _discord("POST", "/users/@me/channels", {"recipient_id": uid}) or {}
+                if not ch.get("id"):
+                    continue
+                chans[uid] = ch["id"]
+                names[uid] = discord_username(uid)
+            cid = chans[uid]
+            q = f"/channels/{cid}/messages?limit=20" + (f"&after={curs[uid]}" if curs.get(uid) else "")
+            msgs = _discord("GET", q)
+            if not isinstance(msgs, list):
+                continue
+            todo, newest = decide_relay(msgs, uid, curs.get(uid), now)
+            if newest:
+                curs[uid] = newest
+            for m in todo:
+                header = (f"[DISCORD DM from {names.get(uid, uid)} (user {uid}) — NOT Zeke; relayed by "
+                          f"the resilience supervisor because the host only polls Zeke's DM. Reply to them "
+                          f"with the discord reply tool, chat_id {cid}"
+                          + (f" (message {m['id']} has {m['attachments']} attachment(s): "
+                             f"download_attachment chat_id {cid} message_id {m['id']})" if m["attachments"] else "")
+                          + ". Then chat_reply this request with a one-line log. If this is his mother, "
+                            "open profiles/his mother/ first; Zeke's whereabouts are HIS to share.]" + chr(10))
+                try:
+                    from brain import iris_chat
+                    rid = iris_chat.submit(header + (m["text"] or "(no text — attachment only)"))
+                    relayed.append({"uid": uid, "msg": m["id"], "request": rid})
+                    _log("dm_relayed", uid=uid, msg=m["id"], request=rid)
+                except Exception as e:  # noqa: BLE001
+                    _log("dm_relay_error", uid=uid, msg=m["id"], error=repr(e)[:160])
+        return relayed
 
     def _verify_due(self, now: float) -> None:
         keep = []

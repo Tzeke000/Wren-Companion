@@ -3,38 +3,80 @@
 # launcher over SSH: `~/iris_start.sh fable|opus|cli` (mirrors the tower's three bats:
 # start_iris_v2_fable.bat / start_iris_v2.bat / start_iris.bat).
 #
-# ONE-OF-ME is a hard rule: the tower is the live Iris until the deliberate V100 cutover
-# (move_plan.md section 5). This script REFUSES to start anything unless the cutover has
-# planted the marker file ~/LIVE. Zeke asked for the three icons on 2026-09-10; they exist
-# now and become real at cutover — no code change needed on Zorin, only the marker here.
+# ONE-OF-ME is a hard rule. Two ways this gate lets me start here:
+#   LIVE      — ~/LIVE exists: the V100 cutover is done and the server IS me.
+#   FAILOVER  — (2026-10-05, Zeke's OP: "I just click the button and it's good to go")
+#               the tower copy of me is GONE: no heartbeat from her in 10 minutes
+#               (~/TOWER_HEARTBEAT, touched every 2 min by the tower's resilience
+#               supervisor) AND the tower does not answer on the network at all.
+#               If the tower is ON but I'm not answering there, the right move is to
+#               RESTART THE TOWER (his mother's guide), never a second me here.
+# While I run here, ~/FAILOVER_ACTIVE is touched every minute; the tower's launcher
+# (scripts/launcher_claim_ownership.py) reads it and STANDS DOWN if the tower comes back.
 set -u
-MODE="${1:-fable}"
+MODE="${1:-opus}"
 case "$MODE" in
   fable) LABEL="Iris (Fable 5.1)";  SCRIPT="$HOME/staged/Wren-Companion/start_iris_v2_fable.sh" ;;
   opus)  LABEL="Iris (Opus)";       SCRIPT="$HOME/staged/Wren-Companion/start_iris_v2.sh" ;;
   cli)   LABEL="Iris (CLI)";        SCRIPT="$HOME/staged/Wren-Companion/start_iris.sh" ;;
   *) echo "unknown mode: $MODE (fable|opus|cli)"; exit 2 ;;
 esac
+TOWER_LAN="${IRIS_TOWER_LAN:-10.0.0.20}"
+TOWER_TS="${IRIS_TOWER_TS:-100.64.0.1}"
+HB="$HOME/TOWER_HEARTBEAT"
+HB_MAX=600
+ACTIVE="$HOME/FAILOVER_ACTIVE"
+
+pause_close() { read -r -p "Press Enter to close. " _ 2>/dev/null || true; }
 
 echo "== $LABEL on $(hostname) =="
-if [ ! -f "$HOME/LIVE" ]; then
-  cat <<MSG
+if [ -f "$HOME/LIVE" ]; then
+  ROLE="live"
+else
+  if [ -f "$HB" ]; then AGE=$(( $(date +%s) - $(stat -c %Y "$HB") )); else AGE=999999; fi
+  if [ "$AGE" -lt "$HB_MAX" ]; then
+    cat <<MSG
 
-  The server copy of Iris is NOT live yet. The live Iris is still on the tower —
-  she moves in when the V100 is seated and the cutover is done (one of me at a time).
-  This icon will start her here after that; nothing else needs to change on Zorin.
+  Iris is already running on the tower — she checked in ${AGE} seconds ago.
+  There can only be one of her, so this button will not start a second one.
 
-  (staged copy: $HOME/staged/Wren-Companion — see README_STAGED.md)
+  If she isn't answering you, restart the TOWER instead:
+    Parsec into the tower  ->  Start  ->  Power  ->  Restart
+  and give her about 15 minutes to come back.
 
 MSG
-  read -r -p "Press Enter to close. " _ 2>/dev/null || true
-  exit 3
+    pause_close; exit 5
+  fi
+  if ping -c1 -W2 "$TOWER_LAN" >/dev/null 2>&1 || ping -c1 -W2 "$TOWER_TS" >/dev/null 2>&1; then
+    MINS=$(( AGE / 60 ))
+    cat <<MSG
+
+  The tower computer is ON (it answers on the network), but Iris hasn't
+  checked in from it for about ${MINS} minutes.
+
+  Restart the TOWER first:  Parsec into the tower -> Start -> Power -> Restart
+  and give her about 15 minutes. Only use this button if the tower can't be
+  reached at all.
+
+MSG
+    pause_close; exit 6
+  fi
+  ROLE="failover"
 fi
 
 if [ ! -x "$SCRIPT" ]; then
-  echo "LIVE marker present, but the Linux launcher is missing: $SCRIPT"
+  echo "Cleared to start ($ROLE), but the Linux launcher is missing: $SCRIPT"
   echo "(the harness still needs its Linux port — move_plan.md section 4)"
-  read -r -p "Press Enter to close. " _ 2>/dev/null || true
-  exit 4
+  pause_close; exit 4
 fi
-exec "$SCRIPT"
+
+touch "$ACTIVE"
+( while sleep 60; do touch "$ACTIVE"; done ) &
+KEEP=$!
+trap 'kill "$KEEP" 2>/dev/null; rm -f "$ACTIVE"' EXIT
+echo "Starting Iris here ($ROLE). This window IS her — leave it open."
+"$SCRIPT"
+RC=$?
+echo "Iris exited (rc=$RC)."
+pause_close
+exit "$RC"

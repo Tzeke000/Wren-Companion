@@ -69,10 +69,34 @@ def heartbeat_fresh(time_json: Path, max_age_s: float) -> tuple[bool, float]:
         return False, -1.0
 
 
+COGNITION_MARKER = "Agent-SDK BODY host"   # a phrase in MY system prompt (iris_body_host)
+
+
 def cognition_alive(cmd_substr: str) -> bool:
-    """Is a claude.exe cognition process alive whose command line contains
-    cmd_substr (default the repo dir)? Uses CIM; falls back to False on error."""
+    """Is a claude.exe cognition process of mine alive?
+
+    2026-10-05 FIX: since the 10-01 switch to the NATIVE Claude Code CLI
+    (%USERPROFILE%\\.local\\bin\\claude.exe) the cognition's command line no longer
+    contains the repo path — only its working directory does — so this check returned
+    False with me alive and the first-owner gate could no longer see a healthy owner
+    (test_launcher_ownership case 1 had been failing silently). Match on the repo path
+    in the command line OR the working directory OR my system-prompt marker."""
     if not cmd_substr:
+        return False
+    try:
+        import psutil
+        needle = cmd_substr.lower()
+        for p in psutil.process_iter(["name", "cmdline", "cwd"]):
+            if (p.info.get("name") or "").lower() != "claude.exe":
+                continue
+            cl = " ".join(p.info.get("cmdline") or [])
+            cwd = (p.info.get("cwd") or "")
+            if needle in cl.lower() or needle in cwd.lower() or COGNITION_MARKER in cl:
+                return True
+        return False
+    except ImportError:
+        pass
+    except Exception:
         return False
     try:
         import subprocess
@@ -122,6 +146,50 @@ def _with_mutex(hold_ms: int, fn):
             pass
 
 
+def server_failover_live(host: str, max_age_s: float) -> tuple[bool, str]:
+    """Is the server copy of me (iris-home) running as a failover right now?
+    Reads the age of ~/FAILOVER_ACTIVE on the server (the server's own clock, so the
+    two machines' clocks never need to agree). Unreachable server / no marker => False
+    (fail-open: an unreachable server cannot be running a live me that the tower would
+    collide with on Discord, and blocking here would leave Iris down)."""
+    import subprocess
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "StrictHostKeyChecking=no",
+           host, 'f=~/FAILOVER_ACTIVE; [ -f "$f" ] && echo $(( $(date +%s) - $(stat -c %Y "$f") )) || echo none']
+    try:
+        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL,
+                            creationflags=0x08000000 if os.name == "nt" else 0)
+        out = (cp.stdout or "").strip().splitlines()
+        val = out[-1] if out else ""
+        if cp.returncode != 0 or not val:
+            return False, f"server unreachable (rc={cp.returncode})"
+        if val == "none":
+            return False, "no FAILOVER_ACTIVE marker on the server"
+        age = float(val)
+        return age <= max_age_s, f"FAILOVER_ACTIVE age={age:.0f}s (max {max_age_s:.0f}s)"
+    except Exception as e:  # noqa: BLE001
+        return False, f"server check errored: {e!r}"[:160]
+
+
+def notify_failover_standdown(detail: str) -> None:
+    """DM Zeke once per hour that the tower stood down for the server copy."""
+    marker = REPO / "state" / "failover_standdown_dm.json"
+    try:
+        last = json.loads(marker.read_text(encoding="utf-8")).get("ts", 0)
+        if time.time() - float(last) < 3600:
+            return
+    except Exception:
+        pass
+    try:
+        sys.path.insert(0, str(REPO))
+        from brain import resilience_supervisor as rs
+        rs.dm_zeke("⚠ The tower came back up, but the SERVER copy of me is live right now "
+                   f"({detail}), so the tower stood down: one of me at a time. When you can: "
+                   "close me on the server (or reply here and I'll tell you how), then restart the tower.")
+        marker.write_text(json.dumps({"ts": time.time()}), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        _log(f"failover stand-down DM failed (non-fatal): {e!r}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=os.environ.get("IRIS_MODEL", "?"))
@@ -137,6 +205,11 @@ def main() -> int:
                          "(bridges the cold-start gap; short so restart retries aren't blocked)")
     ap.add_argument("--claim-file", default=None,
                     help="ownership claim path (overridable for tests)")
+    ap.add_argument("--no-server-check", action="store_true",
+                    help="skip the iris-home failover check (tests / server unreachable by design)")
+    ap.add_argument("--server-host", default=os.environ.get("IRIS_FAILOVER_HOST", "iris@10.0.0.32"))
+    ap.add_argument("--server-max-age", type=float, default=300.0,
+                    help="FAILOVER_ACTIVE younger than this on the server = server-me is live")
     ap.add_argument("--force", action="store_true",
                     help="take over even a healthy Iris (intentional replace / model flip); "
                          "also via env IRIS_FORCE_TAKEOVER=1")
@@ -150,6 +223,18 @@ def main() -> int:
             _log("FORCE takeover requested (--force / IRIS_FORCE_TAKEOVER=1) — "
                  "proceeding to sweep even if a healthy Iris is present")
             return 0
+        # 2026-10-05 FAILOVER LOCK (Zeke's OP): if the server copy of me on iris-home is
+        # LIVE (her keepalive marker is fresh), the tower must NOT start a second me —
+        # e.g. the tower's power came back while his mother had started me on the
+        # server. Stand down and tell Zeke; --force / IRIS_FORCE_TAKEOVER=1 overrides.
+        if not args.no_server_check:
+            live, detail = server_failover_live(args.server_host, args.server_max_age)
+            _log(f"server failover check: live={live} ({detail})")
+            if live:
+                _log("the SERVER copy of Iris is live (failover) — STANDING DOWN on the "
+                     "tower, will NOT sweep (one of me at a time)")
+                notify_failover_standdown(detail)
+                return 10
         hb_ok, hb_age = heartbeat_fresh(Path(args.time_json), args.heartbeat_max_age)
         cog_ok = cognition_alive(args.cognition_cmd_substr)
         owner_present = hb_ok and cog_ok

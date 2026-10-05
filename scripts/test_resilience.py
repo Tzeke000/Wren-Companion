@@ -84,5 +84,62 @@ with tempfile.TemporaryDirectory(dir=str(ROOT / "scratch" / "tmp")) as td:
     check("DM names the sender + code", sent and "his mother" in sent[0] and "c0ffee" in sent[0])
     check("access.json untouched", rs.ACCESS_JSON.read_text(encoding="utf-8") == before)
 
+print("== D. relay other approved DMs (pure) ==")
+
+
+def snow(epoch_s):  # a Discord snowflake id for a given epoch second
+    return str(int((epoch_s - 1420070400.0) * 1000) << 22)
+
+
+t = 1_800_000_000.0
+msgs = [
+    {"id": snow(t - 3600), "author": {"id": "42"}, "content": "old history"},
+    {"id": snow(t - 60), "author": {"id": "42"}, "content": "hi Iris, it's me"},
+    {"id": snow(t - 30), "author": {"id": "999", "bot": True}, "content": "pairing code abc"},
+    {"id": snow(t - 10), "author": {"id": "77"}, "content": "someone else"},
+]
+todo, cur = rs.decide_relay(msgs, "42", None, t)
+check("first sight: relays only her recent message, not old history",
+      [m["text"] for m in todo] == ["hi Iris, it's me"], str(todo))
+check("cursor advances to the newest seen id", cur == snow(t - 10))
+todo2, cur2 = rs.decide_relay(msgs + [{"id": snow(t - 1), "author": {"id": "42"}, "content": "you there?"}],
+                              "42", cur, t)
+check("with a cursor: only newer messages", [m["text"] for m in todo2] == ["you there?"], str(todo2))
+todo3, _ = rs.decide_relay([{"id": snow(t), "author": {"id": "42"}, "content": "",
+                             "attachments": [{"id": 1}]}], "42", cur2, t)
+check("attachment-only message still relayed", len(todo3) == 1 and todo3[0]["attachments"] == 1)
+
+print("== D. relay end-to-end (Discord + chat bridge mocked) ==")
+with tempfile.TemporaryDirectory(dir=str(ROOT / "scratch" / "tmp")) as td:
+    td = Path(td)
+    rs._DIR, rs.STATE_PATH, rs.LOG_PATH = td, td / "s.json", td / "l.jsonl"
+    rs.ACCESS_JSON = td / "access.json"
+    rs.ACCESS_JSON.write_text(json.dumps({"allowFrom": [rs.ZEKE_USER_ID, "42"], "pending": {}}),
+                              encoding="utf-8")
+    now_ts = time.time()
+    calls = []
+
+    def fake_discord(method, path, body=None):
+        calls.append((method, path))
+        if method == "POST":
+            return {"id": "CH42"}
+        return [{"id": snow(now_ts - 5), "author": {"id": "42"}, "content": "hello from mom"}]
+    rs._discord = fake_discord
+    rs.discord_username = lambda uid: "MomUser"
+    submitted = []
+    import types
+    fake_chat = types.SimpleNamespace(submit=lambda text: submitted.append(text) or "rid1")
+    sys.modules["brain.iris_chat"] = fake_chat
+    import brain
+    brain.iris_chat = fake_chat
+    sup = rs.Supervisor({})
+    st = {}
+    out = sup._relay_other_dms(st, now_ts)
+    check("Zeke is never relayed (the host polls him)", all("CH" + rs.ZEKE_USER_ID not in p for _, p in calls))
+    check("her message reached the chat bridge", len(submitted) == 1 and "hello from mom" in submitted[0])
+    check("header says NOT Zeke + gives her chat_id", submitted and "NOT Zeke" in submitted[0] and "CH42" in submitted[0])
+    out2 = sup._relay_other_dms(st, now_ts + 5)
+    check("same message not relayed twice", len(submitted) == 1, str(len(submitted)))
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 sys.exit(1 if FAIL else 0)

@@ -110,7 +110,7 @@ REM --- (verified live: the SDK-bundled exe path is
 REM --- D:\Wren-Companion\.venv\...\claude.exe) — any Claude session from
 REM --- another repo has neither and is SPARED.
 call :log "sweep 2/3: orphan cognition (claude.exe under Wren-Companion)..."
-powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object { $_.CommandLine -like '*Wren-Companion*' } | ForEach-Object { $m = '[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] killing orphan cognition PID ' + $_.ProcessId; Write-Host $m; if ($env:IRISLOG) { Add-Content -Path $env:IRISLOG -Value $m } ; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object { $_.CommandLine -like '*Wren-Companion*' -or $_.CommandLine -like '*Agent-SDK BODY host*' } | ForEach-Object { $m = '[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] killing orphan cognition PID ' + $_.ProcessId; Write-Host $m; if ($env:IRISLOG) { Add-Content -Path $env:IRISLOG -Value $m } ; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
 REM --- Kill any stale ORB APP too (Zeke directive 2026-07-08): a ghost iris-control
 REM --- wedged at its splash screen holds the app's single-instance lock, so every
