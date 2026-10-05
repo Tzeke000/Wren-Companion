@@ -157,6 +157,20 @@ def _head_bearing(g: dict[str, Any]) -> dict | None:
         from brain import visual_attention as va
         act = va.build_actuator()
         b = act.bearing()
+        # 2026-10-05: "confirmed" only means the WinRT register echoed back — blind
+        # to jog motion. If the image-based check (ptz_predict) last found the view
+        # off its home reference, the registers are STALE: don't map faces against them.
+        _trust = None
+        try:
+            from brain import ptz_predict as _pp
+            _trust = _pp.register_trust()
+        except Exception:
+            _trust = None
+        if b and b.get("confirmed") and (_trust or {}).get("trust") == "stale":
+            return {"pan_deg": float(b.get("pan_deg") or 0.0),
+                    "tilt_deg": float(b.get("tilt_deg") or 0.0),
+                    "confirmed": False,
+                    "stale_reason": (_trust or {}).get("reason")}
         if b and b.get("confirmed"):
             return {"pan_deg": float(b.get("pan_deg") or 0.0),
                     "tilt_deg": float(b.get("tilt_deg") or 0.0),

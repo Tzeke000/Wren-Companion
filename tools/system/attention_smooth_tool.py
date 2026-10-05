@@ -1248,6 +1248,17 @@ def _servo_loop(g: dict[str, Any], stop: threading.Event, st: dict[str, Any]) ->
                                     st["last_home"] = {"ts": time.time(),
                                                        "readback": _rb,
                                                        "frame": _fp}
+                                    # 2026-10-05: judge the home by the IMAGE (ptz_predict
+                                    # home reference), not the readback; off_home => resync.
+                                    try:
+                                        from tools.system.ptz_predict_tool import check_home_now, resync_home
+                                        _chk = check_home_now(source="servo_lost_hold")
+                                        st["last_home"]["check"] = {k: _chk.get(k) for k in ("verdict", "offset_deg", "detail")}
+                                        if _chk.get("verdict") == "off_home":
+                                            _rs = resync_home(source="servo_lost_hold_resync")
+                                            st["last_home"]["resync"] = {k: _rs.get(k) for k in ("verdict", "offset_deg")}
+                                    except Exception as _e:  # noqa: BLE001
+                                        st["last_home"]["check"] = {"error": repr(_e)[:120]}
                                     try:
                                         from brain.visual_attention import _ptz_audit
                                         _ptz_audit("home_verify", True,
@@ -1403,6 +1414,26 @@ def _attention_smooth(params: dict[str, Any], g: dict[str, Any]) -> dict[str, An
                     homed = act.look_at(*_HOME) or {}
                     st["last_home"] = {"ts": time.time(), "reason": "stop",
                                        "result": {k: homed.get(k) for k in ("ok", "moved")}}
+                    # 2026-10-05 (ptz_predict, Zeke+Vale research handoff): a home is
+                    # only DONE when the IMAGE agrees — the registers said home for 6 h
+                    # on 10-02 while the view sat 15 deg off. Verify against the stored
+                    # home view off-thread (stop must stay fast); off_home => one resync.
+                    if homed.get("ok"):
+                        _lh = st["last_home"]
+
+                        def _verify_home(_lh=_lh):
+                            try:
+                                from tools.system.ptz_predict_tool import check_home_now, resync_home
+                                chk = check_home_now(source="servo_stop", settle_s=2.0)
+                                _lh["check"] = {k: chk.get(k) for k in ("verdict", "offset_deg", "detail")}
+                                if chk.get("verdict") == "off_home":
+                                    rs = resync_home(source="servo_stop_resync")
+                                    _lh["resync"] = {k: rs.get(k) for k in ("verdict", "offset_deg", "detail")}
+                            except Exception as _e:  # noqa: BLE001
+                                _lh["check"] = {"error": repr(_e)[:120]}
+
+                        threading.Thread(target=_verify_home, name="ptz-home-verify",
+                                         daemon=True).start()
             except Exception as e:  # noqa: BLE001 — stopping must never fail on the home
                 homed = {"ok": False, "error": repr(e)[:120]}
         return {"ok": True, "running": False, "was_running": running,
