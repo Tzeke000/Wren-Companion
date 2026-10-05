@@ -52,6 +52,21 @@ check("recovery resets the count", rs.decide_orb(True, st, now + 60)["action"] =
 st = {"orb_heals": [now - 10, now - 20, now - 30], "orb_fails": 5}
 check("budget spent -> stand_down", rs.decide_orb(False, st, now)["action"] == "stand_down")
 
+print("== E. wire-pod ==")
+st = {}
+check("chipper running -> none", rs.decide_wirepod({"running": True}, st, now)["action"] == "none")
+check("first absence only starts the grace",
+      rs.decide_wirepod({"running": False}, st, now)["action"] == "none")
+check("absent past grace -> start_chipper",
+      rs.decide_wirepod({"running": False}, st, now + 200)["action"] == "start_chipper")
+check("back up clears the clock",
+      rs.decide_wirepod({"running": True}, st, now + 260)["action"] == "none" and "wirepod_gone_since" not in st)
+check("off flag -> none even when absent",
+      rs.decide_wirepod({"running": False, "off": True}, {"wirepod_gone_since": now - 999}, now)["action"] == "none")
+st = {"wirepod_heals": [now - 10, now - 20, now - 30], "wirepod_gone_since": now - 999}
+check("budget spent -> stand_down", rs.decide_wirepod({"running": False}, st, now)["action"] == "stand_down")
+check("live observe sees chipper", rs.observe_wirepod().get("running") is True)
+
 print("== C. pairing ==")
 pend = {"abc123": {"senderId": "42", "expiresAt": (now + 3000) * 1000},
         "old999": {"senderId": "43", "expiresAt": (now - 10) * 1000}}

@@ -18,6 +18,8 @@ retry budget so a heal can never become a loop:
   C. PAIRING ALERT (item 5). The Discord plugin keeps pairing codes for ONE HOUR (cap 3).
      A new code in access.json `pending` => DM Zeke at once with the sender's username and
      the code. READ-ONLY on access.json — approving stays his, from the terminal.
+  E. WIRE-POD (10-05 test reboot): chipper.exe absent > 3 min => start it (its Run-key
+     autostart missed once). Absence only; a hung-but-running chipper is left alone.
 
 Every heal is an action-ledger row with an external verifier (success needs evidence);
 budgets exhausted => stand down and DM Zeke ONCE, never loop. State + log under
@@ -60,6 +62,10 @@ TICK_S = 30.0
 GOAL_ORB = "goal_1790791911785"
 FAILOVER_HOST = os.environ.get("IRIS_FAILOVER_HOST", "iris@10.0.0.32")
 HEARTBEAT_EVERY_S = 120.0
+CHIPPER_EXE = Path(r"C:\Program Files\wire-pod\chipper\chipper.exe")
+WIREPOD_OFF_FLAG = _ROOT / "state" / "wirepod_deliberately_off.json"
+WIREPOD_GONE_S = 3 * 60           # Run-key autostarts can lag a minute or two after logon
+WIREPOD_BUDGET = (3, 6 * 3600)
 
 _LOCK = threading.RLock()
 
@@ -124,6 +130,25 @@ def decide_vector(obs: dict, st: dict, now: float) -> dict:
     if not _budget_ok(hist, VECTOR_BUDGET, now):
         return {"action": "stand_down", "why": f"senses stale {age:.0f}s and the heal budget is spent"}
     return {"action": "vic_restart", "why": f"senses stale {age:.0f}s while the daemon runs and the robot pings"}
+
+
+def decide_wirepod(obs: dict, st: dict, now: float) -> dict:
+    """E (2026-10-05 test reboot): wire-pod's HKCU Run-key autostart did NOT bring chipper.exe
+    up after the planned reboot (cause unknown) — Vector's server stayed down until I started it
+    by hand. obs: off (flag), running (process present). Only heals ABSENCE; a running-but-hung
+    chipper (the :8080 ReadTimeout class) is deliberately left alone — that's a different recipe."""
+    if obs.get("off"):
+        st.pop("wirepod_gone_since", None)
+        return {"action": "none", "why": "wire-pod deliberately off (flag)"}
+    if obs.get("running"):
+        st.pop("wirepod_gone_since", None)
+        return {"action": "none", "why": "chipper running"}
+    since = st.setdefault("wirepod_gone_since", now)
+    if now - since < WIREPOD_GONE_S:
+        return {"action": "none", "why": f"chipper absent {now - since:.0f}s (< {WIREPOD_GONE_S}s grace)"}
+    if not _budget_ok(st.setdefault("wirepod_heals", []), WIREPOD_BUDGET, now):
+        return {"action": "stand_down", "why": "chipper still absent and the heal budget is spent"}
+    return {"action": "start_chipper", "why": f"chipper.exe absent for {now - since:.0f}s"}
 
 
 def decide_orb(port_ok: bool, st: dict, now: float) -> dict:
@@ -270,6 +295,33 @@ def vic_restart() -> tuple[bool, str]:
     return rc == 0 and out.count("active") >= 2, out.strip()[-200:]
 
 
+def observe_wirepod() -> dict:
+    running = False
+    try:
+        import psutil
+        running = any((p.info.get("name") or "").lower() == "chipper.exe"
+                      for p in psutil.process_iter(["name"]))
+    except Exception:
+        running = True   # can't see processes => never act blind
+    try:
+        off = bool(json.loads(WIREPOD_OFF_FLAG.read_text(encoding="utf-8")).get("off", True))
+    except FileNotFoundError:
+        off = False
+    except Exception:
+        off = True
+    return {"off": off, "running": running}
+
+
+def start_chipper() -> tuple[bool, str]:
+    """Same launch as wire-pod's own Run key (chipper.exe -d, cwd = its folder)."""
+    if not CHIPPER_EXE.exists():
+        return False, f"missing {CHIPPER_EXE}"
+    cmd = (f"Start-Process -WindowStyle Hidden '{CHIPPER_EXE}' -ArgumentList '-d' "
+           f"-WorkingDirectory '{CHIPPER_EXE.parent}'")
+    rc, out = _run(["powershell", "-NoProfile", "-Command", cmd], 30)
+    return rc == 0, out[-200:]
+
+
 def port_ok(port: int = 5876) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=2.0):
@@ -399,6 +451,7 @@ class Supervisor:
             if now >= self._next_vec:                     # vector every 60 s
                 self._next_vec = now + 60
                 out["vector"] = self._vector(st, now)
+                out["wirepod"] = self._wirepod(st, now)
             out["relay"] = self._relay_other_dms(st, now)
             if now >= self._next_hb:                      # tower heartbeat every 120 s
                 self._next_hb = now + HEARTBEAT_EVERY_S
@@ -436,6 +489,28 @@ class Supervisor:
             ok = ok and ok2
         _log("vector_heal", action=d["action"], why=d["why"], ok=ok, info=info, ledger=aid)
         self._pending_verify.append((now + 240, "vector", aid))
+        d.update(ok=ok, info=info, ledger=aid)
+        return d
+
+    # E
+    def _wirepod(self, st: dict, now: float) -> dict:
+        d = decide_wirepod(observe_wirepod(), st, now)
+        if d["action"] == "none":
+            st.pop("wirepod_stood_down", None)
+            return d
+        if d["action"] == "stand_down":
+            if not st.get("wirepod_stood_down"):
+                st["wirepod_stood_down"] = now
+                _log("wirepod_stand_down", why=d["why"])
+                dm_zeke("⚠ Vector's server (wire-pod) keeps dying and my restart budget is spent. "
+                        "His senses still work over the SDK; voice commands to him won't until it's back.")
+            return d
+        st.setdefault("wirepod_heals", []).append(now)
+        aid = _ledger_open("wirepod_heal", d["why"], "wire-pod answers on :8080 again",
+                           {"type": "port", "host": "127.0.0.1", "port": 8080})
+        ok, info = start_chipper()
+        _log("wirepod_heal", why=d["why"], ok=ok, info=info, ledger=aid)
+        self._pending_verify.append((now + 60, "wirepod", aid))
         d.update(ok=ok, info=info, ledger=aid)
         return d
 
@@ -598,4 +673,6 @@ def status() -> dict:
             "vector_heals_6h": sum(1 for t in st.get("vector_heals", []) if now - t < VECTOR_BUDGET[1]),
             "orb_heals_1h": sum(1 for t in st.get("orb_heals", []) if now - t < ORB_BUDGET[1]),
             "pairing_alerted": st.get("pairing_alerted", {}),
-            "stood_down": {k: st[k] for k in ("vector_stood_down", "orb_stood_down") if st.get(k)}}
+            "wirepod_heals_6h": sum(1 for t in st.get("wirepod_heals", []) if now - t < WIREPOD_BUDGET[1]),
+            "stood_down": {k: st[k] for k in ("vector_stood_down", "orb_stood_down", "wirepod_stood_down")
+                           if st.get(k)}}
