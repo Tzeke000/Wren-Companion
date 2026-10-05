@@ -109,6 +109,16 @@ class QuestionEngine:
             scale = float(adaptive_iris.cooldown_scale())
         except Exception:
             scale = 1.0
+        # 2026-10-05 (CTEM, mood_influence): high initiative — relative to MY OWN
+        # learned baseline — asks a little sooner; low initiative waits a little
+        # longer. Bounded x0.8..x1.25, multiplies the learned scale, never removes
+        # the "no two in a row" rule. Logged to state/mood_influence/.
+        try:
+            from brain import mood_influence
+            scale *= mood_influence.factor("question_cooldown", "initiative", direction=-1,
+                                           base=_COOLDOWN_BETWEEN_QUESTIONS_SEC * scale)
+        except Exception:
+            pass
         return max(0.0, _COOLDOWN_BETWEEN_QUESTIONS_SEC * scale - (time.time() - self._last_question_ts))
 
     # ── candidate selection ────────────────────────────────────────────────────

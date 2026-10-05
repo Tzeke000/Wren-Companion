@@ -63,9 +63,18 @@ _TICK_THREAD_STARTED = False
 def _tick_interval_s() -> float:
     try:
         from brain.iris_tune import get as _tune
-        return float(_tune("cadence", "inner_monologue_interval_s", _DEFAULT_TICK_INTERVAL_S))
+        base = float(_tune("cadence", "inner_monologue_interval_s", _DEFAULT_TICK_INTERVAL_S))
     except Exception:
-        return _DEFAULT_TICK_INTERVAL_S
+        base = _DEFAULT_TICK_INTERVAL_S
+    # 2026-10-05 (CTEM, mood_influence): a reflective mood (high `depth`, relative to
+    # MY OWN learned baseline) thinks a little more often; a shallow one a little less.
+    # Bounded x0.8..x1.25, 1.0 until the baseline is learned; the hard floor below
+    # (_HARD_MIN_INTERVAL_S) still applies. Logged to state/mood_influence/.
+    try:
+        from brain import mood_influence
+        return base * mood_influence.factor("monologue_interval", "depth", direction=-1, base=base)
+    except Exception:
+        return base
 
 
 def _min_interval_s() -> float:
