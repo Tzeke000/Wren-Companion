@@ -107,6 +107,29 @@ Full text of both: memory note `vale_research_handoff_2026-10-04.md`.
 
 **⚠ Restart-gated.** The consumers live in `question_engine` and `iris_inner_monologue`. Both hold live state and are not hot-swapped (by rule), so they take effect at the next stack restart.
 
+## 5. Part 5 — built 10-05 afternoon (Zeke: "yeah go for it")
+
+### `skill` — verified recipe library (Voyager, MIT)
+A recipe = a one-line description (embedded: MiniLM ONNX on CPU, lexical fallback) + steps; `find` = top-k by
+similarity. **The critic is the action ledger**: `verified` only when the recipe cites a ledger action that closed
+`success` with evidence; otherwise `provisional` and hidden from `find` until a successful use promotes it; two
+failed uses in a row → `needs_revision`; re-adding a name = a new version. **Consumer: `act open` returns the top
+verified recipes alongside the past lessons** — proven live: opening a `git_push` action handed back
+`git_push_verify`, which was then used and recorded. Seeded: `vector_vic_restart`, `git_push_verify` (verified);
+`ptz_resync`, `orb_http_listener_recovery`, `vector_find_moved_ip` (provisional). Files: `brain/skill_library.py`,
+`tools/system/skill_tool.py`, `scripts/test_skill_library.py` (11/11).
+
+### `memory_hygiene` — the Letta-style maintenance pass (Apache-2.0)
+`audit` = mechanical checks (CORE size vs cap; broken links, code spans ignored; RESOLVED history in CORE; stale
+state-claims in always-loaded files → probe them; relative dates; stacked corrections = append-instead-of-fix;
+notes no link-path reaches, transitive). `dream_next` / `dream_commit` = a cursor over `state/transcript.jsonl` so the
+reflection pass sees every message exactly once, with Letta's filter (lasting? already captured → fix AT THE SOURCE;
+generalisable? absolute dates?). **First pass (10-05 00:00–12:35) fixed:** CORE's stale server line; CLAUDE.md's voice
+line (re-dated, flag-file detail corrected; `self_claim_check` still parses it); hub relative dates; a durable rule
++ boot-nudge item (5b) to scan the Discord DM for attachments never downloaded. Audit still reports 108 unreachable
+notes (old handoffs) — indexing them is ongoing maintenance. Files: `brain/memory_hygiene.py`,
+`tools/system/memory_hygiene_tool.py`, `scripts/test_memory_hygiene.py` (13/13). Self-check item (10i) runs it.
+
 ## Not done yet (queue, in order)
 
 1. **Motor-independent PTZ calibration.** Use `cv2.detail.calibrateRotatingCamera` on centred-coordinate homographies from a few moves. This would settle lens versus motor for the 11% discrepancy.
