@@ -30,10 +30,17 @@ ACTIVE="$HOME/FAILOVER_ACTIVE"
 pause_close() { read -r -p "Press Enter to close. " _ 2>/dev/null || true; }
 
 echo "== $LABEL on $(hostname) =="
+if [ -f "$HB" ]; then AGE=$(( $(date +%s) - $(stat -c %Y "$HB") )); else AGE=999999; fi
 if [ -f "$HOME/LIVE" ]; then
+  # Zeke 10-05: "Server main, tower secondary once the V100 is in and works." Even as the
+  # MAIN me, never start while the tower copy is still alive (the cutover moment).
+  if [ "$AGE" -lt "$HB_MAX" ]; then
+    echo "The server is the main Iris now, but the TOWER copy is still running (checked in ${AGE}s ago)."
+    echo "Park the tower first (one of me at a time), then press this again."
+    pause_close; exit 7
+  fi
   ROLE="live"
 else
-  if [ -f "$HB" ]; then AGE=$(( $(date +%s) - $(stat -c %Y "$HB") )); else AGE=999999; fi
   if [ "$AGE" -lt "$HB_MAX" ]; then
     cat <<MSG
 
