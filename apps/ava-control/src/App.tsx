@@ -1454,8 +1454,8 @@ export default function App() {
   const dbStreamABusy = Boolean(dbStreamA?.busy);
   const toolsRegistry = asRecord(toolsBlock?.tools_registry);
 
+  // Mic mute only stops me HEARING you — typing always works (Zeke 2026-10-06: "you should still be able to type").
   const sendChatText = async (rawText: string) => {
-    if (inputMuted) return;
     const t = rawText.trim();
     if (!t) return;
     setChatBusy(true);
@@ -2340,15 +2340,14 @@ export default function App() {
             type="text"
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
-            placeholder={inputMuted ? "Mic is off" : "Talk to me…"}
+            placeholder="Talk to me…"
             onKeyDown={(e) => {
-              if (inputMuted) return;
               if (e.key === "Enter") {
                 e.preventDefault();
                 void sendChat();
               }
             }}
-            disabled={chatBusy || shutdownInProgress || inputMuted}
+            disabled={chatBusy || shutdownInProgress}
           />
           {inputMuted && (
             <button type="button" className="iris-chip" onClick={() => void toggleInputMute()} title="Turn the mic back on">
@@ -2357,7 +2356,7 @@ export default function App() {
           )}
           <button type="button" className="iris-send" aria-label="Send"
             onClick={() => void sendChat()}
-            disabled={chatBusy || shutdownInProgress || inputMuted || !chatInput.trim()}>
+            disabled={chatBusy || shutdownInProgress || !chatInput.trim()}>
             <Ico d={ICON.send} />
           </button>
         </div>
@@ -2681,10 +2680,9 @@ export default function App() {
                       rows={3}
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
-                      placeholder={inputMuted ? "Your input is muted" : "Message Iris…"}
-                      disabled={chatBusy || inputMuted}
+                      placeholder="Message Iris…"
+                      disabled={chatBusy}
                       onKeyDown={(e) => {
-                        if (inputMuted) return;
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
                           void sendChat();
@@ -2692,7 +2690,7 @@ export default function App() {
                       }}
                     />
                     <div className="chat-actions">
-                      <button type="button" className="btn primary" disabled={chatBusy || !online || inputMuted} onClick={() => void sendChat()}>
+                      <button type="button" className="btn primary" disabled={chatBusy || !online} onClick={() => void sendChat()}>
                         {chatBusy ? "Sending…" : "Send"}
                       </button>
                       <button type="button" className="btn ghost" disabled title="Voice capture not wired in operator API yet">
