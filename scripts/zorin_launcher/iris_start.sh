@@ -77,6 +77,13 @@ if [ ! -x "$SCRIPT" ]; then
   pause_close; exit 4
 fi
 
+# Run inside tmux session "iris" so the tower app's "Open my console" button (Zeke 2026-10-06) can
+# attach to THIS live session from the tower. -A = attach if it already exists, so a second click
+# shows the running me instead of starting another (ONE-OF-ME). The gates above re-run inside.
+if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+  exec tmux new-session -A -s iris "$0" "$MODE"
+fi
+
 touch "$ACTIVE"
 ( while sleep 60; do touch "$ACTIVE"; done ) &
 KEEP=$!

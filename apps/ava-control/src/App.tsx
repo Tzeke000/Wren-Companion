@@ -3,6 +3,7 @@ import * as d3 from "d3";
 import ForceGraph3D from "3d-force-graph";
 import { API_BASE, ApiLogEntry, getJson, getText, postJson, registerApiLogger } from "./api";
 import { JsonBlock, Kv, Section } from "./components/Ui";
+import ServerPanel from "./components/ServerPanel";
 import OrbCanvas, { setBodyStyle, useBodyStyle } from "./components/OrbCanvas";
 import { listen } from "@tauri-apps/api/event";
 
@@ -113,6 +114,7 @@ const PRESENCE_V2_CUBE_MORPH_ENABLED = false;
 
 const TABS = [
   { id: "voice" as const, label: "Voice" },
+  { id: "server" as const, label: "Server" },
   { id: "chat" as const, label: "Chat" },
   { id: "brain" as const, label: "Brain" },
   { id: "status" as const, label: "Status / Heartbeat" },
@@ -3841,6 +3843,8 @@ export default function App() {
               )}
             </div>
           )}
+
+          {tab === "server" && <ServerPanel />}
 
           {tab === "proposals" && (
             <div className="op-pane">

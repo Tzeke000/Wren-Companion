@@ -1,4 +1,23 @@
-const API_BASE = import.meta.env.VITE_OPERATOR_API || "http://127.0.0.1:5876";
+// Which me this app talks to (Zeke 2026-10-06): the tower's runtime, or the one on the server
+// (iris-home, VM 100) after the cutover. Stored in localStorage so the main window and the widget
+// agree; switching RELOADS both windows (sockets + polls rebind cleanly). The Server tab flips it.
+export type Backend = "tower" | "server";
+export const BACKENDS: Record<Backend, string> = {
+  tower: "http://127.0.0.1:5876",
+  server: "http://10.0.0.32:5876",
+};
+export const BACKEND_KEY = "iris.backend";
+export function readBackend(): Backend {
+  try { return localStorage.getItem(BACKEND_KEY) === "server" ? "server" : "tower"; } catch { return "tower"; }
+}
+export function setBackend(b: Backend): void {
+  try { localStorage.setItem(BACKEND_KEY, b); } catch { /* storage unavailable */ }
+  location.reload();
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => { if (e.key === BACKEND_KEY) location.reload(); });
+}
+const API_BASE: string = import.meta.env.VITE_OPERATOR_API || BACKENDS[readBackend()];
 
 /** Emitted after each completed HTTP API response (before JSON throw on error). */
 export type ApiLogEntry = {
