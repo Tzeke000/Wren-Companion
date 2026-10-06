@@ -1945,3 +1945,21 @@ body,
 .presence-root .iris-composer { height: auto; min-height: 0; }
 .presence-root .iris-composer input { width: auto; animation: none; text-shadow: none; border-radius: 0; caret-color: var(--orb-color); }
 .presence-root .iris-composer input:disabled { background: none !important; color: var(--iris-faint); cursor: not-allowed; }
+
+/* Tools + Vector tabs (2026-10-06) */
+.iris-search { width: min(420px, 100%); margin: 0 0 16px; padding: 9px 12px; border-radius: 10px; border: 1px solid #20242c;
+  background: #14161b; color: #e9ebef; font: inherit; font-size: 14px; outline: none; }
+.iris-search:focus { border-color: var(--orb-color); }
+.iris-tool-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+.iris-tool { background: #14161b; border-radius: 10px; padding: 10px 12px; }
+.iris-tool-name { font-family: "Cascadia Mono", Consolas, monospace; font-size: 13px; color: #e9ebef; display: flex; align-items: center; gap: 8px; }
+.iris-tier { font-family: "Segoe UI", sans-serif; font-size: 11px; color: #8b919c; border: 1px solid #2a2f38; border-radius: 6px; padding: 0 6px; }
+.iris-tier.t2, .iris-tier.t3 { color: #e0b26a; border-color: #e0b26a44; }
+.iris-tool-desc { font-size: 12.5px; color: #8b919c; margin-top: 4px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.iris-vector-grid { display: grid; grid-template-columns: minmax(280px, 1.2fr) 1fr; gap: 18px; align-items: start; margin-bottom: 18px; }
+.iris-vector-cam { position: relative; border-radius: 12px; overflow: hidden; background: #14161b; border: 1px solid #20242c; }
+.iris-vector-cam img { width: 100%; display: block; aspect-ratio: 16 / 9; object-fit: cover; }
+.iris-vector-cam span { position: absolute; left: 10px; bottom: 8px; font-size: 12px; color: #e9ebef; text-shadow: 0 1px 2px #000; }
+.iris-vector-facts { display: grid; gap: 8px; }
+.iris-vector-facts div { background: #14161b; border-radius: 10px; padding: 10px 12px; font-size: 14px; color: #e9ebef; }
+.iris-vector-facts b { display: block; font-size: 12px; font-weight: 600; color: #8b919c; margin-bottom: 2px; }

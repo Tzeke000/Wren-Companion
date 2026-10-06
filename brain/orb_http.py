@@ -2092,6 +2092,13 @@ def start(g: dict[str, Any], root: Path, tts: Any | None = None) -> None:
     _root = root
     _tts_ref = tts
 
+    # Extra read-only routes for the app (2026-10-06): tools list + Vector body status/frame.
+    try:
+        from brain import app_extra_routes as _extra
+        _extra.install(app, g, root)
+    except Exception as _e:  # never let an extra route block the orb server
+        print(f"[orb_http] extra routes not installed: {_e!r}")
+
     _skip = os.environ.get("IRIS_SKIP_ORB_HTTP_INSTANCE_CHECK", "0").strip() == "1"
     if _skip:
         print("[orb_http] WARNING: IRIS_SKIP_ORB_HTTP_INSTANCE_CHECK=1 — single-instance check bypassed", file=sys.stderr, flush=True)

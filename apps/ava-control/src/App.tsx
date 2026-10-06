@@ -4,6 +4,8 @@ import ForceGraph3D from "3d-force-graph";
 import { API_BASE, ApiLogEntry, getJson, getText, postJson, registerApiLogger } from "./api";
 import { JsonBlock, Kv, Section } from "./components/Ui";
 import ServerPanel from "./components/ServerPanel";
+import ToolsPanel from "./components/ToolsPanel";
+import VectorPanel from "./components/VectorPanel";
 import { CUBE_MORPH_ENABLED, EMOTION_VISUALS, deriveOrbEmotion, deriveOrbSleep, deriveOrbState, mixHex, shadeHex, type EmotionVisual } from "./orbDerive";
 import OrbCanvas, { setBodyStyle, useBodyStyle } from "./components/OrbCanvas";
 import { listen } from "@tauri-apps/api/event";
@@ -116,6 +118,7 @@ const PRESENCE_V2_CUBE_MORPH_ENABLED = CUBE_MORPH_ENABLED; // shared with the wi
 const TABS = [
   { id: "voice" as const, label: "Voice" },
   { id: "server" as const, label: "Server" },
+  { id: "vector" as const, label: "Vector" },
   { id: "chat" as const, label: "Chat" },
   { id: "brain" as const, label: "Brain" },
   { id: "status" as const, label: "Status / Heartbeat" },
@@ -137,7 +140,7 @@ type TabId = (typeof TABS)[number]["id"];
 
 // Redesign 2026-10-06: the panel's tabs, grouped. Any tab not listed lands in "Other" — nothing is lost.
 const NAV_GROUPS: { title: string; ids: string[] }[] = [
-  { title: "Me", ids: ["voice", "memory", "brain", "journal", "learning", "identity"] },
+  { title: "Me", ids: ["voice", "vector", "memory", "brain", "journal", "learning", "identity"] },
   { title: "Around me", ids: ["people", "server", "chat", "tools"] },
   { title: "Workshop", ids: ["plans", "proposals", "workbench", "creative", "models", "finetune"] },
   { title: "System", ids: ["status", "debug"] },
@@ -238,6 +241,22 @@ type FinetunePrereq = {
 
 function asRecord(v: unknown): Record<string, unknown> | undefined {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+/** "2 s ago" / "4 min ago" / "3 h ago" / "2 d ago" from a unix-seconds timestamp; "" when unknown. */
+function fmtAgo(tsSec: unknown): string {
+  const t = Number(tsSec);
+  if (!Number.isFinite(t) || t <= 0) return "";
+  const s = Math.max(0, Math.round(Date.now() / 1000 - t));
+  if (s < 60) return `${s} s ago`;
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
+
+/** A string field if it's a non-empty string, else "" — never lets an object reach JSX. */
+function strField(v: unknown): string {
+  return typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : "";
 }
 
 // ── Custom tab renderer ──────────────────────────────────────────────────────
@@ -422,7 +441,7 @@ export default function App() {
     user: "",
   });
 
-  const [plans, setPlans] = useState<{ plans: Record<string, unknown>[]; active_count: number } | null>(null);
+  const [plans, setPlans] = useState<{ plans?: Record<string, unknown>[]; active_count?: number } | null>(null);
   const [plansBusy, setPlansBusy] = useState(false);
   const [planGoalInput, setPlanGoalInput] = useState("");
   const [planMsg, setPlanMsg] = useState("");
@@ -435,7 +454,7 @@ export default function App() {
 
   // Phase 94: learning tab state
   const [learningLog, setLearningLog] = useState<Record<string, unknown>[] | null>(null);
-  const [learningGaps, setLearningGaps] = useState<string[]>([]);
+  const [learningGaps, setLearningGaps] = useState<{ topic: string; note?: string }[]>([]);
   const [learningWeekSummary, setLearningWeekSummary] = useState<string>("");
   const [learningBusy, setLearningBusy] = useState(false);
 
@@ -447,6 +466,14 @@ export default function App() {
   const [proposals, setProposals] = useState<Record<string, unknown>[] | null>(null);
   const [proposalMsg, setProposalMsg] = useState("");
   const [proposalsBusy, setProposalsBusy] = useState(false);
+  const [identityExtensions, setIdentityExtensions] = useState<string | null>(null);
+
+  // 2026-10-06 dead-tab sweep: real data from brain/app_extra_routes.py (/api/v1/app/*).
+  const [sceneInfo, setSceneInfo] = useState<{ text: string; ts: number | null } | null>(null);
+  const [brainsInfo, setBrainsInfo] = useState<Record<string, unknown> | null>(null);
+  const [wbList, setWbList] = useState<Record<string, unknown>[] | null>(null);
+  const [wbListBusy, setWbListBusy] = useState(false);
+  const [imageGenMsg, setImageGenMsg] = useState("");
 
   const [apiCallLog, setApiCallLog] = useState<ApiLogEntry[]>([]);
   const [lastChatResponse, setLastChatResponse] = useState<Record<string, unknown> | null>(null);
@@ -1016,7 +1043,7 @@ export default function App() {
     setPlansBusy(true);
     try {
       const data = await getJson("/api/v1/plans");
-      setPlans(data as { plans: Record<string, unknown>[]; active_count: number });
+      setPlans(data as { plans?: Record<string, unknown>[]; active_count?: number });
     } catch {
       // keep stale
     } finally {
@@ -1046,32 +1073,103 @@ export default function App() {
   useEffect(() => {
     if (tab !== "learning") return;
     setLearningBusy(true);
-    Promise.all([
-      getJson("/api/v1/learning/log"),
-      getJson("/api/v1/learning/gaps"),
-      getJson("/api/v1/learning/week"),
-    ]).then(([log, gaps, week]) => {
-      setLearningLog((log as Record<string, unknown>).entries as Record<string, unknown>[]);
-      setLearningGaps((gaps as Record<string, unknown>).gaps as string[] ?? []);
-      setLearningWeekSummary(String((week as Record<string, unknown>).summary ?? ""));
-    }).catch(() => {}).finally(() => setLearningBusy(false));
+    getJson<{ entries?: unknown; gaps?: unknown }>("/api/v1/app/learning")
+      .then((d) => {
+        const entries = Array.isArray(d.entries)
+          ? (d.entries.filter((e) => asRecord(e)) as Record<string, unknown>[])
+          : [];
+        setLearningLog(entries);
+        const gaps = Array.isArray(d.gaps) ? d.gaps : [];
+        setLearningGaps(
+          gaps
+            .map((g) => {
+              const r = asRecord(g);
+              const topic = r ? strField(r.topic) : strField(g);
+              const note = r ? strField(r.note) : "";
+              return note ? { topic, note } : { topic };
+            })
+            .filter((g) => g.topic),
+        );
+        // Entries arrive newest-first (last 100 rows of state/learning_log.jsonl).
+        const weekAgo = Date.now() / 1000 - 7 * 86400;
+        const thisWeek = entries.filter((e) => Number(e.ts) >= weekAgo).length;
+        const newest = entries[0];
+        setLearningWeekSummary(
+          thisWeek > 0
+            ? `${thisWeek}${thisWeek >= entries.length ? "+" : ""} learning entr${thisWeek === 1 ? "y" : "ies"} in the last 7 days.`
+            : newest
+              ? `Nothing new in the last 7 days. Last entry: ${strField(newest.date) || fmtAgo(newest.ts) || "unknown date"}.`
+              : "",
+        );
+      })
+      .catch(() => {})
+      .finally(() => setLearningBusy(false));
   }, [tab]);
 
   useEffect(() => {
     if (tab !== "people") return;
     setPeopleBusy(true);
-    getJson("/api/v1/profiles/list")
-      .then((d) => setProfiles((d as Record<string, unknown>).profiles as Record<string, unknown>[]))
+    getJson<{ people?: unknown }>("/api/v1/app/people")
+      .then((d) => setProfiles(Array.isArray(d.people) ? (d.people.filter((p) => asRecord(p)) as Record<string, unknown>[]) : []))
       .catch(() => {})
       .finally(() => setPeopleBusy(false));
   }, [tab]);
 
+  // Newest scene caption (state/scene_memory/keyframes.jsonl) — Voice + Chat awareness. Refreshed every
+  // 15 s only while one of those tabs is open.
+  useEffect(() => {
+    if (tab !== "voice" && tab !== "chat") return;
+    let cancelled = false;
+    const load = () => {
+      getJson<{ text?: unknown; ts?: unknown }>("/api/v1/app/scene")
+        .then((d) => {
+          if (cancelled) return;
+          const ts = Number(d.ts);
+          setSceneInfo({ text: strField(d.text), ts: Number.isFinite(ts) && ts > 0 ? ts : null });
+        })
+        .catch(() => {});
+    };
+    load();
+    const id = window.setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [tab]);
+
+  useEffect(() => {
+    if (tab !== "models") return;
+    getJson<Record<string, unknown>>("/api/v1/app/brains")
+      .then((d) => setBrainsInfo(d))
+      .catch(() => {});
+  }, [tab]);
+
+  // Workbench proposals with real proposal_ids (snapshot workbench_meta never carries them). The route
+  // runs selftests, so it is fetched on tab open / Refresh only.
+  const fetchWbList = useCallback(async () => {
+    setWbListBusy(true);
+    try {
+      const d = await getJson<{ proposals?: unknown }>("/api/v1/workbench/proposals");
+      setWbList(Array.isArray(d.proposals) ? (d.proposals.filter((p) => asRecord(p)) as Record<string, unknown>[]) : []);
+    } catch {
+      // keep stale
+    } finally {
+      setWbListBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "workbench") return;
+    void fetchWbList();
+  }, [tab, fetchWbList]);
+
   const fetchProposals = useCallback(async () => {
     setProposalsBusy(true);
     try {
-      const d = await getJson("/api/v1/identity/proposals");
+      const d = await getJson("/api/v1/app/proposals");
       const r = d as Record<string, unknown>;
-      setProposals((r.proposals as Record<string, unknown>[]) ?? []);
+      setProposals(Array.isArray(r.proposals) ? (r.proposals.filter((p) => asRecord(p)) as Record<string, unknown>[]) : []);
+      setIdentityExtensions(typeof r.extensions === "string" && r.extensions.trim() ? r.extensions : null);
     } catch {
       // keep stale
     } finally {
@@ -1479,7 +1577,10 @@ export default function App() {
   const modelTags = Array.isArray(availModels) ? (availModels as string[]) : [];
   const wbMeta = asRecord(wb?.workbench_meta);
   const wbProposals = Array.isArray(wbMeta?.proposals) ? (wbMeta?.proposals as Record<string, unknown>[]) : [];
-  const selectedProposalId = wbProposals.length ? String(wbProposals[0].proposal_id ?? "") : "";
+  // Real ids come from GET /api/v1/workbench/proposals (wbList); workbench_meta.proposals is a legacy shape.
+  const selectedProposalId = wbList?.length
+    ? strField(wbList[0].proposal_id)
+    : wbProposals.length ? String(wbProposals[0].proposal_id ?? "") : "";
   const vision = asRecord(snap?.vision);
   const perception = asRecord(vision?.perception);
   // Live person info — prefer the snap.current_person block populated by
@@ -1510,8 +1611,15 @@ export default function App() {
     const r = s % 60;
     return m > 0 ? `${m}m ${r}s at machine` : `${r}s at machine`;
   })();
-  const rawSceneSummary = String(perception?.scene_compact_summary ?? "").trim();
-  const sceneSummary = rawSceneSummary || "Observing…";
+  // Scene = newest keyframe caption (/api/v1/app/scene). The snapshot's scene_compact_summary is the
+  // retired LLaVA path and stays empty; it's only a fallback if it ever carries text again.
+  const rawSceneSummary = (sceneInfo?.text || String(perception?.scene_compact_summary ?? "")).trim();
+  const sceneAge = sceneInfo?.text ? fmtAgo(sceneInfo.ts) : "";
+  const sceneSummary = rawSceneSummary
+    ? `${rawSceneSummary}${sceneAge ? ` (${sceneAge})` : ""}`
+    : sceneInfo
+      ? "No scene caption yet."
+      : "Loading…";
   const sceneIsObserving = !rawSceneSummary;
   // Mood line — read from snap.mood.mood_label (always fresh on snapshot).
   const moodLabelLive = String(mood?.mood_label ?? "").trim();
@@ -2253,7 +2361,7 @@ export default function App() {
             <Ico d={ICON.send} />
           </button>
         </div>
-        <button className="presence-camera-thumb" type="button" onClick={() => setCameraOverlayOpen(true)} aria-label="Expand camera" title={sceneSummary}>
+        <button className="presence-camera-thumb" type="button" onClick={() => setCameraOverlayOpen(true)} aria-label="Expand camera" title={rawSceneSummary || "Expand camera"}>
           {liveFrameSrc ? (
             <img src={liveFrameSrc} alt="camera live thumb" />
           ) : presenceCameraOk ? (
@@ -2494,12 +2602,6 @@ export default function App() {
                         <span className="op-muted" style={{ minWidth: 96 }}>Scene</span>
                         <span style={{ color: sceneIsObserving ? "#7a8aa3" : "#dbe6f5", fontStyle: sceneIsObserving ? "italic" : "normal" }}>
                           {sceneSummary}
-                          {sceneIsObserving && (
-                            <span className="thought-cursor" style={{
-                              display: "inline-block", marginLeft: 4,
-                              animation: "thoughtBlink 1s steps(2) infinite",
-                            }}>▌</span>
-                          )}
                         </span>
                       </div>
                       <div style={{ display: "flex", gap: 8 }}>
@@ -2725,13 +2827,20 @@ export default function App() {
                   <Section title="Runtime">
                     <Kv
                       items={[
-                        { label: "Heartbeat mode", value: hb?.heartbeat_mode },
+                        // heartbeat_mode / runtime_ready_state / runtime_active_issue_summary are Ava-era
+                        // fields the Iris snapshot doesn't serve — shown only if they ever come back.
+                        ...(strField(hb?.heartbeat_mode) ? [{ label: "Heartbeat mode", value: hb?.heartbeat_mode }] : []),
+                        {
+                          label: "Tick loop",
+                          value: typeof hb?.tick_loop_alive === "boolean" ? (hb.tick_loop_alive ? "alive" : "not running") : undefined,
+                        },
+                        { label: "Last tick", value: fmtAgo(hb?.last_tick_ts) || "never" },
                         { label: "Brain / model", value: models?.selected_model },
                         { label: "Cognitive mode", value: models?.cognitive_mode },
-                        { label: "Runtime readiness", value: hb?.runtime_ready_state },
-                        { label: "Active issue", value: hb?.runtime_active_issue_summary },
+                        ...(strField(hb?.runtime_ready_state) ? [{ label: "Runtime readiness", value: hb?.runtime_ready_state }] : []),
+                        ...(strField(hb?.runtime_active_issue_summary) ? [{ label: "Active issue", value: hb?.runtime_active_issue_summary }] : []),
                         { label: "Camera / vision", value: ribbon?.vision_status },
-                        { label: "Snapshot ts", value: snap?.ts },
+                        { label: "Snapshot", value: fmtAgo(snap?.ts) || undefined },
                       ]}
                     />
                   </Section>
@@ -2756,19 +2865,21 @@ export default function App() {
                     ) : null}
                     {(() => {
                       const attn = asRecord((snap as Record<string, unknown> | null)?.attention);
-                      const gazeRegion = String(attn?.gaze_region ?? "unknown");
-                      const attnState = String(attn?.attention_state ?? "unknown");
-                      const expr = String(attn?.expression ?? "neutral");
-                      const calibrated = Boolean(attn?.gaze_calibrated);
-                      const gazeTarget = String(attn?.gaze_target ?? "");
+                      const visionRec = asRecord(snap?.vision);
+                      const curPerson = asRecord(snap?.current_person);
+                      const gazeRegion = strField(attn?.gaze_region) || "—";
+                      const attnState = strField(attn?.state) || strField(visionRec?.attention_state) || "—";
+                      const expr = strField(visionRec?.current_expression) || strField(curPerson?.expression) || "—";
                       return (
                         <>
                           <Kv items={[
                             { label: "Gaze region", value: gazeRegion },
                             { label: "Attention state", value: attnState },
                             { label: "Expression", value: expr },
-                            { label: "Gaze calibrated", value: calibrated ? "yes" : "no" },
-                            { label: "Gaze target", value: gazeTarget || "—" },
+                            ...(typeof attn?.gaze_calibrated === "boolean"
+                              ? [{ label: "Gaze calibrated", value: attn.gaze_calibrated ? "yes" : "no" }]
+                              : []),
+                            ...(strField(attn?.gaze_target) ? [{ label: "Gaze target", value: strField(attn?.gaze_target) }] : []),
                           ]} />
                           <div style={{ marginTop: "0.75rem", display: "flex", gap: 8, flexWrap: "wrap" }}>
                             <button type="button" className="op-btn" onClick={() => {
@@ -2823,23 +2934,28 @@ export default function App() {
                 <p className="op-muted">Not connected.</p>
               ) : (
                 <>
-                  <Section title="Summary">
-                    <Kv
-                      items={[
-                        { label: "Strategic continuity", value: memory?.strategic_continuity_summary },
-                        { label: "Relationship carryover", value: memory?.relationship_carryover },
-                        { label: "Thread-like entries (count)", value: memoryCount },
-                        { label: "Unfinished thread?", value: memory?.unfinished_thread_present },
-                      ]}
-                    />
-                  </Section>
-                  <Section title="Active threads (snapshot)">
-                    {threadList.length === 0 ? (
-                      <p className="op-muted">No structured threads in snapshot.</p>
-                    ) : (
+                  {strField(memory?.strategic_continuity_summary) || strField(memory?.relationship_carryover) ||
+                  memory?.unfinished_thread_present === true ? (
+                    <Section title="Summary">
+                      <Kv
+                        items={[
+                          { label: "Strategic continuity", value: memory?.strategic_continuity_summary },
+                          { label: "Relationship carryover", value: memory?.relationship_carryover },
+                          { label: "Thread-like entries (count)", value: memoryCount },
+                          { label: "Unfinished thread?", value: memory?.unfinished_thread_present ? "yes" : "no" },
+                        ]}
+                      />
+                    </Section>
+                  ) : (
+                    <Section title="Continuity summary">
+                      <p className="op-muted">Not tracked yet.</p>
+                    </Section>
+                  )}
+                  {threadList.length > 0 && (
+                    <Section title="Active threads (snapshot)">
                       <JsonBlock data={threadList} />
-                    )}
-                  </Section>
+                    </Section>
+                  )}
 
                   <Section title={`Semantic memory — what Iris knows about you (${mem0Entries.length})`}>
                     <p className="op-muted" style={{ marginTop: 0 }}>
@@ -2984,38 +3100,28 @@ export default function App() {
                         {vlState.toUpperCase()}
                       </span>
                       <span className="op-muted" style={{ marginLeft: 8 }}>
-                        {vlActive ? "loop active — always listening for wake word" : "loop inactive"}
+                        {!vlActive
+                          ? "voice loop inactive"
+                          : inputMuted
+                            ? "loop active — mic muted, not listening"
+                            : "loop active — listening (no wake word needed)"}
                       </span>
                     </div>
                   );
                 })()}
               </Section>
-              <Section title="Wake word & clap detector">
+              <Section title="Listening">
+                <p className="op-muted" style={{ marginBottom: "0.5rem" }}>
+                  There's no wake word, by design: I'm always listening unless the mic is muted.
+                </p>
                 <Kv items={[
-                  { label: "Wake word", value: String(asRecord(snap?.voice)?.wake_word_active ?? "—") },
-                  { label: "Clap detector", value: "active (always-on)" },
-                  { label: "TTS engine", value: String(tts?.engine ?? "none") },
+                  { label: "Mic", value: inputMuted ? "muted" : "live" },
+                  { label: "TTS engine", value: strField(tts?.engine) || "none" },
                 ]} />
-                <div style={{ marginTop: "0.6rem" }}>
-                  <button
-                    type="button"
-                    className="op-btn"
-                    onClick={() => {
-                      postJson("/api/v1/clap/calibrate", {})
-                        .then((r) => {
-                          const rec = r as Record<string, unknown>;
-                          alert(rec.ok ? `Recalibrated. Threshold=${rec.threshold}` : `Failed: ${rec.error}`);
-                        })
-                        .catch(() => {});
-                    }}
-                  >
-                    Recalibrate Clap Detector
-                  </button>
-                </div>
               </Section>
               <Section title="TTS output controls">
                 <p className="op-muted" style={{ marginBottom: "0.5rem" }}>
-                  The mic is always listening. Only Iris's voice output can be muted.
+                  Muting my voice and muting the mic are separate: this mutes what I say, not what I hear.
                 </p>
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
                   <button type="button" className="op-btn" onClick={() => void toggleTts()}>
@@ -3039,184 +3145,78 @@ export default function App() {
             </div>
           )}
 
-          {tab === "tools" && (
-            <div className="op-pane">
-              <h1 className="op-h1">Tools</h1>
-              <p className="op-lead">Iris can use these tools autonomously (Tier 1) or with verbal check-in (Tier 2).</p>
-              <Section title="Registry">
-                <Kv
-                  items={[
-                    { label: "Tool count", value: Number(toolsRegistry?.tool_count ?? 0) },
-                    { label: "Last tool used", value: toolsBlock?.last_tool_used ?? "—" },
-                    { label: "Last tool result", value: toolsBlock?.last_tool_result ?? "—" },
-                    { label: "Execution count", value: Number(toolsBlock?.tool_execution_count ?? 0) },
-                  ]}
-                />
-              </Section>
-              <Section title="Available tools">
-                {Array.isArray(toolsRegistry?.available_tools) && toolsRegistry.available_tools.length ? (
-                  <JsonBlock data={toolsRegistry.available_tools} />
-                ) : (
-                  <p className="op-muted">No tools published in snapshot yet.</p>
-                )}
-              </Section>
-            </div>
-          )}
+          {tab === "tools" && <ToolsPanel />}
+
+          {tab === "vector" && <VectorPanel />}
 
           {tab === "models" && (
             <div className="op-pane">
               <h1 className="op-h1">Models / Brains</h1>
               <p className="op-lead">
-                Discovery + routing. Cloud models available when internet connected.
+                What actually thinks, from <code>GET /api/v1/app/brains</code> and the snapshot.
               </p>
 
-              {/* Dual Brain Status — always shown */}
-              <Section title="Dual Brain Status">
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {/* Stream A */}
-                  <div style={{
-                    background: "#0d1117", border: `1px solid ${dbStreamABusy ? "#4ade80" : "#1e293b"}`,
-                    borderRadius: 8, padding: "0.75rem",
-                    boxShadow: dbStreamABusy ? "0 0 8px rgba(74,222,128,0.2)" : "none",
-                  }}>
-                    <div style={{ fontSize: "0.72rem", color: "#4a5568", marginBottom: 4, letterSpacing: "0.1em" }}>
-                      STREAM A — FOREGROUND
-                    </div>
-                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <span style={{
-                        width: 10, height: 10, borderRadius: "50%", flexShrink: 0,
-                        background: dbStreamABusy ? "#4ade80" : "#2d3748",
-                        boxShadow: dbStreamABusy ? "0 0 6px #4ade80" : "none",
-                      }} />
-                      <div>
-                        <div style={{ color: "#e2e8f0", fontSize: "0.85rem" }}>
-                          {String(dbStreamA?.model ?? "ava-personal:latest")}
-                        </div>
-                        <div style={{ color: dbStreamABusy ? "#4ade80" : "#6b7280", fontSize: "0.75rem" }}>
-                          {dbStreamABusy ? "ACTIVE — speaking" : "IDLE"}
-                        </div>
-                        {Boolean(dbStreamA?.last_active) && Number(dbStreamA?.last_active) > 0 && (
-                          <div style={{ color: "#4a5568", fontSize: "0.72rem" }}>
-                            Last active {Math.round(Date.now() / 1000 - Number(dbStreamA?.last_active ?? 0))}s ago
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  {/* Stream B */}
-                  <div style={{
-                    background: "#0d1117",
-                    border: `1px solid ${dbBusy ? "#3b82f6" : dbLiveThinking ? "#0d9488" : "#1e293b"}`,
-                    borderRadius: 8, padding: "0.75rem",
-                    boxShadow: dbBusy ? "0 0 8px rgba(59,130,246,0.2)" : dbLiveThinking ? "0 0 8px rgba(13,148,136,0.2)" : "none",
-                  }}>
-                    <div style={{ fontSize: "0.72rem", color: "#4a5568", marginBottom: 4, letterSpacing: "0.1em" }}>
-                      STREAM B — BACKGROUND
-                    </div>
-                    <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                      <span style={{
-                        width: 10, height: 10, borderRadius: "50%", flexShrink: 0, marginTop: 3,
-                        background: dbBusy ? "#3b82f6" : dbLiveThinking ? "#2dd4bf" : "#2d3748",
-                        boxShadow: dbBusy ? "0 0 6px #3b82f6" : dbLiveThinking ? "0 0 6px #2dd4bf" : "none",
-                      }} />
-                      <div style={{ flex: 1 }}>
-                        <div style={{ color: "#93c5fd", fontSize: "0.85rem" }}>
-                          {String(dbStreamB?.model ?? "qwen2.5:14b")}
-                        </div>
-                        <div style={{ color: dbBusy ? "#3b82f6" : dbLiveThinking ? "#2dd4bf" : "#6b7280", fontSize: "0.75rem" }}>
-                          {dbBusy && dbCurrentTask
-                            ? `thinking: ${dbCurrentTask}`
-                            : dbLiveThinking
-                              ? "💭 Live thinking about current topic"
-                              : dbPendingInsight
-                                ? "✨ Has something to share"
-                                : "—"}
-                        </div>
-                        <div style={{ color: "#4a5568", fontSize: "0.72rem", marginTop: 2 }}>
-                          Queue: {dbQueueDepth} pending · Completed today: {dbTasksToday}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </Section>
+              {(() => {
+                const host = asRecord(brainsInfo?.host);
+                const little = asRecord(brainsInfo?.little_brain);
+                const notes = Array.isArray(brainsInfo?.notes) ? (brainsInfo?.notes as unknown[]).map(strField).filter(Boolean) : [];
+                const hostModel = strField(host?.model) || strField(models?.selected_model);
+                const parked = little?.parked === true;
+                const listening = typeof little?.listening === "boolean" ? little.listening : null;
+                return (
+                  <>
+                    <Section title="Brain">
+                      <p style={{ color: "#e2e8f0", fontSize: "0.95rem", margin: "0 0 0.4rem" }}>
+                        Brain: <b>{hostModel || "unknown"}</b> (Claude, runs on the tower)
+                      </p>
+                      {strField(host?.note) && <p className="op-muted" style={{ margin: 0 }}>{strField(host?.note)}</p>}
+                    </Section>
+                    <Section title="Little brain">
+                      {!brainsInfo ? (
+                        <p className="op-muted">Loading…</p>
+                      ) : (
+                        <>
+                          <Kv items={[
+                            { label: "State", value: parked ? "parked" : "not parked" },
+                            { label: "Endpoint", value: strField(little?.endpoint) },
+                            ...(listening !== null ? [{ label: "Port answering", value: listening ? "yes" : "no" }] : []),
+                          ]} />
+                          {parked && strField(little?.reason) && (
+                            <p className="op-muted" style={{ marginTop: "0.4rem" }}>Why parked: {strField(little?.reason)}</p>
+                          )}
+                        </>
+                      )}
+                    </Section>
+                    {notes.length > 0 && (
+                      <Section title="Notes">
+                        <ul style={{ color: "#9ca3af", fontSize: "0.85rem", paddingLeft: "1.2rem", margin: 0 }}>
+                          {notes.map((n, i) => <li key={i}>{n}</li>)}
+                        </ul>
+                      </Section>
+                    )}
+                  </>
+                );
+              })()}
 
               {!online ? (
                 <p className="op-muted">Not connected.</p>
               ) : (
-                <>
-                  <Section title="Current routing">
-                    <Kv
-                      items={[
-                        { label: "Selected model", value: models?.selected_model },
-                        { label: "Fallback", value: models?.fallback_model },
-                        { label: "Reason", value: models?.routing_reason },
-                        { label: "Internet", value: connOnline ? `online (${connQuality})` : "offline — cloud disabled" },
-                        { label: "Override (host)", value: models?.override_model },
-                      ]}
-                    />
-                  </Section>
-                  <Section title="Local Models">
-                    <div style={{ fontSize: "0.85rem", color: "#9ca3af" }}>
-                      {modelTags.filter(m => !m.includes(":cloud")).map(m => (
-                        <div key={m} style={{
-                          display: "flex", alignItems: "center", gap: 8, padding: "4px 0",
-                          borderBottom: "1px solid #1e293b",
-                        }}>
-                          <span style={{
-                            width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
-                            background: models?.selected_model === m ? "#4ade80" : "#2d3748",
-                          }} />
-                          <span style={{ color: models?.selected_model === m ? "#e2e8f0" : "#9ca3af" }}>{m}</span>
-                        </div>
-                      ))}
-                      {modelTags.filter(m => !m.includes(":cloud")).length === 0 && (
-                        <p className="op-muted">No local models discovered.</p>
-                      )}
-                    </div>
-                  </Section>
-                  <Section title={`Cloud Models ${connOnline ? "(available)" : "(offline — locked)"}`}>
-                    {["kimi-k2.6:cloud", "qwen3.5:cloud", "glm-5.1:cloud", "minimax-m2.7:cloud"].map(m => (
-                      <div key={m} style={{
-                        display: "flex", alignItems: "center", gap: 8, padding: "4px 0",
-                        borderBottom: "1px solid #1e293b", opacity: connOnline ? 1 : 0.4,
-                      }}>
-                        <span style={{
-                          width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
-                          background: !connOnline ? "#374151" : models?.selected_model === m ? "#4ade80" : "#1a6cf5",
-                        }} />
-                        <span style={{ color: connOnline ? "#93c5fd" : "#4b5563", fontSize: "0.85rem" }}>{m}</span>
-                        {!connOnline && <span style={{ color: "#374151", fontSize: "0.7rem" }}>🔒 offline</span>}
-                      </div>
-                    ))}
-                  </Section>
-                  <Section title="Switch model">
-                    <label className="op-label">Model tag</label>
-                    <input
-                      className="op-input"
-                      value={overrideModel}
-                      onChange={(e) => setOverrideModel(e.target.value)}
-                      placeholder="e.g. llama3:latest"
-                      list="model-tags"
-                    />
-                    <datalist id="model-tags">
-                      {modelTags.map((m) => (
-                        <option key={m} value={m} />
-                      ))}
-                    </datalist>
-                    <label className="op-label">Cognitive mode (optional)</label>
-                    <input
-                      className="op-input"
-                      value={overrideMode}
-                      onChange={(e) => setOverrideMode(e.target.value)}
-                      placeholder="Clear override: leave blank and apply"
-                    />
-                    <button type="button" className="btn primary" onClick={() => void applyModelOverride()}>
-                      Apply override
-                    </button>
-                    {routeMsg ? <p className="op-note">{routeMsg}</p> : null}
-                  </Section>
-                </>
+                <Section title="Current routing (snapshot)">
+                  <Kv
+                    items={[
+                      { label: "Selected model", value: models?.selected_model },
+                      { label: "Fallback", value: models?.fallback_model },
+                      { label: "Reason", value: models?.routing_reason },
+                      {
+                        label: "Internet",
+                        value: connOnline
+                          ? (asRecord(snap?.connectivity)?.quality && connQuality ? `online (${connQuality})` : "online")
+                          : "offline",
+                      },
+                      ...(strField(models?.override_model) ? [{ label: "Override (host)", value: models?.override_model }] : []),
+                    ]}
+                  />
+                </Section>
               )}
             </div>
           )}
@@ -3224,12 +3224,13 @@ export default function App() {
           {tab === "creative" && (
             <div className="op-pane">
               <h1 className="op-h1">Creative</h1>
-              <p className="op-lead">Image generation via ComfyUI (local FLUX) or Pollinations.ai (cloud).</p>
+              <p className="op-lead">Image generation: tries local ComfyUI first, then the Pollinations.ai cloud fallback.</p>
               <Section title="Generation Status">
+                {/* Nothing ever probes ComfyUI (comfyuiOnline is never set true), so don't claim a detection result. */}
                 <Kv items={[
-                  { label: "ComfyUI :8188", value: comfyuiOnline ? "online" : "not detected" },
-                  { label: "Cloud (Pollinations)", value: connOnline ? "available" : "offline" },
-                  { label: "Last image", value: String(asRecord(snap)?.latest_image ?? "none") },
+                  { label: "Local (ComfyUI :8188)", value: comfyuiOnline ? "online" : "Image generation isn't set up" },
+                  { label: "Cloud (Pollinations)", value: "not checked; tried only when you press Generate" },
+                  { label: "Last image", value: strField(asRecord(snap)?.latest_image) || strField(imageList[0]?.filename) || "none" },
                 ]} />
               </Section>
               <Section title="Generate Image">
@@ -3251,7 +3252,7 @@ export default function App() {
                   type="button" className="op-btn" disabled={imageBusy || !imagePrompt.trim()}
                   onClick={() => {
                     if (!imagePrompt.trim()) return;
-                    setImageBusy(true); setImageResult(null);
+                    setImageBusy(true); setImageResult(null); setImageGenMsg("");
                     postJson("/api/v1/images/generate", { prompt: imagePrompt, style: imageStyle })
                       .then((d) => {
                         const r = d as Record<string, unknown>;
@@ -3261,9 +3262,11 @@ export default function App() {
                           getJson("/api/v1/images/list").then((il) => {
                             setImageList(((il as Record<string, unknown>).images as Record<string, unknown>[]) ?? []);
                           }).catch(() => {});
+                        } else {
+                          setImageGenMsg(`Generation failed: ${strField(r.error) || "no image returned"}`);
                         }
                       })
-                      .catch(() => {})
+                      .catch((e) => setImageGenMsg(`Generation failed: ${e instanceof Error ? e.message : String(e)}`))
                       .finally(() => setImageBusy(false));
                   }}
                 >
@@ -3271,9 +3274,10 @@ export default function App() {
                 </button>
                 {imageResult && (
                   <p style={{ color: "#4ade80", fontSize: "0.82rem", marginTop: 6 }}>
-                    Saved: {imageResult.split("/").pop()}
+                    Saved: {imageResult.split(/[\\/]/).pop()}
                   </p>
                 )}
+                {imageGenMsg && <p className="op-note">{imageGenMsg}</p>}
               </Section>
               <Section title="Image Gallery">
                 {imageListBusy ? <p className="op-muted">Loading…</p> : (
@@ -3315,6 +3319,9 @@ export default function App() {
           {tab === "finetune" && (
             <div className="op-pane">
               <h1 className="op-h1">Finetune</h1>
+              <p className="op-banner-inline">
+                This pipeline belongs to the retired local-model (Ollama) setup. My brain is Claude now; nothing here changes how I think.
+              </p>
               <p className="op-lead">
                 Fine-tuning takes 30-60 minutes and will use significant CPU/GPU. Iris will continue running during this process.
               </p>
@@ -3325,7 +3332,7 @@ export default function App() {
                     { label: "Started", value: finetuneStatus.started_at ? new Date(Number(finetuneStatus.started_at) * 1000).toLocaleString() : "—" },
                     { label: "Completed", value: finetuneStatus.completed_at ? new Date(Number(finetuneStatus.completed_at) * 1000).toLocaleString() : "—" },
                     { label: "Examples used", value: finetuneStatus.examples_used ?? finetuneStatus.dataset_count ?? "—" },
-                    { label: "Output model", value: finetuneStatus.output_model ?? "ava-personal:latest" },
+                    { label: "Output model", value: finetuneStatus.output_model },
                   ]}
                 />
               </Section>
@@ -3359,7 +3366,10 @@ export default function App() {
                   </button>
                 </div>
                 {String(finetuneStatus.status ?? "") === "complete" ? (
-                  <p className="op-note">ava-personal:latest is ready. Switch to it in Models/Brains tab.</p>
+                  <p className="op-note">
+                    Fine-tune complete{strField(finetuneStatus.output_model) ? `: ${strField(finetuneStatus.output_model)}` : ""}.
+                    Only the retired local setup would load it.
+                  </p>
                 ) : null}
               </Section>
               <Section title="Live Log (last 20 lines)">
@@ -3392,28 +3402,40 @@ export default function App() {
                     <Section title="Index preview">
                       <pre className="mono-block">{wb.workbench_index_text.slice(0, 12000)}</pre>
                     </Section>
-                  ) : (
-                    <p className="op-muted">No workbench index text on snapshot.</p>
-                  )}
-                  <Section title="Actions">
-                    <div className="row-gap">
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => void workbenchAction("approve", selectedProposalId)}
-                        disabled={!selectedProposalId}
-                      >
-                        Approve top proposal
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => void workbenchAction("reject", selectedProposalId)}
-                        disabled={!selectedProposalId}
-                      >
-                        Reject top proposal
-                      </button>
-                    </div>
+                  ) : null}
+                  <Section title={`Proposals${wbList ? ` (${wbList.length})` : ""}`}>
+                    <button type="button" className="btn ghost" style={{ marginBottom: "8px" }}
+                      onClick={() => void fetchWbList()} disabled={wbListBusy}>
+                      {wbListBusy ? "Checking…" : "Refresh"}
+                    </button>
+                    {!wbList ? (
+                      <p className="op-muted">{wbListBusy ? "Running self-tests…" : "Not loaded."}</p>
+                    ) : wbList.length === 0 ? (
+                      <p className="op-muted">No proposals right now. The self-tests found nothing to act on.</p>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {wbList.map((p, i) => {
+                          const pid = strField(p.proposal_id);
+                          return (
+                            <div key={pid || i} style={{ border: "1px solid #2a2a3a", borderRadius: 6, padding: "10px 12px" }}>
+                              <div style={{ color: "#e2e8f0", fontWeight: 600 }}>{strField(p.title) || pid || "(untitled)"}</div>
+                              <div style={{ color: "#7a8aa3", fontSize: "0.75rem", margin: "2px 0 6px" }}>
+                                {[strField(p.proposal_type), strField(p.risk) && `risk ${strField(p.risk)}`, strField(p.priority) && `priority ${strField(p.priority)}`]
+                                  .filter(Boolean).join(" · ")}
+                              </div>
+                              {strField(p.problem) && <p style={{ color: "#9ca3af", fontSize: "0.85rem", margin: "0 0 4px" }}>Problem: {strField(p.problem)}</p>}
+                              {strField(p.action) && <p style={{ color: "#9ca3af", fontSize: "0.85rem", margin: "0 0 6px" }}>Action: {strField(p.action)}</p>}
+                              <div className="row-gap">
+                                <button type="button" className="btn" disabled={!pid}
+                                  onClick={() => void workbenchAction("approve", pid)}>Approve</button>
+                                <button type="button" className="btn" disabled={!pid}
+                                  onClick={() => void workbenchAction("reject", pid)}>Reject</button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                     {wbActionMsg ? <p className="op-note">{wbActionMsg}</p> : null}
                   </Section>
                   <Section title="workbench_meta">
@@ -3472,16 +3494,20 @@ export default function App() {
                 </div>
                 {planMsg && <p className="op-note">{planMsg}</p>}
               </Section>
-              <Section title={`Active plans (${plans?.active_count ?? 0})`}>
+              <Section title={`Active plans (${
+                typeof plans?.active_count === "number"
+                  ? plans.active_count
+                  : (plans?.plans ?? []).filter((p) => String(asRecord(p)?.status ?? "") === "active").length
+              })`}>
                 <button type="button" className="btn ghost" style={{ marginBottom: "8px" }} onClick={() => void fetchPlans()} disabled={plansBusy}>
                   Refresh
                 </button>
                 {!plans ? (
                   <p className="op-muted">Loading…</p>
-                ) : plans.plans.length === 0 ? (
+                ) : (plans.plans ?? []).length === 0 ? (
                   <p className="op-muted">No plans yet. Iris will create them from her goals and curiosity.</p>
                 ) : (
-                  plans.plans.map((plan) => {
+                  (plans.plans ?? []).map((plan) => {
                     const p = plan as Record<string, unknown>;
                     const steps = (p.steps as Record<string, unknown>[]) ?? [];
                     const done = steps.filter((s) => String(s.status) === "completed" || String(s.status) === "skipped").length;
@@ -3589,30 +3615,39 @@ export default function App() {
                       {learningWeekSummary || "No learnings recorded yet."}
                     </p>
                   </Section>
-                  <Section title="Knowledge Gaps">
-                    {learningGaps.length === 0 ? <p className="op-muted">No gaps identified.</p> : (
+                  <Section title="Still curious about">
+                    {learningGaps.length === 0 ? <p className="op-muted">Nothing open right now.</p> : (
                       <ul style={{ color: "#9ca3af", fontSize: "0.85rem", paddingLeft: "1.2rem" }}>
-                        {learningGaps.map((g, i) => <li key={i}>{g}</li>)}
+                        {learningGaps.map((g, i) => (
+                          <li key={i}>
+                            {g.topic}
+                            {g.note ? <span style={{ color: "#6b7280" }}> ({g.note})</span> : null}
+                          </li>
+                        ))}
                       </ul>
                     )}
                   </Section>
-                  <Section title="Recent Learnings">
+                  <Section title={`Recent Learnings${(learningLog ?? []).length > 20 ? " (newest 20)" : ""}`}>
                     {(learningLog ?? []).length === 0 ? <p className="op-muted">Nothing yet.</p> : (
                       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {[...(learningLog ?? [])].reverse().slice(0, 20).map((e, i) => {
-                          const entry = e as Record<string, unknown>;
+                        {(learningLog ?? []).slice(0, 20).map((entry, i) => {
+                          const conf = Number(entry.confidence);
+                          const source = strField(entry.source);
                           return (
                             <div key={i} style={{
                               background: "#0d1117", border: "1px solid #1e293b",
                               borderRadius: 8, padding: "0.6rem", fontSize: "0.82rem",
                             }}>
                               <div style={{ color: "#4a90d9", marginBottom: 3 }}>
-                                {String(entry.date ?? "")} · {String(entry.topic ?? "")} · <em>{String(entry.source ?? "")}</em>
-                                <span style={{ color: "#4ade80", marginLeft: 8 }}>
-                                  {Math.round(Number(entry.confidence ?? 0) * 100)}% confidence
-                                </span>
+                                {[strField(entry.date), strField(entry.topic)].filter(Boolean).join(" · ")}
+                                {source && <> · <em>{source}</em></>}
+                                {Number.isFinite(conf) && entry.confidence !== null && entry.confidence !== undefined && (
+                                  <span style={{ color: "#4ade80", marginLeft: 8 }}>
+                                    {Math.round(conf * 100)}% confidence
+                                  </span>
+                                )}
                               </div>
-                              <p style={{ color: "#9ca3af", margin: 0 }}>{String(entry.knowledge ?? "")}</p>
+                              <p style={{ color: "#9ca3af", margin: 0 }}>{strField(entry.knowledge)}</p>
                             </div>
                           );
                         })}
@@ -3627,7 +3662,7 @@ export default function App() {
           {tab === "people" && (
             <div className="op-pane">
               <h1 className="op-h1">People</h1>
-              <p className="op-lead">Everyone Iris knows. Recognition confidence and profile status.</p>
+              <p className="op-lead">Everyone Iris knows, from the person cards in <code>profiles/</code> and enrolled faces in <code>faces/</code>.</p>
               <Section title="Current at Machine">
                 <Kv items={[
                   { label: "Person", value: String(asRecord(snap?.current_person)?.display_name ?? "Unknown") },
@@ -3648,30 +3683,38 @@ export default function App() {
                 }}>Start New Onboarding</button>
               </Section>
               {peopleBusy ? <p className="op-muted">Loading…</p> : (
-                <Section title="Known Profiles">
-                  {(profiles ?? []).length === 0 ? <p className="op-muted">No profiles.</p> : (
+                <Section title={`Known people${profiles ? ` (${profiles.length})` : ""}`}>
+                  {(profiles ?? []).length === 0 ? <p className="op-muted">No person cards found.</p> : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {(profiles ?? []).map((p, i) => {
-                        const prof = p as Record<string, unknown>;
+                      {(profiles ?? []).map((prof, i) => {
+                        const pid = strField(prof.id);
+                        const name = strField(prof.name) || pid;
+                        const rel = strField(prof.relationship);
+                        const summary = strField(prof.summary);
+                        const faces = typeof prof.face_samples === "number" ? prof.face_samples : null;
                         return (
-                          <div key={i} style={{
+                          <div key={pid || i} style={{
                             background: "#0d1117", border: "1px solid #1e293b",
                             borderRadius: 8, padding: "0.75rem", fontSize: "0.85rem",
                           }}>
-                            <div style={{ color: "#e2e8f0", fontWeight: 600 }}>{String(prof.name ?? prof.person_id ?? "")}</div>
-                            <div style={{ color: "#4a5568", fontSize: "0.75rem" }}>
-                              {String(prof.person_id ?? "")} · {String(prof.relationship_to_zeke ?? "")}
-                              {Boolean(prof.onboarding_complete) && <span style={{ color: "#4ade80", marginLeft: 8 }}>onboarded</span>}
+                            <div style={{ color: "#e2e8f0", fontWeight: 600 }}>{name}</div>
+                            <div style={{ color: "#7a8aa3", fontSize: "0.75rem" }}>
+                              {[pid, rel].filter(Boolean).join(" · ")}
                             </div>
-                            <button type="button" style={{
-                              marginTop: 6, fontSize: "0.75rem", background: "#1e293b",
-                              border: "1px solid #2d3748", borderRadius: 6, padding: "0.2rem 0.6rem",
-                              color: "#9ca3af", cursor: "pointer",
-                            }} onClick={() => {
-                              postJson(`/api/v1/profile/${String(prof.person_id ?? "")}/refresh`, {})
-                                .then(() => setPeopleBusy(false))
-                                .catch(() => {});
-                            }}>Refresh Profile</button>
+                            {summary && <p style={{ color: "#9ca3af", margin: "6px 0 0", lineHeight: 1.45 }}>{summary}</p>}
+                            <div style={{ color: faces ? "#4ade80" : "#6b7280", fontSize: "0.75rem", marginTop: 6 }}>
+                              {faces ? `${faces} face sample${faces === 1 ? "" : "s"} enrolled` : "No face enrolled"}
+                            </div>
+                            {faces ? (
+                              <button type="button" style={{
+                                marginTop: 6, fontSize: "0.75rem", background: "#1e293b",
+                                border: "1px solid #2d3748", borderRadius: 6, padding: "0.2rem 0.6rem",
+                                color: "#9ca3af", cursor: "pointer",
+                              }} onClick={() => {
+                                postJson(`/api/v1/profile/${encodeURIComponent(pid)}/refresh`, {})
+                                  .catch(() => {});
+                              }}>Refresh Profile</button>
+                            ) : null}
                           </div>
                         );
                       })}
@@ -3693,39 +3736,52 @@ export default function App() {
                   onClick={() => void fetchProposals()} disabled={proposalsBusy}>Refresh</button>
                 {proposalMsg && <p className="op-note">{proposalMsg}</p>}
                 {!proposals ? <p className="op-muted">Loading…</p>
-                  : proposals.length === 0 ? <p className="op-muted">No pending proposals yet. Iris will propose identity additions as she learns.</p>
-                  : proposals.map((prop, idx) => {
-                    const p = prop as Record<string, unknown>;
+                  : proposals.length === 0 ? <p className="op-muted">No identity proposals right now.</p>
+                  : proposals.map((p, idx) => {
                     const ts = Number(p.ts || 0);
+                    const pid = strField(p.proposal_id) || strField(p.id);
+                    const status = strField(p.status);
+                    const text = strField(p.text) || strField(p.proposal) || strField(p.summary) || strField(p.content);
                     return (
-                      <div key={idx} style={{ border: "1px solid #2a2a3a", borderRadius: "6px", padding: "12px", marginBottom: "8px" }}>
+                      <div key={pid || idx} style={{ border: "1px solid #2a2a3a", borderRadius: "6px", padding: "12px", marginBottom: "8px" }}>
                         <p style={{ fontSize: "0.85em", color: "#a78bfa", marginBottom: "4px" }}>
-                          {ts > 0 ? new Date(ts * 1000).toLocaleString() : ""}
-                          {" · "}
-                          <span style={{ color: String(p.status) === "pending" ? "#fbbf24" : "#4ade80" }}>{String(p.status)}</span>
+                          {[ts > 0 ? new Date(ts * 1000).toLocaleString() : "", pid].filter(Boolean).join(" · ")}
+                          {status && (
+                            <>
+                              {" · "}
+                              <span style={{ color: status === "pending" ? "#fbbf24" : "#4ade80" }}>{status}</span>
+                            </>
+                          )}
                         </p>
-                        <p style={{ fontSize: "0.9em", color: "#d1d5db", marginBottom: "8px" }}>{String(p.text || "")}</p>
-                        {String(p.status) === "pending" && (
-                          <button type="button" className="btn primary" style={{ fontSize: "0.8em", padding: "3px 10px" }}
-                            onClick={async () => {
-                              setProposalsBusy(true); setProposalMsg("");
-                              try {
-                                const r = await postJson("/api/v1/identity/proposals/approve", { text: p.text }) as Record<string, unknown>;
-                                setProposalMsg(r.ok ? "Approved and applied to identity." : `Error: ${String(r.error || "unknown")}`);
-                                void fetchProposals();
-                              } catch (e) { setProposalMsg(e instanceof Error ? e.message : String(e)); }
-                              finally { setProposalsBusy(false); }
-                            }}>Approve</button>
+                        {text ? (
+                          <p style={{ fontSize: "0.9em", color: "#d1d5db", marginBottom: "8px" }}>{text}</p>
+                        ) : (
+                          <JsonBlock data={p} maxHeight={160} />
                         )}
+                        <button type="button" className="btn primary" style={{ fontSize: "0.8em", padding: "3px 10px" }}
+                          disabled={!pid || proposalsBusy}
+                          title={pid ? undefined : "This proposal has no proposal_id, so it can't be approved from here."}
+                          onClick={async () => {
+                            if (!pid) return;
+                            setProposalsBusy(true); setProposalMsg("");
+                            try {
+                              const r = await postJson("/api/v1/identity/proposals/approve", { proposal_id: pid }) as Record<string, unknown>;
+                              setProposalMsg(r.ok
+                                ? (strField(r.note) || "Approval recorded.")
+                                : `Error: ${strField(r.error) || "unknown"}`);
+                              void fetchProposals();
+                            } catch (e) { setProposalMsg(e instanceof Error ? e.message : String(e)); }
+                            finally { setProposalsBusy(false); }
+                          }}>Approve</button>
                       </div>
                     );
                   })
                 }
               </Section>
-              <Section title="Active identity extensions">
-                <p className="op-note">Extensions loaded from <code>state/identity_extensions.md</code> and injected into all prompts.</p>
+              <Section title="Identity extensions">
+                <p className="op-note">From <code>state/identity_extensions.md</code>.</p>
                 <pre className="identity-ro" style={{ fontSize: "0.8em" }}>
-                  {String((snap as Record<string, unknown>)?.identity_extensions || "(none yet)")}
+                  {identityExtensions ?? "(none on disk)"}
                 </pre>
               </Section>
             </div>
