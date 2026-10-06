@@ -34,6 +34,10 @@ import { type OrbState, type OrbProps, getCfg, deriveBlendColors, STATE_TINT } f
 export interface IrisBodyProps extends OrbProps {
   /** Where the person I'm looking at is, -1..1 on each axis (x right, y up). Optional. */
   gaze?: { x: number; y: number };
+  /** My chosen size, 0.35..1.35 (1 = default). Eased; never allowed to push the eye past the canvas. */
+  bodyScale?: number;
+  /** Increments on each deliberate blink (like recenterTrigger). */
+  blinkTrigger?: number;
 }
 
 // Camera framing. Canvas half-width in world units = Z * tan(FOV/2).
@@ -209,18 +213,19 @@ const FRAG = /* glsl */`
 
 const MOTE_VERT = /* glsl */`
   attribute float seed;
-  uniform float uTime, uAmp, uSleep, uSpeed, uSpread, uRise, uBright;
+  uniform float uTime, uAmp, uSleep, uSpeed, uSpread, uRise, uBright, uMoteScale, uMaxR;
   uniform vec2 uOffset;
   uniform float uPx;
   varying float vFade;
   void main(){
     float life = fract(seed * 7.13 + uTime * uSpeed * (0.6 + seed));
     float ang = seed * 6.2831 * 13.0 + uTime * 0.02;
-    float rad = (0.76 + life * (0.32 + 0.3 * uAmp) * uSpread);
+    float rad = (0.76 + life * (0.32 + 0.3 * uAmp) * uSpread) * uMoteScale;
     vec3 pos = vec3(cos(ang) * rad, sin(ang) * rad, 0.0);
     pos.y += uRise * life * 0.35;
     pos.xy += uOffset * 0.72;
-    vFade = sin(life * 3.14159) * (1.0 - uSleep * 0.85) * uBright;
+    vFade = sin(life * 3.14159) * (1.0 - uSleep * 0.85) * uBright
+          * (1.0 - smoothstep(uMaxR * 0.8, uMaxR * 0.97, length(pos.xy)));   // fade before the canvas edge
     vec4 mv = modelViewMatrix * vec4(pos, 1.0);
     gl_PointSize = (1.6 + 2.4 * fract(seed * 31.0)) * uPx;
     gl_Position = projectionMatrix * mv;
@@ -234,13 +239,13 @@ const MOTE_FRAG = /* glsl */`
 
 function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride, pointerAngleDeg = 0, amplitude = 0,
   energy = 0.5, recenterTrigger, cubeMorphEnabled = true, sleepProgress = 0, sleepRemainingSeconds = 0,
-  wakeProgress = 0, gaze }: IrisBodyProps) {
+  wakeProgress = 0, gaze, bodyScale = 1, blinkTrigger }: IrisBodyProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   // Live refs: the loop reads these every frame — prop changes never remount the scene.
   const live = useRef({ emotion, emotionColor, state, shapeOverride, pointerAngleDeg, amplitude, energy,
-    recenterTrigger, cubeMorphEnabled, sleepProgress, wakeProgress, gaze });
+    recenterTrigger, cubeMorphEnabled, sleepProgress, wakeProgress, gaze, bodyScale, blinkTrigger });
   live.current = { emotion, emotionColor, state, shapeOverride, pointerAngleDeg, amplitude, energy,
-    recenterTrigger, cubeMorphEnabled, sleepProgress, wakeProgress, gaze };
+    recenterTrigger, cubeMorphEnabled, sleepProgress, wakeProgress, gaze, bodyScale, blinkTrigger };
 
   useEffect(() => {
     const container = mountRef.current;
@@ -282,7 +287,7 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
     moteGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(NM * 3), 3));
     moteGeo.setAttribute("seed", new THREE.BufferAttribute(moteSeed, 1));
     const MU = { uTime: U.uTime, uColor: U.uLight, uAmp: U.uAmp, uSleep: U.uSleep, uBright: U.uBright,
-      uOffset: U.uOffset, uSpeed: { value: 0.035 }, uSpread: { value: 1 }, uRise: { value: 0 },
+      uOffset: U.uOffset, uSpeed: { value: 0.035 }, uSpread: { value: 1 }, uRise: { value: 0 }, uMoteScale: { value: 1 }, uMaxR: { value: HALF },
       uPx: { value: dpr * Math.max(0.6, size / 320) } };
     const moteMat = new THREE.ShaderMaterial({ uniforms: MU, vertexShader: MOTE_VERT, fragmentShader: MOTE_FRAG,
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
@@ -332,6 +337,8 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
     // person's sentence; people look AWAY while thinking hard (cognitive gaze aversion) and glance
     // away as they start to speak; the eye never sits perfectly still (microsaccades).
     let nextBlinkT = 2 + Math.random() * 3;
+    let lastBlinkTrigger = live.current.blinkTrigger;
+    let chosenScale = 1, fit = 1;
     let blinkStartT = -10, blinkDouble = false;
     let prevState: OrbState | null = null;
     let avertX = 0, avertY = 0, avertUntil = -1;
@@ -355,8 +362,11 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
       const kFast = 1 - Math.exp(-dt / 0.09);      // voice amplitude follows quickly
 
       // ── colour: blend recolour in place (never remount — the 07-08 "laggy pulse" scar) ──
-      if (L.emotionColor !== appliedColor) {
-        appliedColor = L.emotionColor;
+      // With no blended colour the table colour depends on the EMOTION, and this scene never remounts
+      // on emotion (the classic one did) — so the key must include it, or the old colour sticks.
+      const colorKey = L.emotionColor ? L.emotionColor : `table:${L.emotion}`;
+      if (colorKey !== appliedColor) {
+        appliedColor = colorKey;
         const d = deriveBlendColors(L.emotionColor, cfg);
         colBase.set(d.color); colLight.set(d.lightColor); colDark.set(d.darkColor);
       }
@@ -452,6 +462,11 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
       // ── blinks ──
       let blink = 0;
       const canBlink = !pointer && st !== "sleeping" && st !== "waking" && st !== "offline";
+      const deliberate = L.blinkTrigger !== lastBlinkTrigger;
+      if (deliberate) {
+        lastBlinkTrigger = L.blinkTrigger;
+        if (st !== "sleeping" && st !== "offline") { blinkStartT = t; blinkDouble = false; nextBlinkT = t + 1.5 + Math.random() * 2; }
+      }
       if (canBlink && t >= nextBlinkT) {
         blinkStartT = t; blinkDouble = Math.random() < 0.1;
         const mean = blinkMean[st] ?? 3.5;
@@ -459,7 +474,7 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
       }
       const bt = t - blinkStartT;
       const blinkShape = (x: number) => x < 0 ? 0 : x < 0.09 ? x / 0.09 : x < 0.13 ? 1 : x < 0.32 ? 1 - (x - 0.13) / 0.19 : 0;
-      if (canBlink) blink = Math.max(blinkShape(bt), blinkDouble ? blinkShape(bt - 0.36) : 0);
+      if (canBlink || bt < 0.35) blink = Math.max(blinkShape(bt), blinkDouble ? blinkShape(bt - 0.36) : 0);
 
       // ── weave spin: spd(state) × the classic rotation multipliers; held level while pointing ──
       let rotMul = 1.0;
@@ -483,8 +498,21 @@ function IrisBodyInner({ emotion, emotionColor, state, size = 320, shapeOverride
       const burst = cur.burst * (Math.sin(t * 1.5) * 0.5 + 0.5) * 0.22;
       const stateMul = st === "speaking" ? 1 + amp * 0.08 : st === "listening" ? 0.95 + Math.sin(t * 1.3) * 0.04 : 1;
       const s = breath * spread * cur.scale * stateMul * (1 + pulse * 0.25) * (1 + scattered + burst) * (1 - 0.12 * cur.sleep);
-      U.uScale.value.set(s * cur.sqx, s * cur.sqy);
-      U.uOffset.value.set(0, (cfg.gravityY * 0.12 + cur.rise * 0.05) * (1 - cur.point));
+      // ── size I choose + auto-fit: the eye may never be cut off by the canvas (widget 150 px included) ──
+      // Fit is computed from the ENVELOPE (the max of every oscillation), so breathing/burst/pulse stay
+      // visible instead of being flattened by a per-frame fit.
+      chosenScale += (Math.max(0.35, Math.min(1.35, L.bodyScale ?? 1)) - chosenScale) * (1 - Math.exp(-dt / 0.5));
+      const offY = (cfg.gravityY * 0.12 + cur.rise * 0.05) * (1 - cur.point);
+      const env = 1.03 * spread * cur.scale * (st === "speaking" ? 1.08 : 1) * (1 + pulseAmp * 0.25)
+                * (1 + cur.loose * 0.04 + cur.burst * 0.22) * (1 - 0.12 * cur.sleep);
+      const shapeExt = Math.max(cur.sqx, cur.sqy) * (1 + 0.45 * cur.droop) * (1 + 0.4 * cur.point);
+      const availQ = HALF / (PLANE / 2) / IRIS_R - 0.14 /* drift */ - 0.24 /* rim glow */ - Math.abs(offY);
+      const fitTarget = Math.min(1, availQ / Math.max(0.01, env * chosenScale * shapeExt));
+      fit += (fitTarget - fit) * (1 - Math.exp(-dt / 0.4));
+      const sF = s * chosenScale * fit;
+      U.uScale.value.set(sF * cur.sqx, sF * cur.sqy);
+      U.uOffset.value.set(0, offY);
+      MU.uMoteScale.value = sF / Math.max(0.01, breath);
 
       // ── drift + recenter (classic formula, scaled to this camera); held still while pointing ──
       if (L.recenterTrigger !== lastSeenRecenter) { lastSeenRecenter = L.recenterTrigger; recenterStartT = t; }
@@ -617,7 +645,8 @@ const IrisBody = memo(IrisBodyInner, (prev, next) => (
   Math.abs((prev.sleepProgress ?? 0) - (next.sleepProgress ?? 0)) < 0.01 &&
   Math.abs((prev.sleepRemainingSeconds ?? 0) - (next.sleepRemainingSeconds ?? 0)) < 1.0 &&
   Math.abs((prev.wakeProgress ?? 0) - (next.wakeProgress ?? 0)) < 0.05 &&
-  (prev.gaze?.x ?? 0) === (next.gaze?.x ?? 0) && (prev.gaze?.y ?? 0) === (next.gaze?.y ?? 0)
+  (prev.gaze?.x ?? 0) === (next.gaze?.x ?? 0) && (prev.gaze?.y ?? 0) === (next.gaze?.y ?? 0) &&
+  (prev.bodyScale ?? 1) === (next.bodyScale ?? 1) && prev.blinkTrigger === next.blinkTrigger
 ));
 
 export default IrisBody;

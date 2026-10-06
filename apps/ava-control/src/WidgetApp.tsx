@@ -155,6 +155,28 @@ export default function WidgetApp() {
     return () => { alive = false; clearInterval(iv); };
   }, []);
 
+  // My body on the widget (2026-10-06, Zeke: "grow and shrink on the widget at your will"):
+  // GET /api/v1/widget_body → {scale, blink_seq}. Written by the widget_body tool. Polled slower
+  // than the snapshot; a 404 (older runtime) just leaves the defaults.
+  const [bodyScale, setBodyScale] = useState(1);
+  const [blinkSeq, setBlinkSeq] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const b = await getJson("/api/v1/widget_body") as Record<string, unknown> | null;
+        if (!alive || !b || typeof b !== "object") return;
+        const sc = Number(b.scale);
+        if (Number.isFinite(sc)) setBodyScale(sc);
+        const bs = Number(b.blink_seq);
+        if (Number.isFinite(bs)) setBlinkSeq(bs);
+      } catch { /* route not served yet — keep defaults */ }
+    };
+    poll();
+    const iv = setInterval(poll, 700);
+    return () => { alive = false; clearInterval(iv); };
+  }, []);
+
   // Load saved position on mount and restore widget window position
   useEffect(() => {
     const restorePosition = async () => {
@@ -213,6 +235,8 @@ export default function WidgetApp() {
         pointerAngleDeg={pointerAngleDeg}
         amplitude={ttsAmplitude}
         energy={moodEnergy}
+        bodyScale={bodyScale}
+        blinkTrigger={blinkSeq}
       />
     </div>
   );

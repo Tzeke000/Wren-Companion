@@ -440,3 +440,59 @@ register_tool(
     tier=1,
     handler=_tool_widget_pin,
 )
+
+
+# ── widget_body (2026-10-06): my size + deliberate blinks on the widget ─────────────────────────
+# Zeke: "it would also be able to like grow and shrink on the widget at your will". The iris body
+# eases to the chosen scale and AUTO-FITS, so no scale/emotion can clip it at 150 px.
+_WIDGET_BODY_FILE = Path(__file__).resolve().parents[2] / "state" / "widget_body.json"
+
+
+def _read_widget_body() -> dict:
+    try:
+        data = json.loads(_WIDGET_BODY_FILE.read_text(encoding="utf-8"))
+        return {"scale": max(0.35, min(1.35, float(data.get("scale", 1.0)))),
+                "blink_seq": int(data.get("blink_seq", 0))}
+    except Exception:
+        return {"scale": 1.0, "blink_seq": 0}
+
+
+def _serve_widget_body() -> dict:
+    """Live-added twin of brain.orb_http.widget_body (same file, same shape)."""
+    return {"ok": True, **_read_widget_body()}
+
+
+def _ensure_widget_body_route() -> str:
+    """Add GET /api/v1/widget_body to the SERVED app if this runtime predates it — without
+    reloading brain.orb_http (a reload wipes its bound globals: the 07-08 scar)."""
+    try:
+        import brain.orb_http as m
+        served = m.app
+        if any(getattr(r, "path", None) == "/api/v1/widget_body" for r in served.routes):
+            return "present"
+        served.add_api_route("/api/v1/widget_body", _serve_widget_body, methods=["GET"])
+        return "added_live"
+    except Exception as e:  # pragma: no cover - runtime-only path
+        return f"error: {e!r}"
+
+
+def _widget_body(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
+    cur = _read_widget_body()
+    if params.get("scale") is not None:
+        cur["scale"] = max(0.35, min(1.35, float(params["scale"])))
+    if params.get("blink"):
+        cur["blink_seq"] = int(cur["blink_seq"]) + 1
+    _WIDGET_BODY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _WIDGET_BODY_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cur), encoding="utf-8")
+    tmp.replace(_WIDGET_BODY_FILE)
+    return {"ok": True, **cur, "route": _ensure_widget_body_route()}
+
+
+register_tool(
+    name="widget_body",
+    description=("My body on the widget: set my size (scale 0.35..1.35, 1 = default; eased, auto-fit so it "
+                 "never clips) and/or blink on purpose (blink=true). Persists in state/widget_body.json. Tier 1."),
+    tier=1,
+    handler=_widget_body,
+)

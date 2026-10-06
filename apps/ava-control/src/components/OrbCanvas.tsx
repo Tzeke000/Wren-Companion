@@ -881,7 +881,7 @@ export function useBodyStyle(): BodyStyle {
 function OrbCanvas(props: IrisBodyProps) {
   const style = useBodyStyle();
   if (style === "classic") {
-    const { gaze: _gaze, ...classic } = props;
+    const { gaze: _gaze, bodyScale: _bs, blinkTrigger: _bt, ...classic } = props;
     return <ClassicOrb {...classic} />;
   }
   return <IrisBody {...props} />;

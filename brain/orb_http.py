@@ -1734,6 +1734,25 @@ async def widget_position_set(payload: dict = Body(default={})) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/v1/widget_body")
+def widget_body() -> dict:
+    """My body on the widget (2026-10-06, Zeke: "grow and shrink on the widget at your will").
+    state/widget_body.json = {scale 0.35..1.35, blink_seq int}, written by the widget_body tool
+    (tools/system/widget_spatial_tool.py — which also adds this route LIVE to a runtime that was
+    started before it existed). WidgetApp polls it; the iris auto-fits so no scale can clip it."""
+    out = {"ok": True, "scale": 1.0, "blink_seq": 0}
+    p = _root / "state" / "widget_body.json"
+    if p.is_file():
+        try:
+            import json as _j
+            data = _j.loads(p.read_text(encoding="utf-8"))
+            out["scale"] = max(0.35, min(1.35, float(data.get("scale", 1.0))))
+            out["blink_seq"] = int(data.get("blink_seq", 0))
+        except Exception:
+            pass
+    return out
+
+
 # Phase 5 — orb tells us when it's minimized vs visible. We store this on _g
 # so future inner-monologue / proactive logic can know whether the user is
 # actively watching or has tucked Iris away in the widget.

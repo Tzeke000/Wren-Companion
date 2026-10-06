@@ -27,7 +27,12 @@ const states: Cell[] = [
 const emo = ["joy", "sadness", "anger", "fear", "love", "pride", "nostalgia", "logical", "analyzing", "neutral",
   "bored2", "thinking_deep", "realization", "scared", "proud"];
 const emotions: Cell[] = emo.map(e => ({ label: e, props: { state: "idle", emotion: e, emotionColor: "" } }));
-const cells = page === "emotions" ? emotions : states;
+const fitCells: Cell[] = [...emo, "excitement", "surprise", "awe"].map(e => ({ label: e, props: { state: "idle", emotion: e, emotionColor: "", size: 150 } }))
+  .concat([{ label: "speaking .9", props: { state: "speaking", amplitude: 0.9, size: 150 } },
+           { label: "pointer 45°", props: { state: "idle", shapeOverride: "pointer", pointerAngleDeg: 45, size: 150 } }]);
+const BS = Number(q.get("bs") || 1);
+const part = Number(q.get("part") || 1);
+const cells = page === "emotions" ? emotions : page === "fit" ? fitCells.slice((part - 1) * 10, part * 10) : states;
 if (page === "switch") {
   // the real wrapper: flips iris -> classic -> iris live, as the Body toggle does
   setBodyStyle((q.get("style") as "iris" | "classic") || "classic");
@@ -42,7 +47,7 @@ createRoot(document.getElementById("root")!).render(page === "switch" ? (
     {cells.map((c, i) => (
       <div className="cell" key={i}>
         <span>{c.label}</span>
-        <IrisBody emotion="interest" emotionColor={teal} state="idle" size={c.props.shapeOverride ? 150 : 190} {...(c.props as object)} />
+        <div style={{ outline: page === "fit" ? "1px solid #334" : "none" }}><IrisBody emotion="interest" emotionColor={teal} state="idle" size={c.props.shapeOverride ? 150 : 190} bodyScale={BS} {...(c.props as object)} /></div>
       </div>
     ))}
   </>
