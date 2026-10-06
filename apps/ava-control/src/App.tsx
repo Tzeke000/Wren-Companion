@@ -135,6 +135,32 @@ const TABS = [
 ];
 type TabId = (typeof TABS)[number]["id"];
 
+// Redesign 2026-10-06: the panel's tabs, grouped. Any tab not listed lands in "Other" — nothing is lost.
+const NAV_GROUPS: { title: string; ids: string[] }[] = [
+  { title: "Me", ids: ["voice", "memory", "brain", "journal", "learning", "identity"] },
+  { title: "Around me", ids: ["people", "server", "chat", "tools"] },
+  { title: "Workshop", ids: ["plans", "proposals", "workbench", "creative", "models", "finetune"] },
+  { title: "System", ids: ["status", "debug"] },
+];
+// What I'm doing, in plain words, for the header ("here · listening").
+const STATE_WORDS: Record<string, string> = {
+  listening: "listening", attentive: "listening closely", speaking: "talking", thinking: "thinking",
+  deep: "thinking hard", sleeping: "asleep", waking: "waking up", offline: "offline",
+};
+const Ico = ({ d }: { d: string }) => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"
+    strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={d} /></svg>
+);
+const ICON = {
+  mic: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM19 11a7 7 0 0 1-14 0M12 18v3",
+  micOff: "M3 3l18 18M9 9v3a3 3 0 0 0 5 2.2M15 9.3V6a3 3 0 0 0-5.9-.6M19 11a7 7 0 0 1-1.2 3.9M5 11a7 7 0 0 0 11 5.7M12 18v3",
+  speaker: "M4 9h4l5-4v14l-5-4H4zM17 9a4 4 0 0 1 0 6M19.5 6.5a8 8 0 0 1 0 11",
+  speakerOff: "M4 9h4l5-4v14l-5-4H4zM17 9l5 6M22 9l-5 6",
+  menu: "M4 7h16M4 12h16M4 17h10",
+  power: "M12 3v8M6.3 6.3a8 8 0 1 0 11.4 0",
+  send: "M5 12h13M13 6l6 6-6 6",
+};
+
 
 function hexToRgbTriplet(hex: string): string {
   const clean = hex.replace("#", "").trim();
@@ -1501,6 +1527,8 @@ export default function App() {
   const connOffline = !connOnline && online; // backend up but no internet
   const { primaryEmotion, orbVisual, secondaryEmotions, effectiveOrbColor } =
     deriveOrbEmotion(snap, { backendShutdown: backendShutdownDetected, connOffline });
+  const secondaryWord = Number(secondaryEmotions[0]?.intensity ?? 0) >= 0.075
+    ? String(secondaryEmotions[0]?.emotion ?? "").toLowerCase() : "";
   const styleGlow = Number(style?.orb_glow_intensity ?? 0.8);
   const orbMidColor = shadeHex(effectiveOrbColor, 1.08);
   const orbDarkColor = shadeHex(effectiveOrbColor, 0.52);
@@ -2066,34 +2094,34 @@ export default function App() {
         } as any
       }
     >
-      <header className="op-header">
+      <header className="op-header iris-top">
         <div className="op-brand">
           <span className="op-title">Iris</span>
           <span className={`op-status-dot ${online ? "on" : "off"}`} aria-hidden="true" />
-          <span className="op-status-text">{online ? "Live" : "Offline"}</span>
+          <span className="op-status-text">
+            {!online
+              ? (connecting ? "connecting…" : "offline")
+              : `here${STATE_WORDS[String(orbPulseMode)] ? ` · ${STATE_WORDS[String(orbPulseMode)]}` : ""}`}
+          </span>
         </div>
-        <div className="op-meta">
-          <span className="op-meta-item">Brain {String(models?.selected_model ?? "—")}</span>
-          <span className="op-meta-item">Heartbeat {String(hb?.heartbeat_mode ?? "—")}</span>
-          <span className="op-meta-item op-meta-issue">Issue {String(hb?.runtime_active_issue_summary ?? "none")}</span>
-          <span className="op-meta-item">Updated {updatedLabel}</span>
-          {inputMuted ? <span className="input-muted-pill">Input muted</span> : null}
-          <button
-            type="button"
-            className="btn ghost op-header-btn"
-            onClick={() => void toggleTts()}
-            disabled={shutdownInProgress}
-            title={`TTS engine: ${String(tts?.engine ?? "none")}`}
-          >
-            TTS {Boolean(tts?.enabled) ? "On" : "Off"} ({String(tts?.engine ?? "none")})
+        <div className="iris-top-actions">
+          <button type="button" className={`iris-ib ${inputMuted ? "off" : ""}`} onClick={() => void toggleInputMute()}
+            title={inputMuted ? "Mic is off — I can't hear you. Click to turn it on." : "Mic is on — click to mute"}
+            aria-label={inputMuted ? "Turn the mic on" : "Mute the mic"}>
+            <Ico d={inputMuted ? ICON.micOff : ICON.mic} />
           </button>
-          <button
-            type="button"
-            className="btn op-shutdown-btn"
-            onClick={() => setShutdownConfirmOpen(true)}
+          <button type="button" className={`iris-ib ${Boolean(tts?.enabled) ? "" : "off"}`} onClick={() => void toggleTts()}
             disabled={shutdownInProgress}
-          >
-            Shut Down
+            title={`My voice is ${Boolean(tts?.enabled) ? "on" : "off"} (${String(tts?.engine ?? "none")})`}
+            aria-label={Boolean(tts?.enabled) ? "Turn my voice off" : "Turn my voice on"}>
+            <Ico d={Boolean(tts?.enabled) ? ICON.speaker : ICON.speakerOff} />
+          </button>
+          <button type="button" className="iris-ib" onClick={() => setOperatorOpen(true)} title="Panel" aria-label="Open the panel">
+            <Ico d={ICON.menu} />
+          </button>
+          <button type="button" className="iris-ib power" onClick={() => setShutdownConfirmOpen(true)}
+            disabled={shutdownInProgress} title="Shut me down" aria-label="Shut down">
+            <Ico d={ICON.power} />
           </button>
         </div>
       </header>
@@ -2106,7 +2134,7 @@ export default function App() {
             "Iris has shut down."
           ) : (
             <>
-              Backend not responding on :5876. Start <code>avaagent.py</code> (operator HTTP must be enabled).{" "}
+              I'm not answering on :5876 — the runtime may be down or restarting.{" "}
               {pollErr ? `(${pollErr})` : ""}
             </>
           )}
@@ -2144,52 +2172,13 @@ export default function App() {
             <span style={{ color: "#00d4d4" }}>Processing…</span>
           </div>
         )}
-        {/* Connectivity status bar */}
-        <div style={{
-          display: "flex", alignItems: "center", gap: 8,
-          padding: "4px 12px", fontSize: "0.72rem",
-          background: "rgba(0,0,0,0.3)", borderRadius: 6, marginBottom: 4,
-        }}>
-          <span style={{
-            width: 8, height: 8, borderRadius: "50%", display: "inline-block",
-            background: !online ? "#6b7280" : connOnline ? "#4ade80" : "#f59e0b",
-            boxShadow: connOnline && online ? "0 0 6px #4ade80" : "none",
-            flexShrink: 0,
-          }} />
-          <span style={{ color: !online ? "#6b7280" : connOnline ? "#4ade80" : "#f59e0b", fontFamily: "monospace" }}>
-            {!online ? "IRIS OFFLINE" : connOnline ? (connCloudAvailable ? "Cloud active" : "Local only") : "Local only"}
-          </span>
-          {connOnline && connQuality === "online_fast" && (
-            <span style={{ color: "#4a5568", marginLeft: 4 }}>fast</span>
-          )}
-          {connOnline && connQuality === "online_slow" && (
-            <span style={{ color: "#d69e2e", marginLeft: 4 }}>slow</span>
-          )}
-        </div>
-        <div className="presence-hud-row">
-          <div className="presence-hud" style={{ color: effectiveOrbColor }}>
-            EMOTION: {primaryEmotion}
-          </div>
-          <div className="presence-hud">
-            HEARTBEAT: {String(hb?.heartbeat_mode ?? "idle")}
-          </div>
-        </div>
-        {PRESENCE_V2_ENABLED && (
-          // No `key=` — React reuses this DOM node across content changes.
-          // The empty→live class transition triggers the one-shot fade-in;
-          // subsequent text updates within the same session don't remount
-          // and don't re-fire the entry animation.
-          <div className={`presence-speaking-text ${speakingTextForUI ? "live" : "empty"}`}>
-            {speakingTextForUI}
-          </div>
-        )}
         <div className="presence-orb-wrap">
           <div className={`orb-canvas-shell${orbRecenterPulse ? " recenter-pulse" : ""}`}>
             <OrbCanvas
               emotion={primaryEmotion}
               emotionColor={effectiveOrbColor}
               state={shutdownInProgress ? "offline" : (orbPulseMode as any)}
-              size={320}
+              size={400}
               amplitude={ttsAmplitude}
               energy={moodEnergy}
               recenterTrigger={orbRecenterCounter}
@@ -2208,51 +2197,42 @@ export default function App() {
             )}
           </div>
         </div>
-        <div className="presence-orb-line" aria-hidden="true" />
-        <div className="presence-hud-row presence-hud-row-bottom">
-          <div className="presence-hud" style={{
-            color: dbBusy ? "#60a5fa" : dbPendingInsight ? "#a78bfa" : dbLiveThinking ? "#2dd4bf" : undefined,
-          }}>
-            {dbPendingInsight
-              ? "READY TO SHARE"
-              : dbBusy && dbCurrentTask
-                ? `THINKING: ${dbCurrentTask}`
-                : dbLiveThinking
-                  ? "PROCESSING..."
-                  : `NEURAL ACTIVITY: ${Number(snapshotBrainGraph?.total_nodes ?? brainGraph.nodes.length)}`}
-          </div>
-          <div className="presence-hud">
-            UPTIME: {uptimeLabel}
-          </div>
+        <div className="iris-mood" style={{ color: effectiveOrbColor }}>
+          {primaryEmotion}
+          {secondaryWord ? <span> · with a little {secondaryWord}</span> : null}
         </div>
-        {avaThinking && (
-          <div style={{
-            textAlign: "center", color: "#3b82f6", fontFamily: "monospace",
-            fontSize: "0.95rem", letterSpacing: "0.06em", marginTop: "0.4rem",
-            animation: "pulse 1.2s ease-in-out infinite",
-          }}>
-            Iris is thinking…
+        {PRESENCE_V2_ENABLED && (
+          // No `key=` — React reuses this DOM node across content changes (one-shot fade-in on empty→live).
+          <div className={`presence-speaking-text ${speakingTextForUI ? "live" : "empty"}`}>
+            {speakingTextForUI}
           </div>
         )}
+        <div className="iris-activity" style={{ color: effectiveOrbColor }}>
+          {avaThinking
+            ? "thinking…"
+            : dbPendingInsight
+              ? "I have something to share"
+              : dbBusy && dbCurrentTask
+                ? `thinking about ${dbCurrentTask}`
+                : dbLiveThinking
+                  ? "processing…"
+                  : ""}
+        </div>
         {PRESENCE_V2_ENABLED && (
-          // No `key=` — same rationale as presence-speaking-text above.
           <div className={`presence-inner-state-line ${innerStateLine ? "live" : "empty"}`}>
             {innerStateLine}
           </div>
         )}
-        {/* Inner monologue — Iris's current thought, rendered under the orb.
-            Distinct from the spoken reply: this is what she's thinking
-            *about*, not what she's saying. Pulled from
-            snapshot.inner_life.current_thought (refreshed each tick). */}
+        {/* Inner monologue — what I'm thinking ABOUT (snapshot.inner_life.current_thought), not what I'm saying. */}
         <div className={`presence-inner-thought ${currentInnerThought ? "live" : "empty"}`}>
-          {currentInnerThought ? `💭 ${currentInnerThought}` : ""}
+          {currentInnerThought}
         </div>
-        <div className="presence-input-row">
+        <div className="presence-input-row iris-composer">
           <input
             type="text"
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
-            placeholder={inputMuted ? "YOUR INPUT IS MUTED" : "SPEAK TO AVA..."}
+            placeholder={inputMuted ? "Mic is off" : "Talk to me…"}
             onKeyDown={(e) => {
               if (inputMuted) return;
               if (e.key === "Enter") {
@@ -2262,21 +2242,18 @@ export default function App() {
             }}
             disabled={chatBusy || shutdownInProgress || inputMuted}
           />
+          {inputMuted && (
+            <button type="button" className="iris-chip" onClick={() => void toggleInputMute()} title="Turn the mic back on">
+              mic off · I can't hear you
+            </button>
+          )}
+          <button type="button" className="iris-send" aria-label="Send"
+            onClick={() => void sendChat()}
+            disabled={chatBusy || shutdownInProgress || inputMuted || !chatInput.trim()}>
+            <Ico d={ICON.send} />
+          </button>
         </div>
-        <button
-          type="button"
-          className={`mute-input-btn ${inputMuted ? "muted" : ""}`}
-          onClick={() => void toggleInputMute()}
-          aria-label={inputMuted ? "Unmute your input" : "Mute your input"}
-          title={inputMuted ? "Input muted" : "Input on"}
-        >
-          <span className="mute-input-icon" aria-hidden="true">{inputMuted ? "🎙️✕" : "🎙️"}</span>
-          <span className="mute-input-label">{inputMuted ? "Input muted — Iris can't hear you" : "Input on"}</span>
-        </button>
-        <button className="presence-gear" type="button" onClick={() => setOperatorOpen(true)} aria-label="Open operator panel">
-          ⚙
-        </button>
-        <button className="presence-camera-thumb" type="button" onClick={() => setCameraOverlayOpen(true)} aria-label="Expand camera">
+        <button className="presence-camera-thumb" type="button" onClick={() => setCameraOverlayOpen(true)} aria-label="Expand camera" title={sceneSummary}>
           {liveFrameSrc ? (
             <img src={liveFrameSrc} alt="camera live thumb" />
           ) : presenceCameraOk ? (
@@ -2297,7 +2274,7 @@ export default function App() {
             onLoad={() => setPresenceCameraOk(true)}
             onError={() => setPresenceCameraOk(false)}
           />
-          <span className="presence-camera-scene">{sceneSummary}</span>
+          <span className="presence-camera-scene">what I see</span>
         </button>
       </section>
       {cameraOverlayOpen && (
@@ -2405,30 +2382,45 @@ export default function App() {
           ×
         </button>
         <nav className="op-nav" aria-label="Primary">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={tab === t.id ? "active" : ""}
-              onClick={() => setTab(t.id)}
-            >
-              {t.label}
-            </button>
-          ))}
-          {customTabs.map((ct) => (
-            <button
-              key={`custom_${ct.id}`}
-              type="button"
-              className={tab === ct.id ? "active" : ""}
-              onClick={() => setTab(ct.id)}
-              title={`Custom tab: ${ct.content_type}`}
-            >
-              {ct.name}
-            </button>
-          ))}
+          {[...NAV_GROUPS, { title: "Other", ids: TABS.map((t) => t.id).filter((id) => !NAV_GROUPS.some((g) => g.ids.includes(id))) }]
+            .map((g) => {
+              const items = TABS.filter((t) => g.ids.includes(t.id));
+              if (!items.length) return null;
+              return (
+                <div key={g.title} className="iris-nav-group">
+                  <div className="iris-nav-h">{g.title}</div>
+                  {items.map((t) => (
+                    <button key={t.id} type="button" className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+          {customTabs.length > 0 && (
+            <div className="iris-nav-group">
+              <div className="iris-nav-h">Extras</div>
+              {customTabs.map((ct) => (
+                <button key={`custom_${ct.id}`} type="button" className={tab === ct.id ? "active" : ""}
+                  onClick={() => setTab(ct.id)} title={`Custom tab: ${ct.content_type}`}>
+                  {ct.name}
+                </button>
+              ))}
+            </div>
+          )}
         </nav>
 
         <main className="op-main">
+          {/* Diagnostics moved off the main screen (redesign 2026-10-06) — always visible in the panel. */}
+          <div className="iris-diag">
+            <span>Brain <b>{String(models?.selected_model ?? "—")}</b></span>
+            <span>Heartbeat <b>{String(hb?.heartbeat_mode ?? "—")}</b></span>
+            <span>Issue <b>{String(hb?.runtime_active_issue_summary ?? "none")}</b></span>
+            <span>Connection <b>{!online ? "offline" : connOnline ? (connCloudAvailable ? "cloud" : "local only") : "local only"}{connOnline && connQuality === "online_slow" ? " (slow)" : ""}</b></span>
+            <span>Neural activity <b>{Number(snapshotBrainGraph?.total_nodes ?? brainGraph.nodes.length)}</b></span>
+            <span>Uptime <b>{uptimeLabel}</b></span>
+            <span>Updated <b>{updatedLabel}</b></span>
+          </div>
           {tab === "chat" && (
             <div className="op-pane op-pane-chat">
               <div className="chat-two-panel">
