@@ -3,7 +3,7 @@ import * as d3 from "d3";
 import ForceGraph3D from "3d-force-graph";
 import { API_BASE, ApiLogEntry, getJson, getText, postJson, registerApiLogger } from "./api";
 import { JsonBlock, Kv, Section } from "./components/Ui";
-import OrbCanvas from "./components/OrbCanvas";
+import OrbCanvas, { setBodyStyle, useBodyStyle } from "./components/OrbCanvas";
 import { listen } from "@tauri-apps/api/event";
 
 /** Operator HTTP API aggregate (brain/operator_server.py — started from avaagent.py). */
@@ -417,6 +417,7 @@ type CustomTab = {
 };
 
 export default function App() {
+  const bodyStyle = useBodyStyle();
   // Tab id can be a built-in TabId OR a custom tab id created at runtime.
   const [tab, setTab] = useState<string>("voice");
   const [customTabs, setCustomTabs] = useState<CustomTab[]>([]);
@@ -3115,6 +3116,13 @@ export default function App() {
                   wakeProgress={wakeProgress}
                 />
               </div>
+              <Section title="Body">
+                <p className="op-muted">How I look. The iris is my body; the classic orb is kept one click away.</p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" className={bodyStyle === "iris" ? "btn primary" : "btn ghost"} onClick={() => setBodyStyle("iris")}>Iris</button>
+                  <button type="button" className={bodyStyle === "classic" ? "btn primary" : "btn ghost"} onClick={() => setBodyStyle("classic")}>Classic orb</button>
+                </div>
+              </Section>
               <Section title="What Iris sees">
                 <div className="camera-frame-shell">
                   <img className="camera-frame" src={sharedCameraSrc} alt="Iris camera feed voice tab" />

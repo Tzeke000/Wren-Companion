@@ -16,7 +16,7 @@ export default defineConfig({
           if (id.includes("node_modules/three")) return "vendor-three";
           if (id.includes("node_modules/d3") || id.includes("node_modules/d3-")) return "vendor-d3";
           if (id.includes("node_modules/@tauri-apps")) return "vendor-tauri";
-          if (id.includes("OrbCanvas")) return "app-orb";
+          if (id.includes("OrbCanvas") || id.includes("IrisBody") || id.includes("orbShared")) return "app-orb";
         },
       },
     },
