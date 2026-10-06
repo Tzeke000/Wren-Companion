@@ -126,7 +126,6 @@ const TABS = [
   { id: "journal" as const, label: "Journal" },
   { id: "learning" as const, label: "Learning" },
   { id: "people" as const, label: "People" },
-  { id: "emil" as const, label: "Emil" },
   { id: "proposals" as const, label: "Proposals" },
   { id: "identity" as const, label: "Identity" },
   { id: "debug" as const, label: "Debug" },
@@ -512,10 +511,6 @@ export default function App() {
   const [profiles, setProfiles] = useState<Record<string, unknown>[] | null>(null);
   const [peopleBusy, setPeopleBusy] = useState(false);
 
-  const [emilStatus, setEmilStatus] = useState<Record<string, unknown> | null>(null);
-  const [emilSendMsg, setEmilSendMsg] = useState("");
-  const [emilSendInput, setEmilSendInput] = useState("");
-  const [emilBusy, setEmilBusy] = useState(false);
 
   const [proposals, setProposals] = useState<Record<string, unknown>[] | null>(null);
   const [proposalMsg, setProposalMsg] = useState("");
@@ -1137,11 +1132,6 @@ export default function App() {
       .then((d) => setProfiles((d as Record<string, unknown>).profiles as Record<string, unknown>[]))
       .catch(() => {})
       .finally(() => setPeopleBusy(false));
-  }, [tab]);
-
-  useEffect(() => {
-    if (tab !== "emil") return;
-    getJson("/api/v1/emil/status").then((d) => setEmilStatus(d as Record<string, unknown>)).catch(() => {});
   }, [tab]);
 
   const fetchProposals = useCallback(async () => {
@@ -3849,46 +3839,6 @@ export default function App() {
                   )}
                 </Section>
               )}
-            </div>
-          )}
-
-          {tab === "emil" && (
-            <div className="op-pane">
-              <h1 className="op-h1">Emil</h1>
-              <p className="op-lead">Emil is Iris's sibling AI on port 5877. They share knowledge, not identity.</p>
-              <Section title="Status">
-                <button type="button" className="btn ghost" style={{ marginBottom: "8px" }}
-                  onClick={() => {
-                    setEmilBusy(true);
-                    postJson("/api/v1/emil/ping", {})
-                      .then((d) => { setEmilStatus(d as Record<string, unknown>); setEmilBusy(false); })
-                      .catch(() => setEmilBusy(false));
-                  }} disabled={emilBusy}>Ping Emil</button>
-                {emilStatus ? (
-                  <div style={{ fontSize: "0.9em" }}>
-                    <p><strong>Online:</strong> <span style={{ color: emilStatus.online ? "#4ade80" : "#f87171" }}>{emilStatus.online ? "yes" : "no"}</span></p>
-                    <p><strong>Last contact:</strong> {emilStatus.last_contact ? new Date(Number(emilStatus.last_contact) * 1000).toLocaleString() : "never"}</p>
-                    <p><strong>Shared topics:</strong> {Array.isArray(emilStatus.shared_topics) && emilStatus.shared_topics.length > 0 ? (emilStatus.shared_topics as string[]).join(", ") : "(none yet)"}</p>
-                  </div>
-                ) : <p className="op-muted">Not loaded — click Ping Emil.</p>}
-              </Section>
-              <Section title="Send message to Emil">
-                <div style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
-                  <input className="op-input" placeholder="Message…" value={emilSendInput}
-                    onChange={(e) => setEmilSendInput(e.target.value)} style={{ flex: 1 }} />
-                  <button type="button" className="btn primary" disabled={emilBusy || !emilSendInput.trim()}
-                    onClick={async () => {
-                      setEmilBusy(true); setEmilSendMsg("");
-                      try {
-                        const r = await postJson("/api/v1/emil/send", { message: emilSendInput.trim() }) as Record<string, unknown>;
-                        setEmilSendMsg(r.ok ? `Emil replied: ${String(r.reply || "(no reply)")}` : `Error: ${String(r.error || "unknown")}`);
-                        setEmilSendInput("");
-                      } catch (e) { setEmilSendMsg(e instanceof Error ? e.message : String(e)); }
-                      finally { setEmilBusy(false); }
-                    }}>Send</button>
-                </div>
-                {emilSendMsg && <p className="op-note">{emilSendMsg}</p>}
-              </Section>
             </div>
           )}
 
