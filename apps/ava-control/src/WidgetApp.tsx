@@ -14,59 +14,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import OrbCanvas from "./components/OrbCanvas";
 import { API_BASE, getJson } from "./api";
+import { CUBE_MORPH_ENABLED, deriveOrbEmotion, deriveOrbSleep, deriveOrbState } from "./orbDerive";
+import type { OrbState } from "./components/orbShared";
 
-const EMOTION_COLOR: Record<string, string> = {
-  calmness: "#1a6cf5", joy: "#f5c518", happiness: "#f5c518", excitement: "#ff6b00",
-  curiosity: "#00d4d4", interest: "#00d4d4", boredom: "#4a5568", frustration: "#e53e3e",
-  sadness: "#553c9a", anger: "#c53030", fear: "#44337a", anxiety: "#44337a",
-  surprise: "#d53f8c", trust: "#38a169", love: "#ed64a6", pride: "#6b46c1",
-  confidence: "#ecc94b", awe: "#4299e1", confusion: "#9f7aea", loneliness: "#2c5282",
-  contentment: "#68d391", relief: "#81e6d9", nostalgia: "#d4a574", hope: "#f6e05e",
-  contempt: "#4a5568", shame: "#b7791f", guilt: "#2d3748", anticipation: "#d69e2e",
-};
 
-type OrbState = "idle" | "thinking" | "deep" | "speaking" | "bored" | "excited" | "offline" | "listening" | "attentive";
 
-function getOrbState(snap: Record<string, unknown> | null, online: boolean): OrbState {
-  if (!online || !snap) return "offline";
-  const s = snap as Record<string, unknown>;
 
-  // Backend run_ava thinking flag — overrides everything except offline.
-  if (Boolean(s.thinking)) return "thinking";
-
-  // Voice loop state takes priority over heartbeat.
-  const voiceLoop = s.voice_loop as Record<string, unknown> | undefined;
-  const voiceState = String(voiceLoop?.state ?? "passive");
-  const voiceActive = Boolean(voiceLoop?.active);
-  if (voiceActive) {
-    if (voiceState === "speaking") return "speaking";
-    if (voiceState === "thinking") return "thinking";
-    if (voiceState === "listening") return "listening";
-    if (voiceState === "attentive") return "attentive";
-  }
-
-  // TTS speaking outside the voice loop.
-  const tts = s.tts as Record<string, unknown> | undefined;
-  if (Boolean(tts?.tts_speaking)) return "speaking";
-
-  // Heartbeat hint for idle visuals.
-  const rb = s.ribbon as Record<string, unknown> | undefined;
-  const hbMode = String(rb?.heartbeat_mode || "").toLowerCase();
-  if (hbMode.includes("conversation")) return "speaking";
-  if (hbMode.includes("maintenance") || hbMode.includes("learning")) return "thinking";
-  return "idle";
-}
-
-function getEmotion(snap: Record<string, unknown> | null): [string, string] {
-  if (!snap) return ["calmness", "#1a6cf5"];
-  try {
-    const p = snap.perception as Record<string, unknown> | undefined;
-    const emo = String(p?.emotion_label || (snap as any)?.emotion_label || "calmness").toLowerCase();
-    return [emo, EMOTION_COLOR[emo] || "#1a6cf5"];
-  } catch {
-    return ["calmness", "#1a6cf5"];
-  }
-}
 
 function getTtsAmplitude(snap: Record<string, unknown> | null): number {
   if (!snap) return 0;
@@ -197,8 +150,11 @@ export default function WidgetApp() {
     void restorePosition();
   }, []);
 
-  const [emotion, emotionColor] = getEmotion(snap);
-  const orbState = getOrbState(snap, online);
+  // Same derivation as the main window (orbDerive.ts) — the widget mirrors my real emotion, colour blend,
+  // state and sleep, not a guess of its own.
+  const { primaryEmotion: emotion, orbVisual, effectiveOrbColor: emotionColor } = deriveOrbEmotion(snap);
+  const orbState = deriveOrbState(snap, { online, fallbackPulse: orbVisual.pulse });
+  const { sleepProgress, sleepRemainingSeconds, wakeProgress } = deriveOrbSleep(snap);
   const ttsAmplitude = getTtsAmplitude(snap);
   const moodEnergy = getEnergy(snap);
 
@@ -229,8 +185,12 @@ export default function WidgetApp() {
       <OrbCanvas
         emotion={emotion}
         emotionColor={emotionColor}
-        state={orbState}
+        state={orbState as OrbState}
+        cubeMorphEnabled={CUBE_MORPH_ENABLED}
         size={150}
+        sleepProgress={sleepProgress}
+        sleepRemainingSeconds={sleepRemainingSeconds}
+        wakeProgress={wakeProgress}
         shapeOverride={shapeOverride}
         pointerAngleDeg={pointerAngleDeg}
         amplitude={ttsAmplitude}

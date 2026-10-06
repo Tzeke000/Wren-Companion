@@ -4,6 +4,7 @@ import ForceGraph3D from "3d-force-graph";
 import { API_BASE, ApiLogEntry, getJson, getText, postJson, registerApiLogger } from "./api";
 import { JsonBlock, Kv, Section } from "./components/Ui";
 import ServerPanel from "./components/ServerPanel";
+import { CUBE_MORPH_ENABLED, EMOTION_VISUALS, deriveOrbEmotion, deriveOrbSleep, deriveOrbState, mixHex, shadeHex, type EmotionVisual } from "./orbDerive";
 import OrbCanvas, { setBodyStyle, useBodyStyle } from "./components/OrbCanvas";
 import { listen } from "@tauri-apps/api/event";
 
@@ -110,7 +111,7 @@ function ageDecayOf(node: any): number {
 // independently so the user can verify text+inner-state stable, then
 // flip the cube-morph flag separately if drift returns.
 const PRESENCE_V2_ENABLED = true;
-const PRESENCE_V2_CUBE_MORPH_ENABLED = false;
+const PRESENCE_V2_CUBE_MORPH_ENABLED = CUBE_MORPH_ENABLED; // shared with the widget (orbDerive.ts)
 
 const TABS = [
   { id: "voice" as const, label: "Voice" },
@@ -134,16 +135,6 @@ const TABS = [
 ];
 type TabId = (typeof TABS)[number]["id"];
 
-type EmotionVisual = {
-  color: string;
-  shape:
-    | "circle" | "infinity" | "rings" | "teardrop" | "jagged" | "spiral"
-    | "flicker" | "awe_pop" | "heart" | "tall"
-    // Phase 56 new shapes
-    | "cube" | "prism" | "cylinder" | "double_helix" | "burst"
-    | "contracted_tremor" | "rising" | "pointer" | string;
-  pulse: "idle" | "thinking" | "deep" | "speaking" | "bored" | "excited" | "confused" | "offline" | "listening";
-};
 
 function hexToRgbTriplet(hex: string): string {
   const clean = hex.replace("#", "").trim();
@@ -153,34 +144,7 @@ function hexToRgbTriplet(hex: string): string {
   return `${(n >> 16) & 255} ${(n >> 8) & 255} ${n & 255}`;
 }
 
-function mixHex(a: string, b: string, t: number): string {
-  // Linear blend of two #rrggbb colors; t=0 -> a, t=1 -> b. Used to tint the orb
-  // toward a secondary emotion so a MIX of feelings (e.g. calm + curious) shows as a
-  // blend instead of only the top emotion's color.
-  const f = Math.max(0, Math.min(1, t));
-  const pa = a.replace("#", "").trim();
-  const pb = b.replace("#", "").trim();
-  const na = Number.parseInt(pa.slice(0, 6), 16);
-  const nb = Number.parseInt(pb.slice(0, 6), 16);
-  if (!Number.isFinite(na) || !Number.isFinite(nb)) return a;
-  const lerp = (x: number, y: number) =>
-    Math.max(0, Math.min(255, Math.round(x + (y - x) * f)));
-  const r = lerp((na >> 16) & 255, (nb >> 16) & 255);
-  const g = lerp((na >> 8) & 255, (nb >> 8) & 255);
-  const bl = lerp(na & 255, nb & 255);
-  return `#${((1 << 24) | (r << 16) | (g << 8) | bl).toString(16).slice(1)}`;
-}
 
-function shadeHex(hex: string, factor: number): string {
-  const clean = hex.replace("#", "").trim();
-  const full = clean.length === 3 ? clean.split("").map((c) => `${c}${c}`).join("") : clean;
-  const n = Number.parseInt(full.slice(0, 6), 16);
-  if (!Number.isFinite(n)) return hex;
-  const r = Math.max(0, Math.min(255, Math.round(((n >> 16) & 255) * factor)));
-  const g = Math.max(0, Math.min(255, Math.round(((n >> 8) & 255) * factor)));
-  const b = Math.max(0, Math.min(255, Math.round((n & 255) * factor)));
-  return `rgb(${r}, ${g}, ${b})`;
-}
 
 type BrainNode = {
   id: string;
@@ -245,66 +209,6 @@ type FinetunePrereq = {
   free_gb?: number;
 };
 
-const EMOTION_VISUALS: Record<string, EmotionVisual> = {
-  calmness: { color: "#1a6cf5", shape: "circle", pulse: "idle" },
-  joy: { color: "#f5c518", shape: "rings", pulse: "excited" },
-  happiness: { color: "#f5c518", shape: "rings", pulse: "excited" },
-  excitement: { color: "#ff6b00", shape: "rings", pulse: "excited" },
-  curiosity: { color: "#00d4d4", shape: "spiral", pulse: "thinking" },
-  interest: { color: "#00d4d4", shape: "spiral", pulse: "thinking" },
-  boredom: { color: "#4a5568", shape: "infinity", pulse: "bored" },
-  frustration: { color: "#e53e3e", shape: "jagged", pulse: "deep" },
-  sadness: { color: "#553c9a", shape: "teardrop", pulse: "bored" },
-  anger: { color: "#c53030", shape: "jagged", pulse: "deep" },
-  fear: { color: "#44337a", shape: "flicker", pulse: "confused" },
-  anxiety: { color: "#44337a", shape: "flicker", pulse: "confused" },
-  surprise: { color: "#d53f8c", shape: "awe_pop", pulse: "excited" },
-  trust: { color: "#38a169", shape: "circle", pulse: "idle" },
-  sympathy: { color: "#38a169", shape: "circle", pulse: "idle" },
-  anticipation: { color: "#d69e2e", shape: "rings", pulse: "thinking" },
-  disgust: { color: "#2f855a", shape: "jagged", pulse: "deep" },
-  love: { color: "#ed64a6", shape: "heart", pulse: "speaking" },
-  affection: { color: "#ed64a6", shape: "heart", pulse: "speaking" },
-  adoration: { color: "#ed64a6", shape: "heart", pulse: "speaking" },
-  pride: { color: "#6b46c1", shape: "tall", pulse: "thinking" },
-  triumph: { color: "#ecc94b", shape: "tall", pulse: "excited" },
-  shame: { color: "#b7791f", shape: "teardrop", pulse: "bored" },
-  guilt: { color: "#2d3748", shape: "teardrop", pulse: "bored" },
-  envy: { color: "#68d391", shape: "flicker", pulse: "confused" },
-  contempt: { color: "#4a5568", shape: "jagged", pulse: "deep" },
-  awe: { color: "#4299e1", shape: "awe_pop", pulse: "thinking" },
-  relief: { color: "#81e6d9", shape: "circle", pulse: "idle" },
-  nostalgia: { color: "#d4a574", shape: "teardrop", pulse: "bored" },
-  hope: { color: "#f6e05e", shape: "rings", pulse: "thinking" },
-  loneliness: { color: "#2c5282", shape: "teardrop", pulse: "bored" },
-  confusion: { color: "#9f7aea", shape: "flicker", pulse: "confused" },
-  confidence: { color: "#ecc94b", shape: "tall", pulse: "speaking" },
-  contentment: { color: "#68d391", shape: "circle", pulse: "idle" },
-  // Phase 56 compound mappings
-  logical: { color: "#4299e1", shape: "cube", pulse: "thinking" },
-  analyzing: { color: "#00d4d4", shape: "prism", pulse: "thinking" },
-  neutral: { color: "#a0aec0", shape: "cylinder", pulse: "idle" },
-  realization: { color: "#f5c518", shape: "burst", pulse: "excited" },
-  scared: { color: "#44337a", shape: "contracted_tremor", pulse: "confused" },
-  proud: { color: "#6b46c1", shape: "rising", pulse: "thinking" },
-  // Emotions mood_core can produce that were MISSING here (so they fell back to
-  // calmness-blue — including satisfaction/admiration/amusement, which my affect-nudges
-  // produce often). Colors mirror OrbCanvas's internal table for consistency; multi-word
-  // keys match the exact lowercase names mood_core emits.
-  satisfaction: { color: "#48bb78", shape: "circle", pulse: "speaking" },
-  admiration: { color: "#5a67d8", shape: "circle", pulse: "thinking" },
-  amusement: { color: "#f6ad55", shape: "rings", pulse: "excited" },
-  annoyance: { color: "#dd6b20", shape: "jagged", pulse: "deep" },
-  distress: { color: "#2c7a7b", shape: "flicker", pulse: "confused" },
-  horror: { color: "#742a2a", shape: "flicker", pulse: "confused" },
-  "aesthetic appreciation": { color: "#9f7aea", shape: "awe_pop", pulse: "thinking" },
-  "empathetic pain": { color: "#6b6b9a", shape: "teardrop", pulse: "bored" },
-  "sexual desire": { color: "#b83280", shape: "heart", pulse: "speaking" },
-  craving: { color: "#c2548a", shape: "rings", pulse: "thinking" },
-  entrancement: { color: "#8a6fd0", shape: "spiral", pulse: "thinking" },
-  awkwardness: { color: "#c98a5a", shape: "flicker", pulse: "confused" },
-  romance: { color: "#ed64a6", shape: "heart", pulse: "speaking" },
-};
 
 function asRecord(v: unknown): Record<string, unknown> | undefined {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
@@ -1593,32 +1497,10 @@ export default function App() {
   // Inner thought — fades through the chat with cross-fade animation.
   const innerLifeBlock = asRecord(snap?.inner_life);
   const currentInnerThought = String(innerLifeBlock?.current_thought ?? "").trim();
-  const primaryEmotion = String(mood?.primary_emotion ?? "calmness").toLowerCase();
-  const orbVisual = EMOTION_VISUALS[primaryEmotion] ?? EMOTION_VISUALS.calmness;
-  const secondaryEmotions = Array.isArray(mood?.secondary_emotions)
-    ? (mood?.secondary_emotions as Array<Record<string, unknown>>)
-    : [];
-  // Mix: tint the orb's base color toward the strongest secondary emotion, weighted by its
-  // intensity (capped at 0.45 so the primary still dominates). This is how a BLEND of
-  // feelings — calm + curious, frustrated + amused — actually shows on the orb instead of
-  // only the top emotion's flat color.
-  const secEmotionName = String(secondaryEmotions[0]?.emotion ?? "").toLowerCase();
-  const secVisual = secEmotionName ? EMOTION_VISUALS[secEmotionName] : undefined;
-  const secIntensity = Number(secondaryEmotions[0]?.intensity ?? 0);
-  // Quantize the blend to 0.15 steps so the orb recolors in discrete jumps, not on every
-  // tiny mood drift — the orb rebuilds when this color changes, so a continuously drifting
-  // blend would strobe. Steps: 0 / 0.15 / 0.30 / 0.45 (capped, primary always dominates).
-  const blendT = Math.round(Math.min(0.45, secIntensity) / 0.15) * 0.15;
-  const orbBaseColor = secVisual && blendT > 0
-    ? mixHex(orbVisual.color, secVisual.color, blendT)
-    : orbVisual.color;
-  // Connectivity-aware orb color: dims and cools when offline
+  // Emotion + blended colour come from the shared derivation (orbDerive.ts) so the widget mirrors exactly.
   const connOffline = !connOnline && online; // backend up but no internet
-  const effectiveOrbColor = backendShutdownDetected
-    ? "#6b7280"
-    : connOffline
-      ? shadeHex(orbBaseColor, 0.72)  // 10% dimmer when internet offline
-      : orbBaseColor;
+  const { primaryEmotion, orbVisual, secondaryEmotions, effectiveOrbColor } =
+    deriveOrbEmotion(snap, { backendShutdown: backendShutdownDetected, connOffline });
   const styleGlow = Number(style?.orb_glow_intensity ?? 0.8);
   const orbMidColor = shadeHex(effectiveOrbColor, 1.08);
   const orbDarkColor = shadeHex(effectiveOrbColor, 0.52);
@@ -1648,49 +1530,13 @@ export default function App() {
   // See brain/thinking_tier.py and docs/CONVERSATIONAL_DESIGN.md.
   const thinkingTier = Number((snap as Record<string, unknown> | null)?.thinking_tier ?? 0);
   const tierForcesThinking = thinkingTier >= 3;
-  // Sleep state (from /api/v1/debug/full subsystem_health.sleep). When SLEEPING
-  // or WAKING, override the orb's normal pulse mode with the sleep visual state.
-  const sleepInfo = (snap as Record<string, unknown> | null)?.subsystem_health
-    ? ((snap as Record<string, unknown>).subsystem_health as Record<string, unknown>)?.sleep
-    : null;
-  const sleepState = String((sleepInfo as Record<string, unknown> | null)?.state || "AWAKE");
-  const sleepProgress = Number((sleepInfo as Record<string, unknown> | null)?.progress || 0);
-  const sleepRemainingSeconds = Number((sleepInfo as Record<string, unknown> | null)?.remaining_seconds || 0);
-  const wakeStartedTs = Number((sleepInfo as Record<string, unknown> | null)?.wake_started_ts || 0);
-  const wakeEstimateS = Number((sleepInfo as Record<string, unknown> | null)?.wake_estimate_s || 5);
-  const wakeProgress = wakeStartedTs > 0
-    ? Math.max(0, Math.min(1, (Date.now() / 1000 - wakeStartedTs) / Math.max(0.5, wakeEstimateS)))
-    : 0;
-  const isSleepingOrWaking = sleepState === "SLEEPING" || sleepState === "WAKING";
-  const orbPulseMode = sleepState === "SLEEPING"
-    ? "sleeping"
-    : sleepState === "WAKING"
-      ? "waking"
-    : backendShutdownDetected || !online
-    ? "offline"
-    : avaThinking
-      ? "thinking"  // Iris is processing a chat turn — fast blue pulse
-    : tierForcesThinking
-      ? "thinking"  // Tier 3+ from the metacognitive coordinator — sustained thinking visual
-    : voiceLoopActive && voiceLoopState === "speaking"
-      ? "speaking"
-    : voiceLoopActive && voiceLoopState === "thinking"
-      ? "thinking"
-    : voiceLoopActive && voiceLoopState === "listening"
-      ? "listening"
-    : voiceLoopActive && voiceLoopState === "attentive"
-      ? "attentive"
-    : ttsSpeaking
-      ? "speaking"
-      : Boolean(tts?.enabled)
-        ? "speaking"
-        : chatThinking
-          ? String(models?.cognitive_mode ?? "").includes("deep")
-            ? "deep"
-            : "thinking"
-          : sttListening
-            ? "listening"
-            : orbVisual.pulse;
+  // Sleep visuals + the state ladder are shared with the widget (orbDerive.ts).
+  const { sleepProgress, sleepRemainingSeconds, wakeProgress } = deriveOrbSleep(snap);
+  const orbPulseMode = deriveOrbState(snap, {
+    online, fallbackPulse: orbVisual.pulse, backendShutdown: backendShutdownDetected,
+    ttsSpeaking, chatThinking, sttListening,
+    deepMode: String(models?.cognitive_mode ?? "").includes("deep"),
+  });
   // Live speech text (above the orb) and inner-state line (below the orb).
   // Speech text streams word-by-word from /api/v1/snapshot speech.* fields
   // when Kokoro is playing; falls back to the last assistant message if TTS
