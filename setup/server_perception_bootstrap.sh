@@ -70,7 +70,13 @@ print("onnxruntime CUDA EP: ok")
 from insightface.app import FaceAnalysis
 app = FaceAnalysis(name="buffalo_l")          # ~326MB download on first run
 app.prepare(ctx_id=0, det_size=(640, 640))
-print("insightface buffalo_l: ok")
+# 2026-10-07: get_available_providers() LISTS the CUDA EP even when its .so
+# cannot load (onnxruntime-gpu 1.29 wanted libcublasLt.so.13 on this cu126
+# stack) — every model then ran on the CPU while this script printed "ok".
+# Check what the SESSIONS actually got.
+_eps = {m.taskname: m.session.get_providers()[0] for m in app.models.values()}
+assert all(v == "CUDAExecutionProvider" for v in _eps.values()), f"insightface fell back to CPU: {_eps}"
+print("insightface buffalo_l: ok (all sessions on CUDA EP)")
 
 from transformers import pipeline
 det = pipeline("zero-shot-object-detection", model="google/owlvit-base-patch32", device=0)
