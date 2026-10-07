@@ -106,3 +106,13 @@ notes/
 apps/ava-control/dev/room.jpg
 *.bak
 *.bak_*
+
+# No photos/images in the public repo (Zeke 2026-10-07). App icons are the one exception.
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+*.heic
+!apps/ava-control/src-tauri/icons/**
