@@ -78,6 +78,8 @@ MSG
   ROLE="failover"
 fi
 fi  # end of the non-staging gate
+# CHECK-ONLY (2026-10-07, the app's start buttons): report the verdict, start nothing.
+if [ -n "${IRIS_GATE_CHECK_ONLY:-}" ]; then echo "CLEARED ($ROLE)"; exit 0; fi
 
 if [ ! -x "$SCRIPT" ]; then
   echo "Cleared to start ($ROLE), but the Linux launcher is missing: $SCRIPT"

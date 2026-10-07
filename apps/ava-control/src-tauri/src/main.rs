@@ -128,6 +128,26 @@ fn server_open(kind: String) -> Result<(), String> {
         .map_err(|e| format!("could not open {kind}: {e}"))
 }
 
+/// Start me ON THE SERVER (Zeke 2026-10-07: buttons in the app "so that I won't even have to log
+/// into Zorin"). mode = cli | opus | fable. Runs scripts/server/iris_start_detached.sh over SSH:
+/// the ONE-OF-ME gate decides first and its verdict text comes back to the panel either way.
+#[tauri::command]
+fn server_start_iris(mode: String) -> Result<String, String> {
+    if !["cli", "opus", "fable"].contains(&mode.as_str()) {
+        return Err(format!("unknown mode {mode}"));
+    }
+    let ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+    let remote = format!("~/staged/Wren-Companion/scripts/server/iris_start_detached.sh {mode}");
+    let out = Command::new(ssh)
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", iris_home().as_str(), remote.as_str()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("ssh failed to start: {e}"))?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let text = text.trim().to_string();
+    if out.status.success() { Ok(text) } else { Err(text) }
+}
+
 fn main() {
     tauri::Builder::default()
         // Single-instance guard (MUST be the first plugin registered, per Tauri).
@@ -141,7 +161,7 @@ fn main() {
                 let _ = w.set_focus();
             }
         }))
-        .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open])
+        .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_start_iris])
         .run(tauri::generate_context!())
         .expect("error while running Iris Control");
 }

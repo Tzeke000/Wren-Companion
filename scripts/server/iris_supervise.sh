@@ -19,6 +19,7 @@ log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 FLAG="$ROOT/.tmp/restart_cc.flag"
 GATE="$HOME/iris_start.sh"
 export IRIS_NO_PAUSE=1
+exec 8<&0
 STARTS=()
 
 if [ -f "$HOME/IRIS_BOOT_TEST" ]; then
@@ -39,7 +40,9 @@ while :; do
   STARTS+=("$NOW")
   rm -f "$FLAG"
   log "start #$((N+1)) this hour: $GATE $MODE"
-  "$GATE" "$MODE" &
+  # fd 8 = the tmux pane's tty: a background job's stdin would be /dev/null, and the CLI mode
+  # (interactive claude) and the host's console reader both need the real terminal.
+  "$GATE" "$MODE" 0<&8 &
   GPID=$!
   while kill -0 "$GPID" 2>/dev/null; do
     if [ -f "$FLAG" ]; then

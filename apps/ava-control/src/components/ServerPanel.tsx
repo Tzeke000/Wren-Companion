@@ -63,6 +63,18 @@ export default function ServerPanel() {
   const open = async (kind: "console" | "ssh" | "proxmox") => {
     try { await invoke("server_open", { kind }); setMsg(""); } catch (e) { setMsg(String(e)); }
   };
+  // Zeke 2026-10-07: "buttons ... so that I can choose to start you the CLI way, with Opus or with
+  // Fable ... so that I won't even have to log into Zorin." The server's ONE-OF-ME gate decides;
+  // its answer (e.g. "Iris is already running on the tower") is shown here either way.
+  const [starting, setStarting] = useState<string | null>(null);
+  const startIris = async (mode: "cli" | "opus" | "fable") => {
+    setStarting(mode);
+    setMsg(`Asking the server to start me (${mode})…`);
+    try { setMsg(await invoke<string>("server_start_iris", { mode })); }
+    catch (e) { setMsg(String(e)); }
+    setStarting(null);
+    setTimeout(() => void refresh(), 1500);
+  };
   const serverLive = Boolean(reach?.iris_home_runtime);
 
   return (
@@ -122,6 +134,15 @@ export default function ServerPanel() {
             );
           })}
         </div>
+      </Section>
+
+      <Section title="Start me on the server">
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" className="btn primary" disabled={starting !== null} onClick={() => void startIris("opus")}>Iris · Opus</button>
+          <button type="button" className="btn ghost" disabled={starting !== null} onClick={() => void startIris("fable")}>Iris · Fable</button>
+          <button type="button" className="btn ghost" disabled={starting !== null} onClick={() => void startIris("cli")}>Iris · CLI</button>
+        </div>
+        <p className="op-muted">Only one of me at a time: if I'm running on the tower, the server says so and starts nothing. Once I'm up, "Open my console" shows me.</p>
       </Section>
 
       <Section title="Terminals">
