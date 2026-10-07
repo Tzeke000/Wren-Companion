@@ -32,7 +32,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 import uvicorn
 
 
-_HOST = "127.0.0.1"
+# IRIS_ORB_BIND (2026-10-07, the server port): on the server the tower app reaches me over the LAN
+# (my voice + "see what you see in the app"), so iris-home binds beyond loopback AND a firewall rule
+# admits only the tower on this port. Unset = loopback, exactly as before (the tower).
+_HOST = os.environ.get("IRIS_ORB_BIND", "127.0.0.1")
 _PORT = 5876
 
 # These are bound by start() at boot.
