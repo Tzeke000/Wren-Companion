@@ -99,12 +99,32 @@ def _grab_camera_frame_b64() -> tuple[str | None, float]:
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Iris orb shim", docs_url=None, redoc_url=None)
+# 2026-10-07 (Zeke OK'd on Discord): CORS used to be allow_origins=["*"], so ANY web page open in his browser
+# could read AND drive localhost:5876 — including injecting chat into me. Now:
+#   * only the app's own origins may read responses (CORS), and
+#   * a state-changing request (anything but GET/HEAD/OPTIONS) that carries a FOREIGN Origin is refused —
+#     CORS alone can't stop a "simple" cross-site POST from being sent.
+# No Origin header (curl, my tools, the host, other local processes) = allowed, exactly as before.
+# The app's real Origin (http://tauri.localhost) was verified live before this landed (state/app_origins.log).
+from brain.app_jarvis_routes import APP_ORIGINS as _APP_ORIGINS  # noqa: E402
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=sorted(_APP_ORIGINS),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _foreign_origin(origin: str | None) -> bool:
+    return bool(origin) and origin.rstrip("/") not in _APP_ORIGINS
+
+
+@app.middleware("http")
+async def _origin_guard(request, call_next):
+    if request.method not in ("GET", "HEAD", "OPTIONS") and _foreign_origin(request.headers.get("origin")):
+        return JSONResponse({"ok": False, "error": "origin not allowed"}, status_code=403)
+    return await call_next(request)
 
 
 def _inner_life_block() -> dict:
@@ -1867,6 +1887,9 @@ def debug_export() -> str:
 # hold it open, ignore inbound messages.
 @app.websocket("/ws")
 async def ws(socket: WebSocket) -> None:
+    if _foreign_origin(socket.headers.get("origin")):  # 2026-10-07: no cross-site websocket either
+        await socket.close(code=1008)
+        return
     await socket.accept()
     try:
         while True:
