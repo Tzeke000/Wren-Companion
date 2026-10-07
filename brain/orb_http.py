@@ -174,7 +174,7 @@ def _sleep_block() -> dict:
         subsystems) — while process uptime < WAKE_ESTIMATE the orb shows waking
         with real progress off the time substrate's uptime.
       - awake: everything else."""
-    WAKE_ESTIMATE_S = 300.0
+    WAKE_ESTIMATE_S = 45.0  # Zeke 10-07: 5 min of boot Z's read as "asleep" — wants ~30-60 s
     try:
         from brain.iris_paths import paths
         if paths.body_pause_flag.exists():
