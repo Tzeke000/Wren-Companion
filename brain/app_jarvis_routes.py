@@ -66,7 +66,17 @@ _RATE: dict[str, list[float]] = {}
 
 
 def origin_ok(origin: str | None) -> bool:
-    return not origin or origin.rstrip("/") in APP_ORIGINS
+    ok = not origin or origin.rstrip("/") in APP_ORIGINS
+    try:  # evidence for the global CORS fix: which origins actually call state-changing routes
+        import os as _os
+        if _os.environ.get("PYTEST_CURRENT_TEST"):
+            return ok
+        from pathlib import Path as _P
+        with open(_P(__file__).resolve().parents[1] / "state" / "app_origins.log", "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {'ok ' if ok else 'DENY'} {origin!r}" + chr(10))
+    except Exception:
+        pass
+    return ok
 
 
 def rate_ok(key: str, n: int, per_s: float) -> bool:
