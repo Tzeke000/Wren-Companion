@@ -1,0 +1,21 @@
+# ~/.config/systemd/user/iris-ears.service - my ears (voice daemon :8770) on the server's V100.
+# The mic is Zeke's headset on the TOWER, streamed by scripts/mic_source.py only while a listen
+# is open (IRIS_MIC_SOURCE in ~/.config/iris/voice.env, generated from config/private.local.json).
+# Not cognition. Installed by scripts/server/install_supervision.sh (2026-10-07).
+[Unit]
+Description=Iris ears (voice daemon: VAD + whisper on the V100, mic from the tower)
+After=network-online.target iris-mouth.service
+Wants=network-online.target iris-mouth.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/staged/Wren-Companion
+EnvironmentFile=%h/.config/iris/voice.env
+Environment=WREN_VOICE_PORT=8769
+Environment=HF_HOME=%h/staged/Wren-Companion/.cache/huggingface
+ExecStart=%h/venvs/iris-v100/bin/python %h/staged/Wren-Companion/voice/wren_voice_daemon.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
