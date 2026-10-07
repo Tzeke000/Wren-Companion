@@ -188,7 +188,12 @@ fn main() {
                 let _ = w.set_focus();
             }
         }))
-        .manage(VoicePlayer(std::sync::Mutex::new(start_voice_player())))
+        // start the player in setup - AFTER the single-instance plugin has turned a second launch into
+        // a hand-off, so a relaunch never spawns (and orphans) a second player
+        .setup(|app| {
+            app.manage(VoicePlayer(std::sync::Mutex::new(start_voice_player())));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_start_iris])
         .build(tauri::generate_context!())
         .expect("error while building Iris Control")

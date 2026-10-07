@@ -102,7 +102,13 @@ def _serve(conn: socket.socket, peer: str) -> None:
 
 def main() -> int:
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # EXCLUSIVE bind on Windows (2026-10-07): SO_REUSEADDR there lets a SECOND copy bind the same
+    # port and silently share it (seen: two sinks on 8775 after an app relaunch). Exclusive = the
+    # second copy fails to bind and exits; the first keeps serving.
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((BIND, PORT))
     srv.listen(8)
     log(f"listening on {BIND}:{PORT}, allow={sorted(ALLOW)}, mic='{MIC_SUBSTR}'")
