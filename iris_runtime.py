@@ -440,7 +440,7 @@ def _scan_video_device_indices(max_index: int = _CAMERA_SCAN_MAX_INDEX) -> list[
     for idx in range(max_index + 1):
         cap = None
         try:
-            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            cap = cv2.VideoCapture(idx, _cam_backend())
             if cap is not None and cap.isOpened():
                 found.append(idx)
         except Exception:
@@ -454,6 +454,13 @@ def _scan_video_device_indices(max_index: int = _CAMERA_SCAN_MAX_INDEX) -> list[
     return found
 
 
+def _cam_backend() -> int:
+    """2026-10-07 server port: DirectShow on the tower (Windows), V4L2 on the server (the PIXY
+    is /dev/video0 there via USB passthrough). Same index-0 camera either way."""
+    import cv2  # type: ignore
+    return cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_V4L2
+
+
 def _probe_camera_open() -> tuple[bool, str]:
     """Try to open the DSHOW camera briefly. Returns (ok, detail).
     Releases the handle immediately so the real capture thread can rebind."""
@@ -463,7 +470,7 @@ def _probe_camera_open() -> tuple[bool, str]:
         return False, f"cv2 import failed: {e!r}"
     cap = None
     try:
-        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        cap = cv2.VideoCapture(0, _cam_backend())
         if cap is None:
             return False, "VideoCapture returned None"
         opened = bool(cap.isOpened())
@@ -4239,7 +4246,7 @@ def _iris_video_capture_loop(g: dict[str, Any]) -> None:
             return False
 
     def _open_cam():
-        c = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        c = cv2.VideoCapture(0, _cam_backend())
         # 2026-08-27 THE 30FPS FIX — MJPG 1280x720 @ 60 REQUESTED.
         # The PIXY's firmware AE in any 30fps mode parks at a ~48ms shutter
         # (20fps delivered) regardless of light/mode/exposure props — fully
