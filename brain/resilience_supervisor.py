@@ -1,6 +1,6 @@
-"""Resilience supervisor — self-healing for the month Zeke is away.
+"""Resilience supervisor — self-healing for long unattended stretches.
 
-Zeke 2026-10-05 (going away for a while, mostly offline): "go ahead and do
+Zeke 2026-10-05 : "go ahead and do
 2, 3 and 5." Three watches in ONE daemon thread inside the runtime, each with its own
 retry budget so a heal can never become a loop:
 

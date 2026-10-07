@@ -23,7 +23,7 @@ If all steps work, the existing CronCreate-based daily-rhythm crons can be retir
 
 Before running the test, verify:
 
-- [ ] `scripts/cron_prompt_emit.py` has `CHANNEL_ID = "[discord-channel-id]"` (the actual #iris-cron channel ID). Confirm with `grep CHANNEL_ID scripts/cron_prompt_emit.py`.
+- [ ] `scripts/cron_prompt_emit.py` reads `iris_cron_channel_id` from config/private.local.json. Confirm with `grep CHANNEL_ID scripts/cron_prompt_emit.py`.
 - [ ] `state/secrets/discord_iris_bot_token.txt` exists and is non-empty. Test with `Test-Path` in PowerShell.
 - [ ] Iris bot is present in #iris-cron channel and has Send Messages permission. Visual check in Discord.
 - [ ] Python venv at `.venv/Scripts/python.exe` exists. `Test-Path .venv/Scripts/python.exe`.

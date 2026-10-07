@@ -7,8 +7,7 @@ Iris bot monitors. CC's Discord MCP plugin picks up the message and routes
 it to my cognition as a normal channel-tagged prompt.
 
 STATUS: Phase 2 in progress (2026-05-19). The CHANNEL_ID constant below
-must be set to the actual #iris-cron channel ID. Server ID for reference:
-[discord-server-id] (Claude AI server).
+must be set to the actual #iris-cron channel ID (config/private.local.json: iris_cron_channel_id).
 
 USAGE:
     python cron_prompt_emit.py <prompt_name>
@@ -43,8 +42,15 @@ from brain import ritual_scheduler_prompts as prompts  # noqa: E402
 
 # --- Configuration -----------------------------------------------------------
 # Channel ID for the dedicated cron-prompt Discord channel. Created
-# 2026-05-19 in the Claude AI server (server ID [discord-server-id]).
-CHANNEL_ID = "[discord-channel-id]"
+# 2026-05-19 in the Claude AI server. The id lives in the git-ignored private config.
+import os as _os_p, sys as _sys_p  # noqa: E402
+_sys_p.path.append(_os_p.path.dirname(_os_p.path.abspath(__file__)))
+try:
+    from _private import priv as _priv  # noqa: E402
+except Exception:  # noqa: BLE001
+    def _priv(key: str, default: str = "") -> str:  # type: ignore[misc]
+        return default
+CHANNEL_ID = _priv("iris_cron_channel_id")
 
 # Discord bot token path (matches the existing post-office reach-Zeke setup).
 TOKEN_PATH = REPO_ROOT / "state" / "secrets" / "discord_iris_bot_token.txt"

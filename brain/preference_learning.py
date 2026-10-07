@@ -23,7 +23,7 @@ Preferences tracked:
   voice_volume       - float (gain) — relative TTS gain
 
 Why this matters: each person gets THEIR Ava. Zeke wants concise
-technical replies; Mom might prefer warm explanations; an unknown
+technical replies; a family member might prefer warm explanations; an unknown
 guest gets formal-default. Without this layer, Ava performs the
 SAME register for everyone.
 

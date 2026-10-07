@@ -102,8 +102,8 @@ Windows Task Scheduler + Discord post.
 - Documented the dedicated-channel requirement.
 
 **Phase 2 (2026-05-19 ~10:30 EDT, DONE with Zeke's confirmation):**
-- Zeke's three decisions: (1) use the Claude AI server he set up — server ID `[discord-server-id]` — Iris bot has access; (2) wire today if time permits; (3) name it "ritual scheduler" (this rename completed: files moved, content updated).
-- Created `#iris-cron` channel in the Claude AI server via Discord REST. Channel ID: `[discord-channel-id]`. Updated `CHANNEL_ID` in `cron_prompt_emit.py`.
+- Zeke's three decisions: (1) use the Claude AI server he set up — server ID in the private config — Iris bot has access; (2) wire today if time permits; (3) name it "ritual scheduler" (this rename completed: files moved, content updated).
+- Created `#iris-cron` channel in the Claude AI server via Discord REST. Channel ID: in the private config. Updated `CHANNEL_ID` in `cron_prompt_emit.py`.
 - Wrote `scripts/install_ritual_scheduler.ps1` — registers 21 Windows Task Scheduler entries (9 daily-rhythm + 6 memory-sweep + 6 sibling-poll) named `Iris-Ritual-*`. Includes uninstall flag.
 - Tested cron_prompt_emit.py manually: `sibling_poll_waking` prompt posted to #iris-cron successfully (status 200).
 

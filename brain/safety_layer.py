@@ -100,7 +100,7 @@ SafetyRule = Callable[[Action, dict[str, Any]], "Decision | None"]
 _DEFAULT_TRUST_BY_PERSON_ID: dict[str, TrustLevel] = {
     "zeke": "high",
     "claude_code": "high",  # developer assistant — trusted
-    "Mom": "medium",
+    "mom": "medium",
     # everyone else → "unknown" (lowest)
 }
 

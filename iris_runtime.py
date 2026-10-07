@@ -2656,7 +2656,7 @@ def enroll_face(
     produces a more robust averaged embedding.
 
     Args:
-        person_id: Folder name under faces/ — e.g. "zeke", "Mom".
+        person_id: Folder name under faces/ — e.g. "zeke", "mom".
         count: Frames to capture. Default 5.
         interval_s: Min seconds between captures. Default 1.2 (total ≈ count×interval_s).
         require_face: Only save frames where InsightFace detected at least one

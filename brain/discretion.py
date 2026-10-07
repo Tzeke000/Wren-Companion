@@ -31,7 +31,7 @@ API:
     tag_private("Zeke is anxious about deadline", owner="zeke",
                 visibility="owner_only", reason="said in confidence")
 
-    if not is_audience_ok(audience_person_id="Mom",
+    if not is_audience_ok(audience_person_id="mom",
                          text="Zeke is anxious about deadline"):
         # don't volunteer this
 """

@@ -85,7 +85,7 @@ PRESENCE_FILE = ROOT / "state" / "zeke_presence.json"
 PRESENCE_FRESH_S = float(os.environ.get("IRIS_PRESENCE_FRESH_S", "600"))
 AWAY_COOLDOWN_S = float(os.environ.get("IRIS_UNKNOWN_CAPTURE_AWAY_COOLDOWN", "180"))
 # ARRIVAL RACE (first live firing, 2026-09-02 14:49:56): the rule fired on a
-# face in a MOTORCYCLE HELMET, cammies, at the door — and Zeke's phone rejoined
+# face in a helmet at the door — and Zeke's phone rejoined
 # the wifi 10 s later. It was him coming home; the watcher's "away" verdict
 # lags arrival by up to a poll (60 s) plus the phone's wifi join. So the away
 # rule holds longer than the guest rules, and cognition must re-check presence

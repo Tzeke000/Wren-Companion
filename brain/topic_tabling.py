@@ -28,16 +28,16 @@ API:
     )
 
     # Ava chooses to table:
-    table_topic("zeke", "the example topic", reason="not ready yet",
+    table_topic("zeke", "the hard thing", reason="not ready yet",
                 cooldown_seconds=24*3600)
 
     # Check on input:
-    tabled = check_input_against_tabled("zeke", "tell me about the example topic")
+    tabled = check_input_against_tabled("zeke", "tell me about the hard thing")
     if tabled:
         return tabled.deflection_reply
 
     # Or untable manually:
-    untable_topic("zeke", "the example topic")
+    untable_topic("zeke", "the hard thing")
 """
 from __future__ import annotations
 

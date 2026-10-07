@@ -910,7 +910,7 @@ Backfilled from the past week:
 - **8 decisions notes**: `sleep-mode-3-phase`, `temporal-sense-cadence`, `windows-use-library-choice` (rejecting the protobuf-7-incompatible `windows-use` PyPI package), `voicemeeter-potato-over-vbcable-ab`, `personhood-frame-discipline` (the architectural-vs-phenomenological frame applies to design docs, NOT to identity anchors), `vaio3-test-harness-timing` (the silent-capture diagnosis), `pydantic-fastapi-forwardref-trap` (Pydantic v2 + locally-scoped class), `graphify-adoption`.
 - **5 bugs notes**: `build-prompt-fallback-path` (the 600 s → 6.9 s turn fix), `kokoro-loaded-flag-publish`, `heartbeat-tick-budget-bloat` (197 ms → 12.2 ms), `whisper-poll-bypass-missing`, `voice-loop-restart-hang` (non-reproducing).
 - **5 sessions notes**: temporal substrate, windows-use shipped, four-feature work order, voice e2e verification, voice e2e bug fixes.
-- **1 people note** (`zeke.md`) capturing communication style, work patterns, decision style, trauma-material guardrails (content removal — engineering shouldn't process real-life material), Ava-as-companion-not-assistant rules, past inflection points.
+- **1 people note** (`zeke.md`) capturing communication style, work patterns, decision style, trauma-material guardrails (engineering shouldn't process real-life material), Ava-as-companion-not-assistant rules, past inflection points.
 
 #### Phase B — Graphify codebase indexing
 

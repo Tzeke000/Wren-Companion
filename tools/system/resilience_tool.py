@@ -1,4 +1,4 @@
-"""resilience — the self-healing supervisor for the month Zeke is away
+"""resilience — the self-healing supervisor for long unattended stretches
 (brain/resilience_supervisor.py; Zeke 10-05: "go ahead and do 2, 3 and 5").
 
 status — running?, last tick, heals in budget windows, pairing codes alerted, stand-downs

@@ -163,9 +163,9 @@ def seed_default_profiles():
             "notes": "Zeke is Ava's creator. He built and maintains her. Full trust.",
         },
         {
-            "person_id": "Mom",
+            "person_id": "mom",
             "name": "Mom",
-            "aliases": ["Mom", "mom", "mother", "my_mom"],
+            "aliases": ["mom", "mother", "my_mom"],
             "relationship": "Zeke's mother",
             "trust_level": 4,
             "notes": "",

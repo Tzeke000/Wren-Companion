@@ -2000,7 +2000,7 @@ def cmd_bargein_watch(ctx, args: dict) -> str:
         # all 0 sentence(s) heard", which reads as if the reply played and vanished.
         # It never started — and cmd_speak will drop it (bargein_fired), so the host
         # must know the listener heard NONE of it and restate what matters.
-        # (Found live: Q's night, 2026-07-12 — his continuing speech kept landing in
+        # (Found live 2026-07-12 — his continuing speech kept landing in
         # this gap and whole replies died silently while the marker said "finished".)
         marker = ("[barge landed before the reply started playing — nothing had been "
                   "spoken; the pending reply was dropped unheard]")

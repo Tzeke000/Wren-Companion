@@ -54,7 +54,7 @@ OWNERSHIP: dict[str, dict[str, Any]] = {
                "carries the study rule — unknown_capture is a follow-up about photos on disk, not a "
                "second stranger",
     },
-    "person_presence": {   # an enrolled non-Zeke face (q, ethan, ward)
+    "person_presence": {   # an enrolled non-Zeke face (a friend)
         "primary": "host-eyes", "fallback": ("runtime-camera",), "dedupe_s": 600.0,
         "importance": "medium", "why": "same path as zeke_presence; a known visitor",
     },

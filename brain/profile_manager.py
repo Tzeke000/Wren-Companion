@@ -17,7 +17,7 @@ GENERIC_PROFILE_PHRASES = {
 PROTECTED_PROFILE_KEYS = {"zeke", "creator", "your_creator"}
 DEFAULT_ALIASES = {
     "zeke": ["zeke", "creator", "your_creator", "your creator"],
-    "Mom": ["Mom", "mom", "my mom", "my_mom", "mother", "my mother"],
+    "mom": ["mom", "my mom", "my_mom", "mother", "my mother"],
 }
 
 

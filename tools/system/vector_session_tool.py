@@ -357,8 +357,8 @@ def _redock_gate(s) -> dict[str, Any]:
     """CAN I GET BACK ON? Proves the two preconditions `drive_on_charger` needs.
 
     Built 2026-07-28 after I undocked a robot whose camera I already knew was
-    dead, in a room where docking is vision-gated, and stranded him for the
-    month Zeke is away. Both facts were in my hands; I never combined them.
+    dead, in a room where docking is vision-gated, and stranded him for a
+    long unattended stretch. Both facts were in my hands; I never combined them.
     The knowledge even existed in _body_charger's docstring ("NEVER body_park"
     with an unseen charger) — and a docstring gates nothing. This does.
 

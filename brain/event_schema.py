@@ -89,7 +89,7 @@ _declare(EventSchema(
 
 _declare(EventSchema(
     name="face_changed",
-    description="The active recognized face changed identity (e.g., Zeke -> Mom).",
+    description="The active recognized face changed identity (e.g., Zeke -> a family member).",
     emitter_category="perception",
     payload_keys={"old_person_id": "str", "new_person_id": "str"},
 ))

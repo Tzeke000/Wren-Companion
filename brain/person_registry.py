@@ -180,7 +180,7 @@ class PersonRegistry:
         defaults = {
             "zeke": "high",
             "claude_code": "high",
-            "Mom": "medium",
+            "mom": "medium",
         }
         return defaults.get(str(person_id or "").lower(), "unknown")
 
