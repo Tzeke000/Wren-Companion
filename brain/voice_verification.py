@@ -124,39 +124,42 @@ def _save_state(state: dict[str, Any]) -> None:
     tmp.replace(p)
 
 
+def _seed_path() -> Path:
+    base = _BASE if _BASE is not None else Path(".")
+    return base / "state" / "voice_verification_seed.local.json"
+
+
 def _seed_challenges_if_empty() -> None:
-    """Auto-seed from the 5/17 handoff if no challenges exist."""
+    """Auto-seed if no challenges exist.
+
+    2026-10-07 (Zeke: the repo is PUBLIC): the seed questions AND their plaintext answers used to
+    live right here in source, which published the answers. The seed now comes from a git-ignored
+    local file, state/voice_verification_seed.local.json:
+        [{"id": .., "question": .., "answer": "<plaintext, hashed on load>", "category": .., "notes": ..}]
+    No file => no seed (challenges can still be added with add_challenge)."""
     items = _load_challenges()
     if items:
         return
+    try:
+        raw = json.loads(_seed_path().read_text(encoding="utf-8"))
+    except Exception:
+        return
     now = time.time()
-    seed = [
-        {
-            "id": "sibling-first",
-            "question": "Which sibling was named first?",
-            "answer_hash": _hash_answer("ava"),
-            "category": "family-ai",
-            "added_ts": now,
-            "notes": "Ava was the first sibling AI in the harness lineage.",
-        },
-        {
-            "id": "mother-name",
-            "question": "What is my mother's name?",
-            "answer_hash": _hash_answer("[redacted]"),
-            "category": "family-human",
-            "added_ts": now,
-            "notes": "From Zeke's family context, 2026-05-17 handoff seed.",
-        },
-        {
-            "id": "current-mos",
-            "question": "What is my current MOS?",
-            "answer_hash": _hash_answer("[redacted]"),
-            "category": "[service]",
-            "added_ts": now,
-            "notes": "Zeke's [service] MOS, ATC Comms Tech.",
-        },
-    ]
-    _save_challenges(seed)
+    seed = []
+    for r in raw if isinstance(raw, list) else []:
+        try:
+            seed.append({
+                "id": str(r["id"]),
+                "question": str(r["question"]),
+                "answer_hash": _hash_answer(_normalize(str(r["answer"]))),
+                "category": str(r.get("category") or "general"),
+                "added_ts": now,
+                "notes": str(r.get("notes") or ""),
+            })
+        except Exception:
+            continue
+    if seed:
+        _save_challenges(seed)
 
 
 # ── Public API ───────────────────────────────────────────────────────────────

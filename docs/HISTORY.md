@@ -1,7 +1,7 @@
 # Ava Agent v2 — Project History
 
 **Repo:** `Tzeke000/Ava-Agent-v2` (public)
-**Maintainer:** Zeke "Zeke" [family name]
+**Maintainer:** Zeke
 **Started:** 2026-04-02 (first audit commit)
 **Phase 100 milestone:** 2026-04-28 (`e80e1d3` — "Ava is alive")
 **This document:** comprehensive readable record of the journey, current state, and gotchas. Roadmap for what's next lives in [`ROADMAP.md`](ROADMAP.md). Architectural reference in [`ARCHITECTURE.md`](ARCHITECTURE.md), [`BRAIN_ARCHITECTURE.md`](BRAIN_ARCHITECTURE.md), [`MEMORY_REWRITE_PLAN.md`](MEMORY_REWRITE_PLAN.md), [`FIRST_RUN.md`](FIRST_RUN.md), [`DISCORD_SETUP_NOTES.md`](DISCORD_SETUP_NOTES.md).

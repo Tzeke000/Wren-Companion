@@ -21,8 +21,16 @@ if str(REPO_ROOT) not in sys.path:
 @pytest.fixture
 def isolated_vv(tmp_path):
     """Bind voice_verification to a tmp dir per test."""
+    import json
     from brain import voice_verification as vv
     vv.configure(tmp_path)
+    # Dummy seed (2026-10-07: real answers live in a git-ignored local file, never in source).
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "voice_verification_seed.local.json").write_text(json.dumps([
+        {"id": "sibling-first", "question": "q1?", "answer": "testsib", "category": "family-ai"},
+        {"id": "mother-name", "question": "q2?", "answer": "testmom", "category": "family-human"},
+        {"id": "current-mos", "question": "q3?", "answer": "1234", "category": "[service]"},
+    ]), encoding="utf-8")
     return vv, tmp_path
 
 
@@ -58,7 +66,7 @@ def test_verify_correct_answer(isolated_vv):
     """Correct answer should match and update freshness."""
     vv, _ = isolated_vv
     vv.get_challenge()  # seed
-    result = vv.verify_answer("current-mos", "[redacted]")
+    result = vv.verify_answer("current-mos", "1234")
     assert result["matched"]
     assert result["attempts_remaining"] == 3
     fresh = vv.get_verification_freshness()
@@ -70,7 +78,7 @@ def test_verify_correct_answer_normalized(isolated_vv):
     """Answer normalization: case + whitespace should be ignored."""
     vv, _ = isolated_vv
     vv.get_challenge()  # seed
-    result = vv.verify_answer("sibling-first", "  AVA  ")
+    result = vv.verify_answer("sibling-first", "  TESTSIB  ")
     assert result["matched"]
 
 
@@ -90,7 +98,7 @@ def test_lockout_after_three_failures(isolated_vv):
     for i in range(3):
         result = vv.verify_answer("current-mos", "wrong")
     # 4th attempt should be locked out.
-    final = vv.verify_answer("current-mos", "[redacted]")
+    final = vv.verify_answer("current-mos", "1234")
     assert final["locked_out"]
     assert not final["matched"]  # locked out, didn't even attempt
 
@@ -102,7 +110,7 @@ def test_correct_answer_resets_failure_count(isolated_vv):
     vv.verify_answer("current-mos", "wrong")  # fail 1
     vv.verify_answer("current-mos", "wrong")  # fail 2
     # Now succeed.
-    result = vv.verify_answer("current-mos", "[redacted]")
+    result = vv.verify_answer("current-mos", "1234")
     assert result["matched"]
     assert result["attempts_remaining"] == 3  # reset
 
@@ -127,7 +135,7 @@ def test_freshness_after_verify(isolated_vv):
     """After successful verify, freshness should show recent time + reverify=False."""
     vv, _ = isolated_vv
     vv.get_challenge()  # seed
-    vv.verify_answer("current-mos", "[redacted]")
+    vv.verify_answer("current-mos", "1234")
     fresh = vv.get_verification_freshness()
     assert fresh["minutes_since"] < 1.0
     assert not fresh["requires_reverify_for_sensitive"]

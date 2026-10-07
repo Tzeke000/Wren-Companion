@@ -97,3 +97,8 @@ assets/vjloops/
 
 # YOLO pose weights (downloaded from the ultralytics release on first use; 6-20 MB each)
 models/pose/*.pt
+
+# PRIVACY (Zeke 2026-10-07: the repo is PUBLIC — personal details stay local, never in git)
+notes/
+*.local.md
+*.local.json
