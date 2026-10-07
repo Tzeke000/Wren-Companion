@@ -135,6 +135,25 @@ def probe_camera(peek_fn=None, fresh_s: float = 5.0, degraded_s: float = 12.0,
             age = e  # sentinel: peek raised
     # In-process live buffer path.
     if isinstance(age, (int, float)):
+        # 2026-10-07: a FRESH age is not a live camera. With the PIXY unplugged (moved to the
+        # server) the capture loop kept pushing a black "FACE LOST" frame every tick - age 0.3 s,
+        # verdict ok, and self_claim_check called the eyes "on". A real sensor never yields two
+        # byte-identical frames 0.5 s apart (noise changes every frame, even in the dark), so
+        # identical frames = frozen / synthetic / absent. Real (non-injected) path only.
+        if not injected and age <= fresh_s:
+            try:
+                import time as _t
+                import numpy as _np
+                from brain import frame_store as _fs  # type: ignore
+                f1 = getattr(_fs, "_buffer_frame", None)
+                _t.sleep(0.5)
+                f2 = getattr(_fs, "_buffer_frame", None)
+                if f1 is not None and f2 is not None and _np.array_equal(f1, f2):
+                    return _mk("camera", "down",
+                               "frames identical 0.5 s apart - stream frozen or synthetic (camera absent?)",
+                               "frame_store buffer content diff", age_s=round(float(age), 2))
+            except Exception:
+                pass
         if age <= fresh_s:
             state = "ok"
         elif age <= degraded_s:
