@@ -2,9 +2,10 @@
 wanna know how it looks ... a 2D and a 3D one").
 
   2D street map  : OpenStreetMap standard tiles (© OpenStreetMap contributors, ODbL)
-  satellite      : Esri World Imagery tiles (© Esri, Maxar, Earthstar Geographics)
-  3D             : this tool returns the Google Earth 3D link; cognition opens it in the cloak
-                   browser and screenshots it (recipe in the docstring of _earth_url).
+  satellite      : Esri World Imagery tiles (© Esri, Vantor, Earthstar Geographics)
+  3D             : a local MapLibre page (/api/v1/app/map3d — OpenFreeMap 3D buildings or Esri imagery on
+                   Mapterhorn terrain; free, no key) for MY screenshots and the app; plus a Google Earth link
+                   for HIS browser (screen-scraping Earth is against its terms).
 
 Both 2D images are stitched from map tiles, cropped around the place, marked with a red dot,
 attributed, and saved as small JPEGs (<= 900 px wide, safe to Read) under state/maps/.
@@ -33,9 +34,12 @@ UA = {"User-Agent": "IrisCompanion/1.0 (personal assistant; light use; contact v
 SOURCES = {
     "2d": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", "© OpenStreetMap contributors"),
     "satellite": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                  "© Esri, Maxar, Earthstar Geographics"),
+                  "© Esri, Vantor, Earthstar Geographics"),
 }
 W, H, TS = 900, 600, 256
+TTL_S = {"2d": 7 * 86400, "satellite": 86400}     # OSM: ~4.6 h max-age + 7 d stale-ok; Esri: max-age 1 day
+PARALLEL = {"2d": 2, "satellite": 4}             # polite concurrency per tile server
+CACHE_CAP_BYTES = 200 * 1024 * 1024              # prune oldest tiles beyond this
 
 
 def _tile(kind: str, z: int, x: int, y: int) -> Image.Image:
@@ -44,7 +48,7 @@ def _tile(kind: str, z: int, x: int, y: int) -> Image.Image:
     if not 0 <= y < n:
         return Image.new("RGB", (TS, TS), (200, 200, 200))
     f = TILES / kind / str(z) / str(x) / f"{y}.img"
-    if f.is_file() and time.time() - f.stat().st_mtime < 30 * 86400:
+    if f.is_file() and time.time() - f.stat().st_mtime < TTL_S[kind]:
         return Image.open(f).convert("RGB")
     url = SOURCES[kind][0].format(z=z, x=x, y=y)
     r = requests.get(url, headers=UA, timeout=15)
@@ -63,9 +67,12 @@ def _render(kind: str, lat: float, lon: float, z: int) -> Image.Image:
     tx0, ty0 = int(left // TS), int(top // TS)
     tx1, ty1 = int((left + W) // TS), int((top + H) // TS)
     canvas = Image.new("RGB", ((tx1 - tx0 + 1) * TS, (ty1 - ty0 + 1) * TS))
-    for tx in range(tx0, tx1 + 1):
-        for ty in range(ty0, ty1 + 1):
-            canvas.paste(_tile(kind, z, tx, ty), ((tx - tx0) * TS, (ty - ty0) * TS))
+    from concurrent.futures import ThreadPoolExecutor
+    coords = [(tx, ty) for tx in range(tx0, tx1 + 1) for ty in range(ty0, ty1 + 1)]
+    with ThreadPoolExecutor(max_workers=PARALLEL[kind]) as ex:
+        tiles = list(ex.map(lambda c: _tile(kind, z, c[0], c[1]), coords))
+    for (tx, ty), t in zip(coords, tiles):
+        canvas.paste(t, ((tx - tx0) * TS, (ty - ty0) * TS))
     ox, oy = int(left - tx0 * TS), int(top - ty0 * TS)
     img = canvas.crop((ox, oy, ox + W, oy + H))
     d = ImageDraw.Draw(img)
@@ -76,6 +83,23 @@ def _render(kind: str, lat: float, lon: float, z: int) -> Image.Image:
     d.rectangle((W - tw - 10, H - 18, W, H), fill=(255, 255, 255))
     d.text((W - tw - 5, H - 16), attrib, fill=(40, 40, 40))
     return img
+
+
+def prune_cache(cap: int = CACHE_CAP_BYTES) -> dict:
+    """Keep the tile cache under `cap` bytes, oldest tiles first (OSM policy: no bulk/offline archives)."""
+    files = [(f.stat().st_mtime, f.stat().st_size, f) for f in TILES.rglob("*.img")] if TILES.is_dir() else []
+    total = sum(sz for _, sz, _ in files)
+    removed = 0
+    for _, sz, f in sorted(files):
+        if total <= cap:
+            break
+        try:
+            f.unlink()
+            total -= sz
+            removed += 1
+        except OSError:
+            pass
+    return {"tiles": len(files) - removed, "bytes": total, "removed": removed}
 
 
 def _earth_url(lat: float, lon: float) -> str:
@@ -110,12 +134,19 @@ def _tool_place_map(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]
             files[k] = str(p)
         except Exception as e:  # noqa: BLE001
             errors[k] = repr(e)[:160]
+    try:
+        prune_cache()
+    except Exception:
+        pass
     return {"ok": bool(files), "place": label, "lat": lat, "lon": lon, "zoom": z, "files": files,
             "errors": errors or None,
             "earth_3d_url": _earth_url(lat, lon),
+            "maplibre_3d_url": f"http://127.0.0.1:5876/api/v1/app/map3d?lat={lat:.6f}&lon={lon:.6f}&mode=buildings",
+            "maplibre_3d_satellite_url": f"http://127.0.0.1:5876/api/v1/app/map3d?lat={lat:.6f}&lon={lon:.6f}&mode=satellite&zoom=14.5",
             "google_maps_url": f"https://www.google.com/maps/@{lat:.6f},{lon:.6f},{z}z",
-            "note": "files are <=900 px JPEGs, safe to Read. 3D: open earth_3d_url in the cloak browser, "
-                    "wait ~12 s, screenshot, downscale before Read."}
+            "note": "files are <=900 px JPEGs, safe to Read. MY 3D view: open maplibre_3d_url (3D buildings) or "
+                    "maplibre_3d_satellite_url (imagery on terrain) in the cloak browser with WebGL flags, wait for "
+                    "document.title == 'ready', screenshot, downscale before Read. earth_3d_url is for HIS browser."}
 
 
 register_tool(

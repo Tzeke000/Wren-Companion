@@ -28,31 +28,82 @@ WMO = {0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast", 45: "fo
        95: "thunderstorm", 96: "thunderstorm with hail", 99: "thunderstorm with heavy hail"}
 
 
-def geocode(place: str) -> dict | None:
-    """Place name -> {name, lat, lon, country, admin1, timezone}. Open-Meteo first, Nominatim fallback."""
+import json as _json
+import threading as _threading
+from pathlib import Path as _Path
+
+_GEO_CACHE: dict[str, dict] = {}
+_NOMINATIM_LAST = [0.0]
+_NOMINATIM_LOCK = _threading.Lock()   # policy: <= 1 req/s ABSOLUTE, across every thread in this process
+_GEO_FILE = _Path(__file__).resolve().parents[2] / "state" / "maps" / "geocode_cache.json"
+
+
+def _geo_disk_load() -> None:
+    if _GEO_CACHE or not _GEO_FILE.is_file():
+        return
     try:
-        r = requests.get("https://geocoding-api.open-meteo.com/v1/search",
-                         params={"name": place, "count": 1, "language": "en", "format": "json"},
-                         headers=UA, timeout=8)
-        res = (r.json() or {}).get("results") or []
-        if res:
-            x = res[0]
-            return {"name": x.get("name"), "lat": x["latitude"], "lon": x["longitude"],
-                    "country": x.get("country"), "admin1": x.get("admin1"), "timezone": x.get("timezone")}
+        _GEO_CACHE.update(_json.loads(_GEO_FILE.read_text(encoding="utf-8")))
     except Exception:
         pass
-    try:  # landmarks / full addresses: Open-Meteo only knows place names
-        r = requests.get("https://nominatim.openstreetmap.org/search",
-                         params={"q": place, "format": "json", "limit": 1}, headers=UA, timeout=10)
+
+
+def _geo_disk_save() -> None:
+    try:
+        _GEO_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _GEO_FILE.with_suffix(".tmp")
+        tmp.write_text(_json.dumps(dict(list(_GEO_CACHE.items())[-2000:])), encoding="utf-8")
+        tmp.replace(_GEO_FILE)
+    except Exception:
+        pass
+
+
+def geocode(place: str) -> dict | None:
+    """Place name / landmark / address -> {name, lat, lon, country, admin1, timezone}.
+
+    Nominatim (OpenStreetMap) FIRST: it knows landmarks and addresses ("Statue of Liberty" -> New York,
+    not the Nebraska replica a name-only geocoder picks). Policy kept: honest User-Agent, <= 1 request/s,
+    results cached. Open-Meteo's geocoder is the fallback."""
+    key = place.strip().lower()
+    _geo_disk_load()
+    if key in _GEO_CACHE:
+        return _GEO_CACHE[key]
+    loc = None
+    try:
+        with _NOMINATIM_LOCK:
+            if key in _GEO_CACHE:                      # another thread just fetched it
+                return _GEO_CACHE[key]
+            wait = 1.1 - (time.time() - _NOMINATIM_LAST[0])
+            if wait > 0:
+                time.sleep(wait)
+            _NOMINATIM_LAST[0] = time.time()
+            r = requests.get("https://nominatim.openstreetmap.org/search", headers=UA, timeout=10,
+                             params={"q": place, "format": "jsonv2", "limit": 1, "addressdetails": 1})
         res = r.json() or []
         if res:
             x = res[0]
-            return {"name": x.get("display_name", place).split(",")[0], "lat": float(x["lat"]),
-                    "lon": float(x["lon"]), "country": x.get("display_name", "").split(",")[-1].strip(),
-                    "admin1": None, "timezone": "auto", "display": x.get("display_name")}
+            a = x.get("address") or {}
+            loc = {"name": x.get("name") or x.get("display_name", place).split(",")[0],
+                   "lat": float(x["lat"]), "lon": float(x["lon"]), "country": a.get("country"),
+                   "admin1": a.get("state") or a.get("region") or a.get("county"), "timezone": "auto",
+                   "display": x.get("display_name")}
     except Exception:
-        pass
-    return None
+        loc = None
+    if loc is None:
+        try:
+            r = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                             params={"name": place, "count": 1, "language": "en", "format": "json"},
+                             headers=UA, timeout=8)
+            res = (r.json() or {}).get("results") or []
+            if res:
+                x = res[0]
+                loc = {"name": x.get("name"), "lat": x["latitude"], "lon": x["longitude"],
+                       "country": x.get("country"), "admin1": x.get("admin1"), "timezone": x.get("timezone")}
+        except Exception:
+            loc = None
+    if loc:
+        _GEO_CACHE[key] = loc       # Nominatim policy: results MUST be cached — kept on disk across restarts
+        _geo_disk_save()
+    return loc
 
 
 def _open_meteo(loc: dict, days: int, units: str) -> dict:

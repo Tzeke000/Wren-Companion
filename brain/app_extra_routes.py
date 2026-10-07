@@ -388,4 +388,13 @@ def install(app: Any, g: dict[str, Any], root: Path) -> list[str]:
             continue
         app.add_api_route(path, fn, methods=["GET"])
         added.append(path)
+    # 2026-10-07 Jarvis tools (weather/maps/reminders/pc/bridge) — own module, same idempotent install.
+    try:
+        import importlib
+        from brain import app_jarvis_routes as _jr
+        _jr = importlib.reload(_jr)  # stateless module: reload is safe and lets live installs pick up edits
+        have = {f"{m} {getattr(r, 'path', '')}" for r in app.routes for m in (getattr(r, "methods", None) or [])}
+        added += _jr.install(app, g, root, have)
+    except Exception as e:  # noqa: BLE001
+        added.append(f"jarvis routes FAILED: {e!r}"[:200])
     return added

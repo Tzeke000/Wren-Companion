@@ -5,10 +5,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Section } from "./Ui";
-import { BACKENDS, readBackend, setBackend } from "../api";
+import { BACKENDS, getJson, readBackend, setBackend } from "../api";
 
 type Vm = { vmid: number; name: string; status: string; node: string; uptime?: number };
 type Reach = { proxmox: boolean; iris_home_ssh: boolean; iris_home_runtime: boolean };
+type Bridge = { desktop_bridge_task?: string; server_key_authorized?: boolean | null; server_reachable?: boolean;
+  wol_nic?: string; wol_tested_from_off?: boolean; bridge_queue?: number };
 const ROLE: Record<number, string> = { 100: "my home on the server", 101: "Windows", 102: "Zorin" };
 
 const dot = (ok: boolean | undefined) => (
@@ -23,10 +25,12 @@ export default function ServerPanel() {
   const [reach, setReach] = useState<Reach | null>(null);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState<number | null>(null);
+  const [bridge, setBridge] = useState<Bridge | null>(null);
   const backend = readBackend();
 
   const refresh = useCallback(async () => {
     try { setReach(JSON.parse(await invoke<string>("server_reach")) as Reach); } catch { setReach(null); }
+    try { setBridge(await getJson<Bridge>("/api/v1/app/bridge/status")); } catch { setBridge(null); }
     try {
       const d = (JSON.parse(await invoke<string>("server_vms")).data ?? []) as Vm[];
       setVms(d.filter((v) => [100, 101, 102].includes(v.vmid)).sort((a, b) => a.vmid - b.vmid));
@@ -87,6 +91,16 @@ export default function ServerPanel() {
           <div>{dot(reach?.iris_home_ssh)}iris-home reachable (SSH)</div>
           <div>{dot(reach?.iris_home_runtime)}Me running on the server</div>
         </div>
+      </Section>
+
+      <Section title="The server reaching this PC">
+        <div style={{ display: "grid", gap: 6 }}>
+          <div>{dot(bridge?.server_key_authorized ?? undefined)}Server's SSH key allowed (Tailscale only)</div>
+          <div>{dot(bridge?.server_reachable)}Server answering from here</div>
+          <div>{dot(bridge ? bridge.desktop_bridge_task === "Ready" || bridge.desktop_bridge_task === "Running" : undefined)}Desktop bridge (screen, clicks, sound){bridge?.desktop_bridge_task && bridge.desktop_bridge_task !== "Ready" ? ` · ${bridge.desktop_bridge_task}` : ""}</div>
+          <div>{dot(bridge ? bridge.wol_nic === "Enabled" : undefined)}Wake-on-LAN armed on the network card{bridge && !bridge.wol_tested_from_off ? " · not yet tested from off" : ""}</div>
+        </div>
+        <p className="op-muted">How the server-me works this PC: SSH for files and commands, the desktop bridge for anything on your screen.</p>
       </Section>
 
       <Section title="Virtual machines">

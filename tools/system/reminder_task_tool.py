@@ -32,6 +32,40 @@ FIRE = ROOT / "scripts" / "fire_reminder.py"
 NOWIN = 0x08000000
 
 
+import contextlib
+import os
+
+
+@contextlib.contextmanager
+def _locked():
+    """Cross-PROCESS lock (the tool in the runtime and fire_reminder.py in a scheduled task both write the
+    store): an exclusive lock file, treated as stale after 30 s."""
+    lock = STORE.with_suffix(".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    end = time.time() + 10
+    while True:
+        try:
+            os.close(os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > 30:
+                    lock.unlink()
+                    continue
+            except OSError:
+                pass
+            if time.time() > end:
+                raise TimeoutError("reminder store is locked")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
 def _load() -> dict:
     try:
         return json.loads(STORE.read_text(encoding="utf-8"))
@@ -44,6 +78,57 @@ def _save(d: dict) -> None:
     tmp = STORE.with_suffix(".tmp")
     tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
     tmp.replace(STORE)
+
+
+def update_row(rid: str, **fields) -> dict | None:
+    with _locked():
+        d = _load()
+        if rid not in d:
+            return None
+        d[rid].update(fields)
+        _save(d)
+        return d[rid]
+
+
+def _register(rid: str, due: datetime) -> tuple[bool, str]:
+    name = f"Iris-Reminder-{rid}"
+    at = due.strftime("%Y-%m-%dT%H:%M:%S")
+    cmd = (f"$a = New-ScheduledTaskAction -Execute '{PYW}' -Argument '\"{FIRE}\" {rid}' -WorkingDirectory '{ROOT}';"
+           f"$t = New-ScheduledTaskTrigger -Once -At ([datetime]'{at}');"
+           f"$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
+           f"-ExecutionTimeLimit (New-TimeSpan -Minutes 5);"
+           f"Register-ScheduledTask -TaskName '{name}' -Action $a -Trigger $t -Settings $s "
+           f"-Description 'Iris reminder: one-shot, deletes itself after firing' -Force | Out-Null;"
+           f"(Get-ScheduledTask -TaskName '{name}').State")
+    rc, out = _ps(cmd)
+    return rc == 0 and "Ready" in out, out
+
+
+def sweep() -> dict:
+    """Self-repair: delete leftover Iris-Reminder-* tasks whose reminder isn't pending; re-register pending
+    reminders whose task vanished (a past-due one fires right away and says how late it is)."""
+    out: dict = {"removed_tasks": [], "reregistered": [], "fired_now": []}
+    cp = subprocess.run(["schtasks", "/query", "/fo", "csv", "/nh"], capture_output=True, text=True,
+                        creationflags=NOWIN)
+    names = set()
+    for line in cp.stdout.splitlines():
+        if "Iris-Reminder-" in line:
+            names.add(line.split(",")[0].strip('"').lstrip("\\"))
+    store = _load()
+    for n in sorted(names):
+        rid = n.rsplit("-", 1)[-1]
+        if store.get(rid, {}).get("status") != "pending":
+            subprocess.run(["schtasks", "/delete", "/tn", n, "/f"], capture_output=True, creationflags=NOWIN)
+            out["removed_tasks"].append(n)
+    for rid, r in store.items():
+        if r.get("status") == "pending" and f"Iris-Reminder-{rid}" not in names:
+            due = datetime.fromtimestamp(float(r["due_ts"]))
+            if due <= datetime.now() + timedelta(seconds=30):
+                subprocess.Popen([str(PYW), str(FIRE), rid], cwd=str(ROOT), creationflags=NOWIN)
+                out["fired_now"].append(rid)
+            elif _register(rid, due)[0]:
+                out["reregistered"].append(rid)
+    return out
 
 
 def parse_when(s: str, now: datetime | None = None) -> datetime:
@@ -99,19 +184,14 @@ def _tool_reminder(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
         rid = uuid.uuid4().hex[:8]
         name = f"Iris-Reminder-{rid}"
         at = due.strftime("%Y-%m-%dT%H:%M:%S")
-        cmd = (f"$a = New-ScheduledTaskAction -Execute '{PYW}' -Argument '\"{FIRE}\" {rid}' -WorkingDirectory '{ROOT}';"
-               f"$t = New-ScheduledTaskTrigger -Once -At ([datetime]'{at}');"
-               f"$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
-               f"-ExecutionTimeLimit (New-TimeSpan -Minutes 5);"
-               f"Register-ScheduledTask -TaskName '{name}' -Action $a -Trigger $t -Settings $s "
-               f"-Description 'Iris reminder: one-shot, deletes itself after firing' -Force | Out-Null;"
-               f"(Get-ScheduledTask -TaskName '{name}').State")
-        rc, out = _ps(cmd)
-        if rc != 0 or "Ready" not in out:
+        ok, out = _register(rid, due)
+        if not ok:
             return {"ok": False, "error": "couldn't register the scheduled task", "detail": out[-300:]}
-        store[rid] = {"id": rid, "text": text, "due_iso": at, "due_ts": due.timestamp(),
-                      "created_ts": time.time(), "status": "pending", "task": name}
-        _save(store)
+        with _locked():
+            store = _load()
+            store[rid] = {"id": rid, "text": text, "due_iso": at, "due_ts": due.timestamp(),
+                          "created_ts": time.time(), "status": "pending", "task": name}
+            _save(store)
         return {"ok": True, "id": rid, "due": at, "text": text, "task": name, "task_state": out.strip()}
     if a == "list":
         rows = sorted(store.values(), key=lambda r: (r.get("status") != "pending", r.get("due_ts", 0)))
@@ -125,16 +205,17 @@ def _tool_reminder(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "error": f"no reminder {rid}"}
         subprocess.run(["schtasks", "/delete", "/tn", f"Iris-Reminder-{rid}", "/f"], capture_output=True,
                        creationflags=NOWIN)
-        r["status"] = "cancelled"
-        _save(store)
+        update_row(rid, status="cancelled")
         return {"ok": True, "cancelled": rid, "text": r["text"]}
-    return {"ok": False, "error": "action must be add|list|cancel"}
+    if a == "sweep":
+        return {"ok": True, **sweep()}
+    return {"ok": False, "error": "action must be add|list|cancel|sweep"}
 
 
 register_tool(
     "reminder",
     "Reminders that survive restarts and reboots: action=add text='...' when='in 20m'|'at 17:30'|"
-    "'tomorrow 9:00'|'2026-10-08 07:15' · action=list [all=true] · action=cancel id=... Each is a one-shot "
+    "'tomorrow 9:00'|'2026-10-08 07:15' · action=list [all=true] · action=cancel id=... · action=sweep (self-repair tasks). Each is a one-shot "
     "Windows scheduled task that DMs Zeke on Discord at the time (late-but-delivered if the PC was off) "
     "and tells me through the chat bridge.",
     2,

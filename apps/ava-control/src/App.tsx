@@ -6,6 +6,9 @@ import { JsonBlock, Kv, Section } from "./components/Ui";
 import ServerPanel from "./components/ServerPanel";
 import ToolsPanel from "./components/ToolsPanel";
 import VectorPanel from "./components/VectorPanel";
+import WorldPanel from "./components/WorldPanel";
+import RemindersPanel from "./components/RemindersPanel";
+import PcPanel from "./components/PcPanel";
 import { CUBE_MORPH_ENABLED, EMOTION_VISUALS, deriveOrbEmotion, deriveOrbSleep, deriveOrbState, mixHex, shadeHex, type EmotionVisual } from "./orbDerive";
 import OrbCanvas, { setBodyStyle, useBodyStyle } from "./components/OrbCanvas";
 import { listen } from "@tauri-apps/api/event";
@@ -119,6 +122,9 @@ const TABS = [
   { id: "voice" as const, label: "Voice" },
   { id: "server" as const, label: "Server" },
   { id: "vector" as const, label: "Vector" },
+  { id: "world" as const, label: "World" },
+  { id: "reminders" as const, label: "Reminders" },
+  { id: "pc" as const, label: "PC" },
   { id: "chat" as const, label: "Chat" },
   { id: "brain" as const, label: "Brain" },
   { id: "status" as const, label: "Status / Heartbeat" },
@@ -141,7 +147,7 @@ type TabId = (typeof TABS)[number]["id"];
 // Redesign 2026-10-06: the panel's tabs, grouped. Any tab not listed lands in "Other" — nothing is lost.
 const NAV_GROUPS: { title: string; ids: string[] }[] = [
   { title: "Me", ids: ["voice", "vector", "memory", "brain", "journal", "learning", "identity"] },
-  { title: "Around me", ids: ["people", "server", "chat", "tools"] },
+  { title: "Around me", ids: ["people", "world", "reminders", "pc", "server", "chat", "tools"] },
   { title: "Workshop", ids: ["plans", "proposals", "workbench", "creative", "models", "finetune"] },
   { title: "System", ids: ["status", "debug"] },
 ];
@@ -3146,6 +3152,9 @@ export default function App() {
           {tab === "tools" && <ToolsPanel />}
 
           {tab === "vector" && <VectorPanel />}
+          {tab === "world" && <WorldPanel />}
+          {tab === "reminders" && <RemindersPanel />}
+          {tab === "pc" && <PcPanel />}
 
           {tab === "models" && (
             <div className="op-pane">

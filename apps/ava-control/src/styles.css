@@ -1963,3 +1963,34 @@ body,
 .iris-vector-facts { display: grid; gap: 8px; }
 .iris-vector-facts div { background: #14161b; border-radius: 10px; padding: 10px 12px; font-size: 14px; color: #e9ebef; }
 .iris-vector-facts b { display: block; font-size: 12px; font-weight: 600; color: #8b919c; margin-bottom: 2px; }
+
+/* ── World / Reminders / PC tabs (2026-10-07) ─────────────────────────────── */
+.iris-world-search { display: flex; gap: 8px; margin: 4px 0 12px; flex-wrap: wrap; }
+.iris-world-search input { flex: 1 1 260px; background: #14161b; border: 1px solid #262b34; border-radius: 10px;
+  color: #e9ebef; padding: 9px 12px; font-size: 14px; }
+.iris-world-search input.iris-rem-when { flex: 0 1 220px; }
+.iris-world-search select { background: #14161b; border: 1px solid #262b34; border-radius: 10px; color: #e9ebef; padding: 0 8px; }
+.iris-world-search button, .iris-world-toolbar button, .iris-rem-list button, .iris-pc-row button {
+  background: #1d2129; border: 1px solid #2c323d; color: #e9ebef; border-radius: 10px; padding: 8px 14px;
+  font-size: 13px; cursor: pointer; }
+.iris-world-search button:disabled { opacity: 0.5; cursor: default; }
+.iris-world-search button:hover:not(:disabled), .iris-world-toolbar button:hover, .iris-rem-list button:hover,
+.iris-pc-row button:hover { border-color: #4b5565; }
+.iris-world-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.iris-world-toolbar button.on, .iris-pc-row button.on { background: #2a3140; border-color: #6d7a90; }
+.iris-world-toolbar label { display: flex; gap: 8px; align-items: center; color: #8b919c; font-size: 13px; margin-left: auto; }
+.iris-world-now { font-size: 16px; color: #e9ebef; margin: 0 0 10px; }
+.iris-world-days { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+.iris-world-days div { background: #14161b; border-radius: 10px; padding: 10px 12px; display: grid; gap: 2px; font-size: 13px; color: #e9ebef; }
+.iris-world-days b { font-size: 12px; color: #8b919c; font-weight: 600; }
+.iris-world-map { width: 100%; border-radius: 12px; border: 1px solid #20242c; display: block; aspect-ratio: 3 / 2; object-fit: cover; background: #0d0f13; }
+.iris-rem-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.iris-rem-list li { display: flex; gap: 12px; align-items: center; background: #14161b; border-radius: 10px; padding: 10px 12px; color: #e9ebef; font-size: 14px; }
+.iris-rem-list li span { flex: 1; }
+.iris-rem-list li em { font-style: normal; color: #8b919c; font-size: 13px; }
+.iris-rem-list.past li { opacity: 0.6; }
+.iris-pc-row { display: grid; grid-template-columns: minmax(120px, 180px) 1fr 48px 84px; gap: 12px; align-items: center;
+  background: #14161b; border-radius: 10px; padding: 8px 12px; margin-bottom: 8px; color: #e9ebef; font-size: 14px; }
+.iris-pc-row.master { border: 1px solid #262b34; }
+.iris-pc-row b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.iris-pc-row span { color: #8b919c; font-size: 13px; text-align: right; }

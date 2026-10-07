@@ -118,10 +118,18 @@ def _tool_pc(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
             key = str(params.get("key") or "play_pause").lower()
             if key not in ("play_pause", "next", "prev", "stop"):
                 return {"ok": False, "error": "key must be play_pause|next|prev|stop"}
-            user32.keybd_event(VK[key], 0, 0, 0)
-            user32.keybd_event(VK[key], 0, 2, 0)
-            time.sleep(0.8)
-            return {"ok": True, "sent": key, "now_playing": _now_playing()}
+            app = str(params.get("app") or "").strip() or None
+            via = "smtc"
+            try:
+                r = _smtc_control(key, app)
+            except Exception as e:  # noqa: BLE001 — no winrt / no session: fall back to the global media key
+                r = {"ok": False, "error": repr(e)[:120]}
+            if not r.get("ok") and not app:
+                user32.keybd_event(VK[key], 0, 0, 0)
+                user32.keybd_event(VK[key], 0, 2, 0)
+                via, r = "media_key", {"ok": True}
+            time.sleep(0.6)
+            return {**r, "sent": key, "via": via, "now_playing": _now_playing()}
         if a == "now_playing":
             return {"ok": True, "now_playing": _now_playing()}
         if a == "windows":
@@ -166,6 +174,19 @@ def _tool_pc(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 
 def _now_playing() -> dict:
     try:
+        sess = _smtc_sessions()
+        if sess:
+            cur = next((x for x in sess if x.get("status") == "playing"), None) or                 next((x for x in sess if x.get("current")), sess[0])
+            return {"source": "smtc", "app": cur.get("app"), "title": cur.get("title"), "artist": cur.get("artist"),
+                    "status": cur.get("status"), "track": cur.get("title"), "sessions": sess,
+                    "spotify": "playing" if "spotify" in (cur.get("app") or "").lower() and cur.get("status") == "playing" else None}
+    except Exception:
+        pass
+    return _now_playing_spotify_title()
+
+
+def _now_playing_spotify_title() -> dict:
+    try:
         import psutil
         import win32gui
         import win32process
@@ -194,11 +215,76 @@ def _now_playing() -> dict:
         return {"error": repr(e)[:120]}
 
 
+# ── Windows media sessions (SMTC) — what ANY player is playing (Spotify, YouTube in Chrome, VLC…), and
+#    control of a SPECIFIC app's session. (Research 2026-10-07: borrowed from SecretiveShell/mcp-windows.)
+_STATUS = {0: "closed", 1: "opened", 2: "changing", 3: "stopped", 4: "playing", 5: "paused"}
+
+
+def _run_async(coro_fn, timeout: float = 8.0):
+    """Run a winrt coroutine on its OWN loop in its own thread — safe even when called from inside a
+    running event loop (the app's async routes)."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(lambda: asyncio.run(coro_fn())).result(timeout=timeout)
+
+
+def _smtc_sessions() -> list[dict]:
+    from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as M
+
+    async def go():
+        mgr = await M.request_async()
+        cur = mgr.get_current_session()
+        cur_id = cur.source_app_user_model_id if cur else None
+        ss = mgr.get_sessions()
+        out = []
+        for i in range(ss.size):
+            s = ss.get_at(i)
+            row = {"app": s.source_app_user_model_id, "current": s.source_app_user_model_id == cur_id}
+            try:
+                pr = await s.try_get_media_properties_async()
+                row.update(title=pr.title, artist=pr.artist, album=pr.album_title)
+            except Exception:
+                pass
+            try:
+                row["status"] = _STATUS.get(int(s.get_playback_info().playback_status), "unknown")
+            except Exception:
+                row["status"] = "unknown"
+            out.append(row)
+        return out
+    return _run_async(go)
+
+
+def _smtc_control(key: str, app: str | None) -> dict:
+    from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as M
+
+    async def go():
+        mgr = await M.request_async()
+        target = None
+        if app:
+            ss = mgr.get_sessions()
+            for i in range(ss.size):
+                s = ss.get_at(i)
+                if app.lower() in (s.source_app_user_model_id or "").lower():
+                    target = s
+                    break
+        else:
+            target = mgr.get_current_session()
+        if target is None:
+            return {"ok": False, "error": f"no media session{' for ' + app if app else ''}"}
+        fn = {"play_pause": target.try_toggle_play_pause_async, "next": target.try_skip_next_async,
+              "prev": target.try_skip_previous_async, "stop": target.try_stop_async}[key]
+        ok = await fn()
+        return {"ok": bool(ok), "app": target.source_app_user_model_id}
+    return _run_async(go)
+
+
 register_tool(
     "pc",
     "Direct PC control (no screenshots/clicks). action=volume_get | volume_set percent=0-100 | mute | "
     "unmute | sessions (apps making sound + their volume) | app_volume app='spotify' percent=30 "
-    "[mute=true|false] | media key=play_pause|next|prev|stop | now_playing (Spotify track) | windows | "
+    "[mute=true|false] | media key=play_pause|next|prev|stop [app='chrome'] (Windows media sessions; global "
+    "media key fallback) | now_playing (any player: title/artist/status) | windows | "
     "window title='discord' op=focus|minimize|maximize|restore|close | launch target='<path|file|url>'. "
     "Reads state back after acting. Don't focus/close windows on him mid-game unasked.",
     2,

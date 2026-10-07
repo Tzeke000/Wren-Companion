@@ -29,14 +29,67 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 Q = ROOT / "state" / "desktop_bridge"
 OUT = Q / "out"
+LOG = Q / "log.jsonl"
 TASK = "Iris-Desktop-Bridge"
+ACTIONS = {"ping", "screenshot", "pc", "open", "click", "type", "keys"}   # nothing else runs, ever
 PYW = ROOT / ".venv" / "Scripts" / "pythonw.exe"
 NOWIN = 0x08000000
+
+
+def _screen_locked() -> bool:
+    """True when the input desktop isn't the user's (lock screen / UAC secure desktop): clicks and typing
+    would go nowhere and screenshots come back black."""
+    import ctypes
+    u32 = ctypes.windll.user32
+    h = u32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
+    if not h:
+        return True
+    ok = u32.SwitchDesktop(h)
+    u32.CloseDesktop(h)
+    return not ok
+
+
+def _paste_text(text: str) -> None:
+    """Non-ASCII text goes in through the clipboard (pyautogui.write drops it); the old clipboard is restored."""
+    import win32clipboard as cb
+    import pyautogui
+    old = None
+    cb.OpenClipboard()
+    try:
+        try:
+            old = cb.GetClipboardData(cb.CF_UNICODETEXT)
+        except Exception:
+            old = None
+        cb.EmptyClipboard()
+        cb.SetClipboardText(text, cb.CF_UNICODETEXT)
+    finally:
+        cb.CloseClipboard()
+    pyautogui.hotkey("ctrl", "v")
+    time.sleep(0.2)
+    if old is not None:
+        cb.OpenClipboard()
+        try:
+            cb.EmptyClipboard()
+            cb.SetClipboardText(old, cb.CF_UNICODETEXT)
+        finally:
+            cb.CloseClipboard()
+
+
+def _log(**kw) -> None:
+    try:
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": round(time.time(), 1), **kw}) + "\n")
+    except Exception:
+        pass
 
 
 def _do(action: str, args: dict) -> dict:
     import ctypes
     u32 = ctypes.windll.user32
+    if action not in ACTIONS:
+        return {"ok": False, "error": f"action not allowed: {action}"}
+    if action in ("screenshot", "click", "type", "keys") and _screen_locked():
+        return {"ok": False, "error": "the screen is locked (or a UAC prompt is up) — nothing to see or click"}
     if action == "ping":
         return {"ok": True, "session": os.environ.get("SESSIONNAME"), "user": os.environ.get("USERNAME")}
     if action == "screenshot":
@@ -65,7 +118,11 @@ def _do(action: str, args: dict) -> dict:
         sys.path.insert(0, str(ROOT))
         import pyautogui  # noqa: PLC0415 — only in the desktop session
         if action == "type":
-            pyautogui.write(str(args["text"]), interval=0.01)
+            text = str(args["text"])
+            if text.isascii():
+                pyautogui.write(text, interval=0.01)
+            else:
+                _paste_text(text)
         else:
             pyautogui.hotkey(*[k.strip() for k in str(args["combo"]).split("+")])
         return {"ok": True}
@@ -86,10 +143,16 @@ def serve() -> int:
             res = {"ok": False, "error": repr(e)[:300]}
         (Q / f"res_{rid}.json").write_text(json.dumps(res), encoding="utf-8")
         req.unlink(missing_ok=True)
+        try:
+            _log(id=rid, action=r.get("action"), ok=bool(res.get("ok")), error=res.get("error"))
+        except Exception:
+            pass
     return 0
 
 
 def submit(action: str, args: dict, timeout: float = 30.0) -> dict:
+    if action not in ACTIONS:
+        return {"ok": False, "error": f"action not allowed: {action}", "allowed": sorted(ACTIONS)}
     Q.mkdir(parents=True, exist_ok=True)
     rid = uuid.uuid4().hex[:10]
     (Q / f"req_{rid}.json").write_text(json.dumps({"ts": time.time(), "action": action, "args": args}),
@@ -121,6 +184,13 @@ def install() -> int:
     cp = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd], capture_output=True,
                         text=True, creationflags=NOWIN)
     print((cp.stdout + cp.stderr).strip())
+    # The request folder is a way to act inside his session: only his account (and SYSTEM) may touch it.
+    Q.mkdir(parents=True, exist_ok=True)
+    user = os.environ.get("USERNAME", "Owner")
+    acl = subprocess.run(["icacls", str(Q), "/inheritance:r", "/grant:r", f"{user}:(OI)(CI)F",
+                          "/grant:r", "SYSTEM:(OI)(CI)F", "/grant:r", "Administrators:(OI)(CI)F"],
+                         capture_output=True, text=True, creationflags=NOWIN)
+    print("acl:", (acl.stdout or acl.stderr).strip().splitlines()[-1:] )
     return cp.returncode
 
 

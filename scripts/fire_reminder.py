@@ -42,19 +42,23 @@ def main() -> int:
     late_min = max(0, round((time.time() - float(r["due_ts"])) / 60))
     text = f"⏰ Reminder: {r['text']}" + (f"  (was due {late_min} min ago — the PC was off/asleep)" if late_min >= 5 else "")
     sent = False
-    try:
-        import discord_dm_user as dm
-        from _private import priv
-        import requests
-        token = dm.load_token()
-        uid = priv("zeke_discord_user_id")
-        h = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
-        ch = requests.post("https://discord.com/api/v10/users/@me/channels", headers=h,
-                           json={"recipient_id": uid}, timeout=15).json()["id"]
-        sent = requests.post(f"https://discord.com/api/v10/channels/{ch}/messages", headers=h,
-                             json={"content": text}, timeout=15).status_code in (200, 201)
-    except Exception as e:  # noqa: BLE001
-        log(event="dm_error", id=rid, error=repr(e)[:200])
+    for attempt in range(4):                       # network blips after a wake-from-sleep: retry ~2.5 min
+        try:
+            import discord_dm_user as dm
+            from _private import priv
+            import requests
+            token = dm.load_token()
+            uid = priv("zeke_discord_user_id")
+            h = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
+            ch = requests.post("https://discord.com/api/v10/users/@me/channels", headers=h,
+                               json={"recipient_id": uid}, timeout=15).json()["id"]
+            sent = requests.post(f"https://discord.com/api/v10/channels/{ch}/messages", headers=h,
+                                 json={"content": text}, timeout=15).status_code in (200, 201)
+        except Exception as e:  # noqa: BLE001
+            log(event="dm_error", id=rid, attempt=attempt, error=repr(e)[:200])
+        if sent:
+            break
+        time.sleep(15 * (attempt + 1))
     try:
         from brain import iris_chat
         iris_chat.configure(ROOT) if hasattr(iris_chat, "configure") else None
@@ -63,9 +67,8 @@ def main() -> int:
                          f"aloud. Reply with chat_reply (one short line ok — it's a log).")
     except Exception as e:  # noqa: BLE001
         log(event="bridge_error", id=rid, error=repr(e)[:200])
-    r.update(status="fired" if sent else "fire_failed", fired_ts=time.time(), dm_sent=sent)
-    store[rid] = r
-    STORE.write_text(json.dumps(store, indent=1), encoding="utf-8")
+    from tools.system.reminder_task_tool import update_row     # same cross-process lock + atomic write
+    update_row(rid, status="fired" if sent else "fire_failed", fired_ts=time.time(), dm_sent=sent)
     subprocess.run(["schtasks", "/delete", "/tn", f"Iris-Reminder-{rid}", "/f"], capture_output=True,
                    creationflags=0x08000000)
     log(event="fired", id=rid, sent=sent, late_min=late_min)
