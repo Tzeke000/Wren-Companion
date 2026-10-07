@@ -145,6 +145,18 @@ class InsightFaceEngine:
             print(f"[insight_face] import failed: {e!r}")
             return False
 
+        # LINUX (2026-10-07, the server port): the Windows DLL-dir trick above does
+        # nothing here, and ORT's CUDA EP dlopen()s libcudnn/libcublas from the
+        # nvidia-* pip wheels only if they are already loaded — otherwise it falls
+        # back to CPU while get_available_providers() still LISTS CUDA. Measured on
+        # the V100: same model, CPU in the runtime vs ~9 ms/frame on CUDA after
+        # preload_dlls(). Windows path untouched.
+        if sys.platform != "win32" and hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()
+            except Exception as e:
+                print(f"[insight_face] ort.preload_dlls failed (CPU fallback likely): {e!r}")
+
         # Pick the best provider available.
         avail = list(ort.get_available_providers())
         ordered: list[str] = []
