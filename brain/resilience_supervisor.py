@@ -537,13 +537,21 @@ class Supervisor:
             out = {"ts": now}
             out["orb"] = self._orb(st, now)
             out["pairing"] = self._pairing(st, now)
+            # 2026-10-07 cutover: on the SERVER (Linux) the Vector stack + wire-pod still live on the
+            # TOWER, so their state files here are stale - healing from them would "fix" a healthy
+            # robot - and the tower-heartbeat push would touch the server's OWN failover lock.
+            # Server = orb + pairing + presence + relay only, until the Vector move.
+            on_tower = sys.platform == "win32"
             if now >= self._next_vec:                     # vector every 60 s
                 self._next_vec = now + 60
-                out["vector"] = self._vector(st, now)
-                out["wirepod"] = self._wirepod(st, now)
+                if on_tower:
+                    out["vector"] = self._vector(st, now)
+                    out["wirepod"] = self._wirepod(st, now)
+                else:
+                    out["vector"] = out["wirepod"] = {"action": "none", "why": "server: Vector + wire-pod live on the tower"}
                 out["presence"] = self._presence(st, now)
             out["relay"] = self._relay_other_dms(st, now)
-            if now >= self._next_hb:                      # tower heartbeat every 120 s
+            if on_tower and now >= self._next_hb:         # tower heartbeat every 120 s
                 self._next_hb = now + HEARTBEAT_EVERY_S
                 out["tower_heartbeat"] = push_tower_heartbeat(st, now)
             self._verify_due(now)

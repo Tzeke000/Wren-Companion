@@ -1820,7 +1820,7 @@ def chat_reply(request_id: str, text: str) -> dict:
 # rather than touching the JSONL directly — keeps the postoffice as the
 # single writer to the letters log.
 
-_POSTOFFICE_URL = "http://127.0.0.1:5877"
+_POSTOFFICE_URL = os.environ.get("IRIS_POSTOFFICE_URL", "http://127.0.0.1:5877").rstrip("/")  # 2026-10-07: the post-office stays on the TOWER after cutover
 _POSTOFFICE_TIMEOUT_S = 5.0
 
 

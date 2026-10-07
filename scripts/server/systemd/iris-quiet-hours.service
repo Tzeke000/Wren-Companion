@@ -1,0 +1,7 @@
+# quiet hours for my server voice (22:30-05:10 by default) - see scripts/server/voice_quiet_hours.sh
+[Unit]
+Description=Iris voice quiet hours (server)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/staged/Wren-Companion/scripts/server/voice_quiet_hours.sh

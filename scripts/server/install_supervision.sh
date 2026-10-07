@@ -8,6 +8,12 @@ mkdir -p "$HOME/.config/systemd/user"
 install -m 0644 "$ROOT/scripts/server/systemd/iris-stack.service" "$HOME/.config/systemd/user/iris-stack.service"
 install -m 0644 "$ROOT/scripts/server/systemd/iris-mouth.service" "$HOME/.config/systemd/user/iris-mouth.service"
 install -m 0644 "$ROOT/scripts/server/systemd/iris-ears.service" "$HOME/.config/systemd/user/iris-ears.service"
+for u in iris-quiet-hours.service iris-quiet-hours.timer; do install -m 0644 "$ROOT/scripts/server/systemd/$u" "$HOME/.config/systemd/user/$u"; done
+# the stack env (launcher sources it): app port on the LAN (firewalled tower-only by install_orb_firewall.sh)
+# and letters via the TOWER post-office. From the private config - no address in the repo.
+printf "IRIS_ORB_BIND=0.0.0.0
+IRIS_POSTOFFICE_URL=http://%s:5877
+" "$TOWER" > "$HOME/.config/iris/stack.env"
 # the mouth's sink address comes from the git-ignored private config, never a tracked file
 mkdir -p "$HOME/.config/iris"
 TOWER="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("tower_lan",""))' "$ROOT/config/private.local.json")"
@@ -19,6 +25,6 @@ IRIS_MIC_SOURCE=%s:8776
 chmod +x "$ROOT/scripts/server/iris_supervise.sh" "$ROOT/scripts/server/start_iris_linux.sh" "$ROOT"/start_iris*.sh
 sudo -n loginctl enable-linger "$(id -un)"
 systemctl --user daemon-reload
-systemctl --user enable iris-stack.service iris-mouth.service iris-ears.service
+systemctl --user enable iris-stack.service iris-mouth.service iris-ears.service iris-quiet-hours.timer
 echo "linger: $(loginctl show-user "$(id -un)" -p Linger)"
 systemctl --user is-enabled iris-stack.service iris-mouth.service iris-ears.service

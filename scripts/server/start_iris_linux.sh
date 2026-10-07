@@ -31,6 +31,9 @@ case "$MODE" in
   *) log "unknown mode: $MODE (opus|fable)"; exit 2 ;;
 esac
 export IRIS_MODEL
+# server role env (written by install_supervision.sh from the private config): IRIS_ORB_BIND,
+# IRIS_POSTOFFICE_URL. Inherited by the body host, claude and the iris MCP runtime.
+if [ -f "$HOME/.config/iris/stack.env" ]; then set -a; . "$HOME/.config/iris/stack.env"; set +a; fi
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"
 if [ -x "$HOME/.local/bin/claude" ]; then export IRIS_CLI_PATH="$HOME/.local/bin/claude"; fi
 log "cli: IRIS_CLI_PATH=${IRIS_CLI_PATH:-<sdk bundled>}  model pin: IRIS_MODEL=$IRIS_MODEL"
