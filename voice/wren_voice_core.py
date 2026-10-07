@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+_IRIS_REPO = Path(__file__).resolve().parents[1]  # 2026-10-07 server port: repo root from this file, not D:
 from urllib import request as _req
 from urllib.error import HTTPError, URLError
 
@@ -60,6 +61,15 @@ except ImportError:
 
 import numpy as np
 import sounddevice as sd
+# 2026-10-07 server port: the mic may be a NETWORK source (Zeke's headset on the tower,
+# streamed by scripts/mic_source.py) - see voice/net_audio.py. Unset IRIS_MIC_SOURCE = local mic.
+try:
+    import net_audio as _net_audio
+except ImportError:
+    import importlib.util as _ilu_na
+    _sp_na = _ilu_na.spec_from_file_location("net_audio", str(Path(__file__).resolve().parent / "net_audio.py"))
+    _net_audio = _ilu_na.module_from_spec(_sp_na)
+    _sp_na.loader.exec_module(_net_audio)
 
 # ── module-level constants (reloadable; tuned values from the frozen source) ──
 SAMPLE_RATE = wl.SAMPLE_RATE           # 16k, whisper-native
@@ -310,7 +320,7 @@ def _ve():
     if _VE_MOD is None:
         try:
             import importlib.util as _ilu
-            spec = _ilu.spec_from_file_location("iris_voice_emotion", r"D:\Wren-Companion\brain\voice_emotion.py")
+            spec = _ilu.spec_from_file_location("iris_voice_emotion", str(_IRIS_REPO / "brain" / "voice_emotion.py"))
             mod = _ilu.module_from_spec(spec)
             spec.loader.exec_module(mod)
             _VE_MOD = mod
@@ -401,6 +411,9 @@ def _trusted_mic_or_none(ctx):
     it). Deaf-but-honest beats hearing-the-wrong-thing: callers treat None as
     'no audio', the guard logs loudly, and the daemon's retry probe keeps
     hunting for the real mic until it enumerates."""
+    if _net_audio.MIC_SOURCE:   # the named mic lives on another machine (net_audio.py)
+        ctx.mic_dev_idx = _net_audio.NET_MIC
+        return _net_audio.NET_MIC
     dev_idx = getattr(ctx, "mic_dev_idx", None)
     if dev_idx is None:
         try:
@@ -504,8 +517,7 @@ def _capture_utterance(ctx, timeout_s: float, max_s: float,
         worker.start()
 
     try:
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                            device=dev_idx, blocksize=frame_n) as stream:
+        with _net_audio.open_mic(sd, SAMPLE_RATE, dev_idx, frame_n) as stream:
             set_state("listening", "in call")
             while True:
                 frame, _overflow = stream.read(frame_n)
@@ -793,8 +805,7 @@ def _bargein_watch_and_capture(ctx, model, is_speaking, on_barge, *,
     end_silence_chunks = max(1, round(end_silence_ms / VAD_CHUNK_MS))
     max_chunks = max(1, int(max_capture_s * SAMPLE_RATE / VAD_CHUNK))
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                        device=dev_idx, blocksize=VAD_CHUNK) as stream:
+    with _net_audio.open_mic(sd, SAMPLE_RATE, dev_idx, VAD_CHUNK) as stream:
         def _frames():
             while True:
                 frame, _ov = stream.read(VAD_CHUNK)
@@ -1140,7 +1151,7 @@ def _is_phantom(text: str, audio) -> bool:
 # Precedence in cmd_listen: explicit end_silence_seconds arg > speaker file > module
 # default. File ABSENT/unparseable/insane → END_SILENCE_S exactly as before, so this
 # is no-worse-than-before by construction (same fail-open shape as the ear-mute gate).
-SPEAKER_PACE_FILE = Path(r"D:\Wren-Companion\scratch\speaker_pace.json")
+SPEAKER_PACE_FILE = (_IRIS_REPO / "scratch" / "speaker_pace.json")
 
 def _speaker_end_silence():
     """Return the per-speaker end-silence override (float seconds) or None."""
@@ -1185,7 +1196,7 @@ def _speaker_end_silence():
 # Config: scratch/voice_id.json {"enabled": true, "threshold": 0.4,
 #   "min_seconds": 0.8, "save_utts": true}
 # Absent/invalid/model-missing/cold → no tag, behavior exactly as before.
-VOICE_ID_FILE = Path(r"D:\Wren-Companion\scratch\voice_id.json")
+VOICE_ID_FILE = (_IRIS_REPO / "scratch" / "voice_id.json")
 
 def _voice_id_cfg():
     """Return {"threshold","min_seconds","save_utts"} or None (feature off)."""

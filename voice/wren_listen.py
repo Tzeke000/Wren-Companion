@@ -34,6 +34,7 @@ import tempfile
 import time
 import wave
 from pathlib import Path
+_IRIS_REPO = Path(__file__).resolve().parents[1]  # 2026-10-07 server port: repo root from this file, not D:
 from urllib import request as _req
 
 # Windows consoles default to cp1252, which can't encode chars like U+2192.
@@ -67,7 +68,7 @@ except Exception:
 # Iris adaptation: Wren's tower mic was the Realtek array; mine is the Logitech PRO X
 # gaming headset (idx 7 on the tower). Override with WREN_MIC_SUBSTR env or --device.
 DEFAULT_MIC_SUBSTR = os.environ.get("WREN_MIC_SUBSTR", "Logitech PRO X")
-TRANSCRIPT_FILE = Path(r"D:\Wren-Companion\scratch\voice_in.txt")
+TRANSCRIPT_FILE = (_IRIS_REPO / "scratch" / "voice_in.txt")
 SAMPLE_RATE = 16000      # whisper-native; avoids resample
 SILENCE_PEAK = 0.01      # below this = treat window as silence, skip transcribe
 

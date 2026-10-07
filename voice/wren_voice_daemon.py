@@ -297,6 +297,12 @@ def _warm_audio_main(ctx: Ctx) -> None:
     reads that index and never calls find_input_device on the worker thread. We also open a
     short real capture here to fully prime PortAudio/WASAPI on the main thread.
     """
+    if os.environ.get("IRIS_MIC_SOURCE", "").strip():
+        # 2026-10-07: the mic is Zeke's headset on the TOWER, streamed by scripts/mic_source.py
+        # (voice/net_audio.py) - nothing local to enumerate or prime.
+        ctx.mic_dev_idx = "net"
+        print(f"[daemon] mic = network source {os.environ['IRIS_MIC_SOURCE'].rpartition(':')[2]}/tcp (IRIS_MIC_SOURCE)", flush=True)
+        return
     try:
         import sounddevice as sd
         sd.query_devices()  # Pa_Initialize + host-API/device enumeration (main thread)

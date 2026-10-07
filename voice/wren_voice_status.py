@@ -14,10 +14,11 @@ import os
 import tempfile
 import time
 from pathlib import Path
+_IRIS_REPO = Path(__file__).resolve().parents[1]  # 2026-10-07 server port: repo root from this file, not D:
 
 # Iris adaptation: Wren's paths were D:\Wren\scratch\ — repointed to mine.
-STATUS_FILE = Path(r"D:\Wren-Companion\scratch\voice_status.json")
-CONTROL_FILE = Path(r"D:\Wren-Companion\scratch\voice_control.json")
+STATUS_FILE = (_IRIS_REPO / "scratch" / "voice_status.json")
+CONTROL_FILE = (_IRIS_REPO / "scratch" / "voice_control.json")
 
 STATES = ("idle", "listening", "thinking", "speaking", "muted")
 
@@ -62,7 +63,7 @@ def read_state() -> dict:
 # mirror reads this so the orb pulses to my REAL voice instead of a synthetic
 # on/off. Separate file from STATUS_FILE so the high-rate amplitude writes don't
 # churn the (transition-only) state file. Throttled; never raises into playback.
-AMPLITUDE_FILE = Path(r"D:\Wren-Companion\scratch\voice_amplitude.json")
+AMPLITUDE_FILE = (_IRIS_REPO / "scratch" / "voice_amplitude.json")
 _AMP_TMP = AMPLITUDE_FILE.with_suffix(".amp.tmp")
 _last_amp_write = 0.0
 
