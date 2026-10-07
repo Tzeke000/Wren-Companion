@@ -13,7 +13,7 @@ Preferences tracked:
                         Inferred from how they address Ava + how
                         she's asked to address them.
   addressed_as       - what they like being called
-                        (e.g., "Zeke" not "sir", "user", "Zeke")
+                        (e.g., "Zeke" not "sir", "user")
   prefers_emojis     - bool — most people don't; some do
   prefers_markdown   - bool — code/dev folks tend to want it,
                         casual chat tends not to

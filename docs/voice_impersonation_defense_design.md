@@ -84,8 +84,8 @@ Answers stored as SHA-256 hashes of normalized text (lowercased, whitespace-stri
 | ID | Question | Canonical answer | Category |
 |---|---|---|---|
 | `sibling-first` | "Which sibling was named first?" | *(local seed file)* | family-ai |
-| `mother-name` | "What is my mother's name?" | *(local seed file)* | family-human |
-| `current-mos` | "What is my current MOS?" | *(local seed file)* | [service] |
+| `family-q` | *(a family question — local seed file)* | *(local seed file)* | family-human |
+| `work-code` | *(a question about his work — local seed file)* | *(local seed file)* | work |
 
 Three is enough for v1. More can be added via a tool or by Zeke directly.
 

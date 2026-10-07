@@ -156,7 +156,7 @@ def f9_clipboard() -> dict:
 
 
 def f9b_close_app() -> dict:
-    """Close notepad after F9 to keep system tidy (per Zeke notes)."""
+    """Close notepad after F9 to keep system tidy (per Zeke's notes)."""
     print("[F9b] cu_close_app cleanup")
     r = _tool_call("cu_close_app", {"name": "notepad", "target": "all"}, timeout=15)
     inner = r.get("result") or {}

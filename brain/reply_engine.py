@@ -280,7 +280,7 @@ def run_ava(
                 # MEMORY/GOAL/ACTION blocks that scrub_visible_reply targets.
                 # Running them through the scrubber is unsafe: it strips short
                 # final lines that lack terminal punctuation. The weather
-                # handler's "[town]: 55°F" got trimmed to empty and the
+                # handler's "Hometown: 55°F" got trimmed to empty and the
                 # caller saw "I'm here." (Phase B retry 2026-05-05). Skip the
                 # scrub for voice command responses; trust the handler.
                 try:

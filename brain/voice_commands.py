@@ -1078,7 +1078,7 @@ def _cmd_point_at(text, m, g):
 
 # ── mem0 memory commands ─────────────────────────────────────────────────────
 
-@_builtin(r"\bwhat do you (?:remember|know) about me\b|\bwhat do you (?:remember|know) about (?:zeke|Zeke)\b")
+@_builtin(r"\bwhat do you (?:remember|know) about me\b|\bwhat do you (?:remember|know) about (?:zeke)\b")
 def _cmd_remember_me(text, m, g):
     am = g.get("_ava_memory")
     if am is None or not getattr(am, "available", False):

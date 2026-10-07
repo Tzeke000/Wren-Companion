@@ -14,9 +14,9 @@ GENERIC_PROFILE_PHRASES = {
     "at the camera",
     "in front of the camera",
 }
-PROTECTED_PROFILE_KEYS = {"zeke", "Zeke", "creator", "your_creator"}
+PROTECTED_PROFILE_KEYS = {"zeke", "creator", "your_creator"}
 DEFAULT_ALIASES = {
-    "zeke": ["zeke", "Zeke", "creator", "your_creator", "your creator"],
+    "zeke": ["zeke", "creator", "your_creator", "your creator"],
     "Mom": ["Mom", "mom", "my mom", "my_mom", "mother", "my mother"],
 }
 

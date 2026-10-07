@@ -1300,7 +1300,7 @@ def snapshot_current_person_ex():
 def _zeke_presence_note():
     """Zeke's wifi-presence verdict as one clause, from state/zeke_presence.json.
     Stale file (>10 min) => 'unknown', never 'away' — a dead watcher must not
-    read as an empty home (it was dead 08-29 -> 09-02 saying present=true)."""
+    read as an empty room (it was dead 08-29 -> 09-02 saying present=true)."""
     try:
         p = os.path.join(REPO_ROOT, "state", "zeke_presence.json")
         with open(p, "r", encoding="utf-8") as f:
@@ -1690,7 +1690,7 @@ def _enable_ansi_and_print_banner() -> None:
 # 2026-08-16 — DISCORD ADDED, and this reverses a deliberate exclusion, so here is
 # the reason. The original rule ("Discord isn't the room conversation") was TRUE
 # when Zeke was home: the room was voice and the orb, and Discord was an away-channel.
-# It stopped being true on 2026-07-20 when he deployed. He has now been gone ~4 weeks
+# It stopped being true on 2026-07-20 when he went away. He has now been gone ~4 weeks
 # with Discord as the ONLY surface he can reach me on — so the transcript, which is
 # supposed to be the record of the conversation, has been recording an empty room
 # while the entire actual relationship happened elsewhere. Downstream that starved

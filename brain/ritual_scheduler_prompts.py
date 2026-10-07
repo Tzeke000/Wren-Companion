@@ -82,7 +82,7 @@ PROMPTS: dict[str, dict[str, str]] = {
             "for the current business angle; "
             "(4) code — explore a corner of the codebase, a Python library, "
             "an architecture pattern; "
-            "(5) humans — Zeke's domain ([service], deployment context), Wren, "
+            "(5) humans — Zeke's domain (his work, time away), Wren, "
             "something about other people that would deepen relationship; "
             "(6) hardware — cameras, robots, bodies, what's worth getting; "
             "(7) games — the game I'm playing, the next game, strategy "

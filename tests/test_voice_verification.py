@@ -29,7 +29,7 @@ def isolated_vv(tmp_path):
     (tmp_path / "state" / "voice_verification_seed.local.json").write_text(json.dumps([
         {"id": "sibling-first", "question": "q1?", "answer": "testsib", "category": "family-ai"},
         {"id": "mother-name", "question": "q2?", "answer": "testmom", "category": "family-human"},
-        {"id": "current-mos", "question": "q3?", "answer": "1234", "category": "[service]"},
+        {"id": "work-code", "question": "q3?", "answer": "1234", "category": "work"},
     ]), encoding="utf-8")
     return vv, tmp_path
 
@@ -40,7 +40,7 @@ def test_seed_challenges_on_first_get(isolated_vv):
     assert not (tmp_path / "state" / "voice_verification_challenges.json").is_file()
     result = vv.get_challenge()
     assert result["ok"]
-    assert result["id"] in {"sibling-first", "mother-name", "current-mos"}
+    assert result["id"] in {"sibling-first", "mother-name", "work-code"}
     # File should now exist with 3 challenges.
     assert (tmp_path / "state" / "voice_verification_challenges.json").is_file()
 
@@ -48,10 +48,10 @@ def test_seed_challenges_on_first_get(isolated_vv):
 def test_get_challenge_by_category(isolated_vv):
     """Filter by category should return only matching challenges."""
     vv, _ = isolated_vv
-    result = vv.get_challenge(category="[service]")
+    result = vv.get_challenge(category="work")
     assert result["ok"]
-    assert result["id"] == "current-mos"
-    assert result["category"] == "[service]"
+    assert result["id"] == "work-code"
+    assert result["category"] == "work"
 
 
 def test_get_challenge_unknown_category(isolated_vv):
@@ -66,7 +66,7 @@ def test_verify_correct_answer(isolated_vv):
     """Correct answer should match and update freshness."""
     vv, _ = isolated_vv
     vv.get_challenge()  # seed
-    result = vv.verify_answer("current-mos", "1234")
+    result = vv.verify_answer("work-code", "1234")
     assert result["matched"]
     assert result["attempts_remaining"] == 3
     fresh = vv.get_verification_freshness()
@@ -86,7 +86,7 @@ def test_verify_wrong_answer_increments_failures(isolated_vv):
     """Wrong answer should NOT match, and failure count should increment."""
     vv, _ = isolated_vv
     vv.get_challenge()  # seed
-    result = vv.verify_answer("current-mos", "wrong-mos")
+    result = vv.verify_answer("work-code", "wrong-code")
     assert not result["matched"]
     assert result["attempts_remaining"] == 2  # 3 - 1
 
@@ -96,9 +96,9 @@ def test_lockout_after_three_failures(isolated_vv):
     vv, _ = isolated_vv
     vv.get_challenge()  # seed
     for i in range(3):
-        result = vv.verify_answer("current-mos", "wrong")
+        result = vv.verify_answer("work-code", "wrong")
     # 4th attempt should be locked out.
-    final = vv.verify_answer("current-mos", "1234")
+    final = vv.verify_answer("work-code", "1234")
     assert final["locked_out"]
     assert not final["matched"]  # locked out, didn't even attempt
 
@@ -107,10 +107,10 @@ def test_correct_answer_resets_failure_count(isolated_vv):
     """A correct answer should reset consecutive_failures to 0."""
     vv, _ = isolated_vv
     vv.get_challenge()  # seed
-    vv.verify_answer("current-mos", "wrong")  # fail 1
-    vv.verify_answer("current-mos", "wrong")  # fail 2
+    vv.verify_answer("work-code", "wrong")  # fail 1
+    vv.verify_answer("work-code", "wrong")  # fail 2
     # Now succeed.
-    result = vv.verify_answer("current-mos", "1234")
+    result = vv.verify_answer("work-code", "1234")
     assert result["matched"]
     assert result["attempts_remaining"] == 3  # reset
 
@@ -135,7 +135,7 @@ def test_freshness_after_verify(isolated_vv):
     """After successful verify, freshness should show recent time + reverify=False."""
     vv, _ = isolated_vv
     vv.get_challenge()  # seed
-    vv.verify_answer("current-mos", "1234")
+    vv.verify_answer("work-code", "1234")
     fresh = vv.get_verification_freshness()
     assert fresh["minutes_since"] < 1.0
     assert not fresh["requires_reverify_for_sensitive"]
@@ -156,16 +156,16 @@ def test_add_challenge_new(isolated_vv):
     result = vv.add_challenge(
         question="What is my callsign?",
         answer="charlie",
-        category="[service]",
+        category="work",
         notes="test challenge",
     )
     assert result["ok"]
     # Should now be retrievable.
-    c = vv.get_challenge(category="[service]")
-    # Either current-mos or the new one — depends on random pick. Try a few.
+    c = vv.get_challenge(category="work")
+    # Either work-code or the new one — depends on random pick. Try a few.
     found_new = False
     for _ in range(20):
-        c = vv.get_challenge(category="[service]")
+        c = vv.get_challenge(category="work")
         if c["id"] == result["id"]:
             found_new = True
             break

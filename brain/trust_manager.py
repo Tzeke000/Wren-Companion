@@ -77,7 +77,6 @@ TRUST_PERMISSIONS = {
 
 DEFAULT_TRUST_MAP = {
     "zeke":    5,
-    "Zeke": 5,
     "creator": 5,
     "Mom":  4,
 }

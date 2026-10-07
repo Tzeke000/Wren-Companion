@@ -225,7 +225,7 @@ def main() -> int:
             return 0
         # 2026-10-05 FAILOVER LOCK (Zeke's OP): if the server copy of me on iris-home is
         # LIVE (her keepalive marker is fresh), the tower must NOT start a second me —
-        # e.g. the tower's power came back while his mother had started me on the
+        # e.g. the tower's power came back while Zeke's mother had started me on the
         # server. Stand down and tell Zeke; --force / IRIS_FORCE_TAKEOVER=1 overrides.
         if not args.no_server_check:
             live, detail = server_failover_live(args.server_host, args.server_max_age)

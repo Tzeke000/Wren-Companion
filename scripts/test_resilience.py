@@ -89,14 +89,14 @@ with tempfile.TemporaryDirectory(dir=str(ROOT / "scratch" / "tmp")) as td:
     before = rs.ACCESS_JSON.read_text(encoding="utf-8")
     sent = []
     rs.dm_zeke = lambda text: sent.append(text) or True
-    rs.discord_username = lambda uid: "his mother"
+    rs.discord_username = lambda uid: "TestSender"
     rs.port_ok = lambda port=5876: True
     sup = rs.Supervisor({})
     sup._next_vec = float("inf")   # skip the vector watch in this test
     sup.tick()
     sup.tick()
     check("exactly one DM for one new code", len(sent) == 1, str(len(sent)))
-    check("DM names the sender + code", sent and "his mother" in sent[0] and "c0ffee" in sent[0])
+    check("DM names the sender + code", sent and "TestSender" in sent[0] and "c0ffee" in sent[0])
     check("access.json untouched", rs.ACCESS_JSON.read_text(encoding="utf-8") == before)
 
 print("== D. relay other approved DMs (pure) ==")

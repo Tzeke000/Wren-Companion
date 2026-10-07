@@ -282,12 +282,12 @@ def run_b7(app: str = "obs64") -> int:
 
 
 def run_b8() -> int:
-    print("[B8] open Chrome, search [town] weather, read result")
+    print("[B8] open Chrome, search local weather, read result")
     started = time.time()
     r1 = _direct_cu("cu_open_app", {"app_name": "chrome"})
     print(f"  open chrome: {r1.get('ok')}")
     time.sleep(4.0)
-    r2 = _direct_cu("cu_type", {"window": "Chrome", "text": "weather in [town]{ENTER}"})
+    r2 = _direct_cu("cu_type", {"window": "Chrome", "text": "weather near me{ENTER}"})
     print(f"  type+enter: {r2.get('ok')}")
     time.sleep(5.0)
     r3 = _direct_cu("cu_read_window", {"window": "Chrome"})

@@ -1,6 +1,6 @@
 # SELF_ASSESSMENT: I turn "a face I don't know while Zeke is away" into evidence — head on them, a frame burst, a face crop and a small contact sheet cognition can safely look at — so the study happens the same way every time instead of being improvised at wake.
 """
-study_face — Zeke's standing rule (Discord, 2026-09-02, from [a course]):
+study_face — Zeke's standing rule (Discord, 2026-09-02):
 
     "with your eyes a unrecognized face is kinda more important when I'm not
      in the room. My phone not connected to the WiFi and you see a face you

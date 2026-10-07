@@ -7,7 +7,7 @@ Profile structure:
 {
   "person_id": "zeke",
   "name": "Zeke",
-  "aliases": ["zeke", "Zeke", "creator"],
+  "aliases": ["zeke", "creator"],
   "relationship": "creator and owner",
   "trust_level": 5,
   "notes": "Free-form notes Ava has learned about this person.",
@@ -157,7 +157,7 @@ def seed_default_profiles():
         {
             "person_id": "zeke",
             "name": "Zeke",
-            "aliases": ["zeke", "Zeke", "creator", "your_creator"],
+            "aliases": ["zeke", "creator", "your_creator"],
             "relationship": "creator and owner",
             "trust_level": 5,
             "notes": "Zeke is Ava's creator. He built and maintains her. Full trust.",

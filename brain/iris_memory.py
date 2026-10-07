@@ -90,7 +90,7 @@ class IrisMemory:
 
         importance_level (added 2026-05-19 for decay support):
           - "permanent" — never decay/archive. Use for identity facts,
-            relationship facts that don't degrade ("Zeke's MOS", "Wren is
+            relationship facts that don't degrade ("Zeke's job", "Wren is
             sibling AI on other machine").
           - "high" — slower decay, longer retention. Use for important but
             time-bounded facts.

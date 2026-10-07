@@ -5,13 +5,11 @@
   "old_memory_path": "",
   "protected_profiles": [
     "zeke",
-    "Zeke",
     "creator",
     "your creator"
   ],
   "aliases": {
     "zeke": [
-      "Zeke",
       "creator",
       "your creator"
     ],

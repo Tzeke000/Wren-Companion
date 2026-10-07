@@ -9,7 +9,7 @@ BASE = Path(__file__).resolve().parent
 PROFILES_DIR = BASE / "profiles"
 FACES_DIR = BASE / "faces"
 
-ROGUE_PROFILES = ["do_you", "thats_correct_ava", "who_created_you", "Zeke"]
+ROGUE_PROFILES = ["do_you", "thats_correct_ava", "who_created_you"]
 
 for slug in ROGUE_PROFILES:
     path = PROFILES_DIR / f"{slug}.json"

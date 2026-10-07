@@ -41,7 +41,7 @@ def _greet_player(params: dict[str, Any], g: dict[str, Any]) -> dict[str, Any]:
 
     base = Path(g.get("BASE_DIR") or ".")
     known = _load_known_players(base)
-    is_zeke = username.lower() in ("zeke", "tzeke000", "Zeke")
+    is_zeke = username.lower() in ("zeke", "tzeke000")
     seen_before = username in known
 
     if is_zeke:

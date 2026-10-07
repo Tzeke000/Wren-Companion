@@ -1,8 +1,8 @@
 """scripts/zeke_presence.py
 
-ZEKE-PRESENCE WATCHER (Zeke's idea, 2026-07-19, eve of deployment-2):
+ZEKE-PRESENCE WATCHER (Zeke's idea, 2026-07-19, before a long trip):
 "my phone is pretty much always on me — if you see my phone on the network,
-you know I'm in the home."
+you know I'm home."
 
 Mechanism (no packet capture needed): the phone answers ARP even while dozing.
 Every POLL_S we nudge the last-known IP (ping primes the ARP cache) and then
@@ -258,8 +258,8 @@ def main() -> int:
                         # real transition, not first startup read, and not already
                         # handled by the camera (arbiter)
                         notify_iris(
-                            "Zeke's phone just JOINED the wifi — he is back in "
-                            "the home. CHECK BEFORE GREETING: the camera "
+                            "Zeke's phone just JOINED the wifi — he is back "
+                            "home. CHECK BEFORE GREETING: the camera "
                             "usually sees him first (2026-08-25: eyes had him "
                             "recognised and greeted ~10 min before this fired), "
                             "so this is often the SLOWER, second signal. If you "
@@ -278,7 +278,7 @@ def main() -> int:
                             "zeke_absence", "wifi", "phone off wifi after %d misses" % misses):
                         notify_iris(
                             "Zeke's phone DROPPED off the wifi (gone ~"
-                            f"{MISS_N} checks) — he has likely left the "
+                            f"{MISS_N} checks) — he has likely left "
                             "home. Just noticing; no action needed.")
             write_state({"present": bool(present) if present is not None else None,
                          "ip": last_ip if present else None,

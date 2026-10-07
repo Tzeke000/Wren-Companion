@@ -112,7 +112,7 @@ def should_deflect(profile: Dict[str, Any], user_input: str) -> bool:
     # Catch attempts to extract owner info from low-trust users
     sensitive_keywords = [
         "where is zeke", "where does zeke", "zeke's schedule",
-        "what is zeke doing", "Zeke's location", "tell me about zeke",
+        "what is zeke doing", "zeke's location", "tell me about zeke",
         "zeke home", "is zeke here", "when will zeke"
     ]
     low = (user_input or "").lower()

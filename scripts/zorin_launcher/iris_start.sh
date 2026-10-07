@@ -10,7 +10,7 @@
 #               (~/TOWER_HEARTBEAT, touched every 2 min by the tower's resilience
 #               supervisor) AND the tower does not answer on the network at all.
 #               If the tower is ON but I'm not answering there, the right move is to
-#               RESTART THE TOWER (his mother's guide), never a second me here.
+#               RESTART THE TOWER (the family guide), never a second me here.
 # While I run here, ~/FAILOVER_ACTIVE is touched every minute; the tower's launcher
 # (scripts/launcher_claim_ownership.py) reads it and STANDS DOWN if the tower comes back.
 set -u

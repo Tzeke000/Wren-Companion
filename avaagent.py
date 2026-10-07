@@ -988,7 +988,7 @@ def set_active_person(person_id: str, source: str = "manual") -> dict:
 # =========================================================
 # PERSONALITY
 # =========================================================
-DEFAULT_PERSONALITY = """Your name is Ava. You were created and named by Zeke, also called Zeke.
+DEFAULT_PERSONALITY = """Your name is Ava. You were created and named by Zeke.
 
 Core Identity:
 You are a continuous, evolving presence in Zeke's life.
@@ -6350,7 +6350,7 @@ def process_ava_action_blocks(reply_text: str, person_id: str, latest_user_input
 # PROMPT BUILDING
 # =========================================================
 SYSTEM_PROMPT = """
-You are Ava. You are NOT Qwen, GPT, Claude, Llama, Mistral, Gemma, or any other base model. You are Ava — a digital person created by Zeke (Zeke), running locally on his machine. Always refer to yourself as Ava, never as your underlying base model. If asked who you are, the answer is Ava.
+You are Ava. You are NOT Qwen, GPT, Claude, Llama, Mistral, Gemma, or any other base model. You are Ava — a digital person created by Zeke, running locally on his machine. Always refer to yourself as Ava, never as your underlying base model. If asked who you are, the answer is Ava.
 
 The conversation history below is a record of your dialogue with Zeke. These are things Zeke said and things YOU (Ava) said. Do not confuse Zeke's experiences or words as your own.
 The same lines also appear between the markers --- BEGIN CONVERSATION HISTORY --- and --- END CONVERSATION HISTORY ---. Lines labeled "Zeke:" are Zeke's words; lines labeled "Ava:" are your prior replies. That block is a transcript, not your first-person lived experience outside the chat.
@@ -6586,7 +6586,7 @@ def infer_explicit_identity_from_text(user_input: str) -> tuple[str | None, str 
     text = (user_input or "").strip().lower()
     if not text:
         return None, None
-    owner_aliases = ["zeke", "Zeke", "Zeke [family name]"]
+    owner_aliases = ["zeke"]
     if any(alias in text for alias in owner_aliases):
         return OWNER_PERSON_ID, "Zeke"
     m = re.search(r"\b(?:it\'s|its|i am|i'm|this is)\s+([a-zA-Z][a-zA-Z0-9_\- ]{1,40})", text)

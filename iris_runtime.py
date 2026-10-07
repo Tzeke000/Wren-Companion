@@ -3058,7 +3058,7 @@ def voice_verification_get_challenge(category: str = "") -> dict:
     sensitive action when verification is stale.
 
     Args:
-        category: optional filter (e.g., "[service]", "family-ai", "family-human").
+        category: optional filter (e.g., "work", "family-ai", "family-human").
                   Empty string = pick from all categories.
 
     Returns: {ok, id, question, category, notes} — answer is NOT included.

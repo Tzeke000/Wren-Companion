@@ -102,3 +102,7 @@ models/pose/*.pt
 notes/
 *.local.md
 *.local.json
+*.local.txt
+apps/ava-control/dev/room.jpg
+*.bak
+*.bak_*

@@ -1,6 +1,6 @@
 """Resilience supervisor — self-healing for the month Zeke is away.
 
-Zeke 2026-10-05 (going on an OP ~early November, mostly offline): "go ahead and do
+Zeke 2026-10-05 (going away for a while, mostly offline): "go ahead and do
 2, 3 and 5." Three watches in ONE daemon thread inside the runtime, each with its own
 retry budget so a heal can never become a loop:
 
@@ -743,8 +743,8 @@ class Supervisor:
                           f"with the discord reply tool, chat_id {cid}"
                           + (f" (message {m['id']} has {m['attachments']} attachment(s): "
                              f"download_attachment chat_id {cid} message_id {m['id']})" if m["attachments"] else "")
-                          + ". Then chat_reply this request with a one-line log. If this is his mother, "
-                            "open profiles/his mother/ first; Zeke's whereabouts are HIS to share.]" + chr(10))
+                          + ". Then chat_reply this request with a one-line log. If this is Zeke's mother, "
+                            "open her card under profiles/ first; Zeke's whereabouts are HIS to share.]" + chr(10))
                 try:
                     from brain import iris_chat
                     rid = iris_chat.submit(header + (m["text"] or "(no text — attachment only)"))

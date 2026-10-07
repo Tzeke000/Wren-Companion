@@ -154,7 +154,7 @@ def hint_for_introspection(*, include_weather: bool = True) -> str:
     """Short physical-context hint for system prompts.
 
     Examples:
-      "It's evening on a Tuesday in spring. [town]: 78°F."
+      "It's evening on a Tuesday in spring. Hometown: 78°F."
       "Late-night Saturday. Winter. (Weather unavailable.)"
     """
     s = snapshot(include_weather=include_weather)

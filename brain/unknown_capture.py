@@ -74,7 +74,7 @@ CAPTURE_TIMEOUT_S = 25.0  # give up waiting for the loop to finish saving
 
 _POLL_S = 0.5
 
-# ── Zeke-away rule (Zeke, Discord, 2026-09-02, from [a course]) ──────────────
+# ── Zeke-away rule (Zeke, Discord, 2026-09-02) ──────────────
 # "with your eyes a unrecognized face is kinda more important when I'm not in
 #  the room. My phone not connected to the WiFi and you see a face you don't
 #  know — you should study it."

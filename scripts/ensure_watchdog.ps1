@@ -8,7 +8,7 @@
 #   have silently ended Iris's ability to restart herself: she'd write the flag,
 #   nobody would read it, and she'd believe she had asked.
 #   iris_runtime.py's own liveness check even says "Tell Zeke to start it" - and Zeke
-#   is away on operation for ~a month.
+#   is away for ~a month.
 #
 # WHY NOT JUST RE-ENABLE Iris-Keepalive:
 #   iris_keepalive.ps1 does contain Start-Watchdog and was clearly the intended
