@@ -52,6 +52,13 @@ def log(msg: str) -> None:
         f.write(line + "\n")
 
 
+# --cutover (2026-10-07, the move to the server): park only my COGNITION on the tower. The tower
+# stays a node: the app (my voice player + Zeke's door), the mic source, the post-office (Wren's
+# lifeline), presence, wire-pod and the Vector daemons (they hold the robot until the Vector move)
+# keep running. The tower's own mouth/voice daemon go: my voice lives on the server now.
+CUTOVER_KEEP_STAGES = ("orb app", "vector nerves", "vector brain", "little pilot")
+
+
 def matches(stage, p) -> bool:
     try:
         n = (p.info.get("name") or "").lower()
@@ -66,6 +73,7 @@ def matches(stage, p) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--arm", action="store_true", help="actually kill; without it this is a dry run")
+    ap.add_argument("--cutover", action="store_true", help="park cognition only; keep the app, mic source, post-office and Vector daemons")
     ap.add_argument("--reason", default="Zeke asked for a shutdown")
     a = ap.parse_args()
     log("=== full_shutdown " + ("ARMED" if a.arm else "DRY RUN") + " - " + a.reason)
@@ -75,7 +83,10 @@ def main() -> int:
                            capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
         log("restart_switch off -> rc=" + str(r.returncode) + " " + (r.stdout or "").strip().replace("\n", " | ")[:200])
 
-    for stage in STAGES:
+    stages = [st for st in STAGES if not (a.cutover and st[0] in CUTOVER_KEEP_STAGES)]
+    if a.cutover:
+        log("CUTOVER mode: keeping " + ", ".join(CUTOVER_KEEP_STAGES))
+    for stage in stages:
         victims = [p for p in psutil.process_iter(["pid", "name", "cmdline"]) if matches(stage, p)]
         for p in victims:
             log(("kill " if a.arm else "would kill ") + stage[0] + " pid " + str(p.pid))
@@ -90,7 +101,7 @@ def main() -> int:
     if a.arm:
         time.sleep(2.0)
         left = [p.pid for p in psutil.process_iter(["pid", "name", "cmdline"])
-                if any(matches(s, p) for s in STAGES)]
+                if any(matches(s, p) for s in stages)]
         log("=== sweep done. left running on purpose: post-office, presence task, wire-pod, ollama. "
             + ("stragglers: " + str(left) if left else "no stragglers") + ". goodnight. ===")
     return 0
