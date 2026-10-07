@@ -21,6 +21,33 @@ const DEFAULT_HEADER: &str = r"D:\Wren-Companion\state\secrets\pve_tower.hdr";
 const ALLOWED_VMS: [u32; 3] = [100, 101, 102];
 const CREATE_NO_WINDOW: u32 = 0x0800_0000; // background helpers must never flash a console over his game
 
+// ── My voice plays through THIS app (Zeke 2026-10-07: "only through the app", "the app should stay up
+// if you're on"). My mouth runs on the server's V100 and streams PCM to TCP 8775; the app owns the
+// player for exactly its own lifetime: scripts/audio_sink.py starts hidden with the app and is killed
+// (process TREE - the venv pythonw stub re-execs a child) when the app exits. Allowlist + firewall
+// rule keep it server-only.
+const SINK_PYTHONW: &str = r"D:\Wren-Companion\.venv\Scripts\pythonw.exe";
+const SINK_SCRIPT: &str = r"D:\Wren-Companion\scripts\audio_sink.py";
+
+struct VoicePlayer(std::sync::Mutex<Option<std::process::Child>>);
+
+fn start_voice_player() -> Option<std::process::Child> {
+    Command::new(SINK_PYTHONW)
+        .arg(SINK_SCRIPT)
+        .current_dir(r"D:\Wren-Companion")
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .ok()
+}
+
+fn stop_voice_player(child: &mut std::process::Child) {
+    let _ = Command::new("taskkill.exe")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = child.wait();
+}
+
 /// `"key": "value"` from the private config — a tiny flat-JSON read, no serde dependency needed.
 fn private(key: &str) -> String {
     let path = std::env::var("IRIS_PRIVATE_CONFIG").unwrap_or_else(|_| PRIVATE_CFG.to_string());
@@ -161,7 +188,19 @@ fn main() {
                 let _ = w.set_focus();
             }
         }))
+        .manage(VoicePlayer(std::sync::Mutex::new(start_voice_player())))
         .invoke_handler(tauri::generate_handler![server_vms, server_vm_power, server_reach, server_open, server_start_iris])
-        .run(tauri::generate_context!())
-        .expect("error while running Iris Control");
+        .build(tauri::generate_context!())
+        .expect("error while building Iris Control")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(vp) = app.try_state::<VoicePlayer>() {
+                    if let Ok(mut g) = vp.0.lock() {
+                        if let Some(mut child) = g.take() {
+                            stop_voice_player(&mut child);
+                        }
+                    }
+                }
+            }
+        });
 }
