@@ -2078,7 +2078,11 @@ async def main():
             boundary = asyncio.Event()
             tasks = [
                 asyncio.create_task(stream_consumer(client, turn, boundary)),
-                asyncio.create_task(terminal_reader(queue, loop)),
+                # 2026-10-07 server port: under systemd/nohup stdin is not a tty, input()
+                # hits EOF at once and the reader queued "quit" - the host exited the
+                # moment it started. Only read the console when there IS one.
+                *([asyncio.create_task(terminal_reader(queue, loop))]
+                  if (sys.stdin is not None and sys.stdin.isatty()) else []),
                 asyncio.create_task(orb_reader(queue, loop, start_ts)),
                 # Self-heal the iris MCP attach (reconnect instead of human restart).
                 asyncio.create_task(_ensure_iris_attached(client)),

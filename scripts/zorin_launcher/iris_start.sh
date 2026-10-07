@@ -90,6 +90,8 @@ touch "$ACTIVE"
 KEEP=$!
 trap 'kill "$KEEP" 2>/dev/null; rm -f "$ACTIVE"' EXIT
 echo "Starting Iris here ($ROLE). This window IS her — leave it open."
+# the launcher refuses a LIVE start without this pass (scripts/server/start_iris_linux.sh)
+export IRIS_START_GATE="$ROLE"
 "$SCRIPT"
 RC=$?
 echo "Iris exited (rc=$RC)."

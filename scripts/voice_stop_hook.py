@@ -47,7 +47,9 @@ try:
 except Exception:
     pass
 
-ROOT = Path(r"D:\Wren-Companion")
+# 2026-10-07 server port: the repo root is wherever this file lives (scripts/ is one level
+# under it) — was a D: literal, which made the hook blind on Linux.
+ROOT = Path(__file__).resolve().parents[1]
 _LOCK_PATH = ROOT / ".tmp" / "stop_hook.lock"
 
 
