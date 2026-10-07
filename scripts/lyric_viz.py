@@ -726,7 +726,7 @@ LYRIC_MODELS: "list[tuple[tuple[str, ...], tuple[str, ...]]]" = [
     (("police", "cop", "cops", "siren"), ("police_car",)),
     (("motorcycle", "motorbike", "bike"), ("cartoony_purple_motorcycle",)),
     (("car", "cars", "drive", "driving", "drove", "engine", "wheel",
-      "wheels", "highway", "road"), ("red_car", "sports_car", "car",
+      "wheels", "highway", "road", "lot", "parking"), ("red_car", "sports_car", "car",
                                      "car_hatchback", "sports_car_2")),
     (("roof", "house", "home", "door", "window", "room", "walls", "wall"),
      ("fantasy_house", "house", "cabin_shed", "barn")),
@@ -746,6 +746,14 @@ LYRIC_MODELS: "list[tuple[tuple[str, ...], tuple[str, ...]]]" = [
     (("diamond", "diamonds", "jewel", "gem", "crystal", "glass", "ice"),
      ("diamond", "jewel", "gem_green", "crystal_1")),
     (("phone", "call", "called", "calling", "text", "texted"), ("phone",)),
+    # festival words (2026-10-07, "Hit a Bump": car -> lot -> gate -> DJs ->
+    # main stage). "dj" is 2 letters, so it is let past the <3 filter below.
+    (("gate", "gates", "entrance"), ("gate",)),
+    (("dj", "djs", "deejay", "stage", "festival", "rave", "club", "party"),
+     ("headphones", "boombox", "headphones_2")),
+    # ⚠ NOT midi_controller (a flat slab, reads EDGE-ON as a bar across the
+    # frame) and NOT the speaker stand (reads as a thin stick at this size) —
+    # both seen on the Hit a Bump contact sheets, 2026-10-07.
     (("music", "song", "sing", "singing", "sound", "beat", "bass", "speaker"),
      ("rolling_music_speaker_stand", "boombox", "stereo_furniture")),
     (("piano", "keys"), ("piano", "piano_2")),
@@ -765,6 +773,10 @@ LYRIC_MODELS: "list[tuple[tuple[str, ...], tuple[str, ...]]]" = [
       "fight", "fighting", "war", "sword", "shield", "armor", "helmet"),
      ("iris_spartan_plume", "iris_spartan_helm")),
 ]
+
+
+# 2-letter words that still name a thing (the <3 filter drops "in"/"to"/"a").
+SHORT_LYRIC_WORDS = ("dj",)
 
 
 # Words that mean "move the camera", not "change the object". Zeke 2026-08-29:
@@ -808,17 +820,24 @@ def lyric_model_schedule(lines, fps: int, beat_i, n_frames: int,
     for f, b in enumerate(beat_i):
         beat_start.setdefault(int(b), f)
     hits = []
+    # 2026-10-07: a word group that is SUNG REPEATEDLY (four "DJ" lines in a
+    # row) cycles through its models instead of showing the same object four
+    # times — repetition in the lyric is a build, the picture should move.
+    group_n: dict = {}
     for ln in lines:
         for w in ln:
             token = re.sub(r"[^a-z]", "", str(w.text).lower())
-            if len(token) < 3:
+            if len(token) < 3 and token not in SHORT_LYRIC_WORDS:
                 continue
-            for keys, models in LYRIC_MODELS:
+            for gi, (keys, models) in enumerate(LYRIC_MODELS):
                 if token in keys or (token.endswith("s")
                                      and token[:-1] in keys):
-                    pick = next((m for m in models if m in available), None)
-                    if pick:
-                        hits.append((float(w.start), pick, token))
+                    avail_m = [m for m in models if m in available]
+                    if avail_m:
+                        n_ = group_n.get(gi, 0)
+                        group_n[gi] = n_ + 1
+                        hits.append((float(w.start), avail_m[n_ % len(avail_m)],
+                                     token))
                     break
     # camera pushes are collected separately and applied on top of whatever
     # model is on screen at the time
@@ -2375,7 +2394,11 @@ class Renderer:
             # as one full rotation instead of a fold-and-return.
             mask = self._logo_mask
             lh, lw = mask.shape
-            ang = self._rot % (2 * np.pi)
+            # ★ 2026-10-07: was `self._rot` — the 09-14 is_flat fix computed the
+            # ROCKING angle into `spin` above, but this branch never read it, so
+            # the logo kept revolving edge-on (seen at 3.0/5.3/9.8 s on the Hit a
+            # Bump sheets). "Verified structurally" on 09-14; the pixels disagreed.
+            ang = spin % (2 * np.pi)
             c = np.cos(ang)
             back = c < 0
             fold = max(0.06, abs(c))
@@ -2948,9 +2971,6 @@ class Renderer:
         f = self.font(fs, self.style.font_lyrics)
         layer = Image.new("RGB", (self.W, self.H), (0, 0, 0))
         draw = ImageDraw.Draw(layer)
-        space = draw.textlength(" ", font=f)
-        widths = [draw.textlength(w, font=f) for w in words]
-        total = sum(widths) + space * (len(words) - 1)
         # SAFE ZONE (research 2026-08-28). TikTok's own UI covers the bottom
         # caption block and the right-hand action rail, so a full-width line at
         # the old 0.92 cap put ~97px of every long line UNDER the rail, and the
@@ -2960,49 +2980,82 @@ class Renderer:
         # several third-party sources, so --safe-overlay draws the box to check
         # against a real phone rather than trusting the number.
         wcap = 0.74 if self.safe_margins else 0.92
-        while total > self.W * wcap and fs > 18:
+
+        def _measure(fnt):
+            sp = draw.textlength(" ", font=fnt)
+            return sp, [draw.textlength(w, font=fnt) for w in words]
+
+        def _rows_for(sp, wds):
+            """1 row, or 2 rows split where the wider half is narrowest."""
+            one = sum(wds) + sp * (len(wds) - 1)
+            if not wrap or one <= self.W * wcap:
+                return [(0, len(wds))]
+            best, cut = None, 1
+            for c in range(1, len(wds)):
+                a_ = sum(wds[:c]) + sp * (c - 1)
+                b_ = sum(wds[c:]) + sp * (len(wds) - c - 1)
+                if best is None or max(a_, b_) < best:
+                    best, cut = max(a_, b_), c
+            return [(0, cut), (cut, len(wds))]
+
+        def _row_w(sp, wds, r):
+            return sum(wds[r[0]:r[1]]) + sp * (r[1] - r[0] - 1)
+
+        # 2026-10-07 ("Hit a Bump", 9:16): a 12-word line in a VERTICAL frame
+        # either ran off both edges (half-size test, font floor 18px) or shrank
+        # to ~20px on a 1920-tall frame — unreadable on a phone. Portrait frames
+        # now WRAP to two balanced rows before shrinking.
+        wrap = self.H > self.W and len(words) >= 4
+        space, widths = _measure(f)
+        rows = _rows_for(space, widths)
+        while max(_row_w(space, widths, r) for r in rows) > self.W * wcap                 and fs > 18:
             fs = int(fs * 0.9)
             f = self.font(fs, self.style.font_lyrics)
-            space = draw.textlength(" ", font=f)
-            widths = [draw.textlength(w, font=f) for w in words]
-            total = sum(widths) + space * (len(words) - 1)
-        x = (self.W - total) / 2
+            space, widths = _measure(f)
+            rows = _rows_for(space, widths)
         if self.safe_margins:
-            y = int(self.H * 0.70)
+            y0 = int(self.H * 0.70)
         else:
-            y = int(self.H * (0.78 if self.style.viz == "radial" else 0.66))
+            y0 = int(self.H * (0.78 if self.style.viz == "radial" else 0.66))
+        line_h = int(fs * 1.18)
+        # two rows grow UPWARD from the old baseline so the lower row never
+        # drops into the caption block
+        y0 -= line_h * (len(rows) - 1)
         accent = self.style.palette[self._pal_i % len(self.style.palette)]
         # REACTIVE LYRICS (Zeke 08-26: "the words also have audio
         # visualization on them"): every LETTER rides its own frequency band
         # (bounces with the spectrum), the active word swells with the bass.
-        xx = x
         letter_j = 0
-        for k, (w, wd) in enumerate(zip(words, widths)):
-            col = (accent if k == active else
-                   ((120, 120, 130) if not drop else accent))
-            if k == active and a.bass[i] > 0.05:
-                # bass-swollen active word (quantized size → font cache safe)
-                fs_a = int(fs * (1.0 + round(0.30 * a.bass[i] * 6) / 6))
-                fa = self.font(fs_a, self.style.font_lyrics)
-                wa = draw.textlength(w, font=fa)
-                cxw = xx + wd / 2
-                xa = cxw - wa / 2
-                for ch in w:
-                    band = a.bars[i, (letter_j * 3) % NBARS]
-                    dy = -band * fs * 0.35
-                    draw.text((xa, y + dy - (fs_a - fs) / 2), ch,
-                              font=fa, fill=col)
-                    xa += draw.textlength(ch, font=fa)
-                    letter_j += 1
-            else:
-                xc = xx
-                for ch in w:
-                    band = a.bars[i, (letter_j * 3) % NBARS]
-                    dy = -band * fs * (0.35 if k == active or drop else 0.20)
-                    draw.text((xc, y + dy), ch, font=f, fill=col)
-                    xc += draw.textlength(ch, font=f)
-                    letter_j += 1
-            xx += wd + space
+        for ri, r in enumerate(rows):
+            y = y0 + ri * line_h
+            xx = (self.W - _row_w(space, widths, r)) / 2
+            for k in range(r[0], r[1]):
+                w, wd = words[k], widths[k]
+                col = (accent if k == active else
+                       ((120, 120, 130) if not drop else accent))
+                if k == active and a.bass[i] > 0.05:
+                    # bass-swollen active word (quantized size → font cache safe)
+                    fs_a = int(fs * (1.0 + round(0.30 * a.bass[i] * 6) / 6))
+                    fa = self.font(fs_a, self.style.font_lyrics)
+                    wa = draw.textlength(w, font=fa)
+                    cxw = xx + wd / 2
+                    xa = cxw - wa / 2
+                    for ch in w:
+                        band = a.bars[i, (letter_j * 3) % NBARS]
+                        dy = -band * fs * 0.35
+                        draw.text((xa, y + dy - (fs_a - fs) / 2), ch,
+                                  font=fa, fill=col)
+                        xa += draw.textlength(ch, font=fa)
+                        letter_j += 1
+                else:
+                    xc = xx
+                    for ch in w:
+                        band = a.bars[i, (letter_j * 3) % NBARS]
+                        dy = -band * fs * (0.35 if k == active or drop else 0.20)
+                        draw.text((xc, y + dy), ch, font=f, fill=col)
+                        xc += draw.textlength(ch, font=f)
+                        letter_j += 1
+                xx += wd + space
         lyr = np.asarray(layer, np.float32)
         # CONTRAST SCRIM — a mask grown from the GLYPHS, not a rectangle bar,
         # so it hugs the text and is invisible as a shape. Runs ALWAYS now
