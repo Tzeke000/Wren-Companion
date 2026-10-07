@@ -40,7 +40,10 @@ os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = _espeak.get_library_path()
 os.environ.setdefault("ESPEAK_DATA_PATH", _espeak.get_data_path())
 
 # ── Must run from the StyleTTS2 repo root so local relative imports resolve ──────
-REPO = Path(r"D:\Wren-Companion\voice\StyleTTS2")
+# 2026-10-07 server port: paths from this file, not a D: literal (voice/ is under the repo root)
+_VOICE_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _VOICE_DIR.parent
+REPO = _VOICE_DIR / "StyleTTS2"
 os.chdir(str(REPO))
 sys.path.insert(0, str(REPO))
 
@@ -55,11 +58,11 @@ except Exception:
 # ── Config constants (tune via env vars) ─────────────────────────────────────────
 # ── MY voice — the iris_voice_reference.wav (ElevenLabs clone Zeke ear-approved,
 # made 2026-06-26). ALPHA=0.0 below = max timbre match → this clip IS the voice. ──
-REF_WAV = Path(r"D:\Wren-Companion\models\voice\iris_voice_reference.wav")
+REF_WAV = _REPO_ROOT / "models" / "voice" / "iris_voice_reference.wav"
 CONFIG_PATH = str(REPO / "Models" / "LibriTTS" / "config.yml")
 CKPT_PATH   = str(REPO / "Models" / "LibriTTS" / "epochs_2nd_00020.pth")
 
-HOST = "127.0.0.1"
+HOST = os.environ.get("WREN_VOICE_BIND", "127.0.0.1")
 PORT = int(os.environ.get("WREN_VOICE_PORT", "8769"))
 # 1.28 = Zeke's LOCKED pace (2026-06-13 A/B listen: picked 1.25 as closest, then
 # confirmed 1.28 from the 1.28/1.30 pair). speed>1 divides the predicted durations →
@@ -83,7 +86,7 @@ _STOP       = threading.Event()
 def _load_voice_emotion():
     """brain/voice_emotion.py loaded BY PATH (no sys.path edits near StyleTTS2's own `models`)."""
     import importlib.util as _ilu
-    spec = _ilu.spec_from_file_location("iris_voice_emotion", r"D:\Wren-Companion\brain\voice_emotion.py")
+    spec = _ilu.spec_from_file_location("iris_voice_emotion", str(_REPO_ROOT / "brain" / "voice_emotion.py"))
     mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -223,8 +226,77 @@ def _os_default_output_index():
     return None
 
 
+# ── Network audio sink (2026-10-07, Zeke: mouth+ears on the SERVER, sound out of the TOWER) ──
+# IRIS_AUDIO_SINK="host:port" sends every output block over TCP to scripts/audio_sink.py on the
+# tower instead of a local sound device. Small socket buffers keep me within ~0.3 s of what is
+# actually playing, so the amplitude envelope stays in sync and a barge-in abort() (= close the
+# socket) cuts the sound almost at once. Unset = the local device, exactly as before.
+_AUDIO_SINK = os.environ.get("IRIS_AUDIO_SINK", "").strip()
+
+
+class _NetSinkStream:
+    """Duck-types the bits of sounddevice.OutputStream this file uses."""
+
+    def __init__(self, target: str):
+        host, _, port = target.rpartition(":")
+        self._addr = (host or "127.0.0.1", int(port))
+        self._sock = None
+        self.active = False
+
+    def _connect(self):
+        import socket as _so
+        # options BEFORE connect so the small buffer is real from the first byte
+        s = _so.socket(_so.AF_INET, _so.SOCK_STREAM)
+        s.setsockopt(_so.SOL_SOCKET, _so.SO_SNDBUF, 16384)
+        s.setsockopt(_so.IPPROTO_TCP, _so.TCP_NODELAY, 1)
+        s.settimeout(5.0)
+        s.connect(self._addr)
+        s.settimeout(30.0)
+        hdr = json.dumps({"sr": SAMPLE_RATE, "ch": 1, "fmt": "f32le", "from": "iris-mouth"}) + "\n"
+        s.sendall(hdr.encode("utf-8"))
+        self._sock = s
+
+    def start(self):
+        if self._sock is None:
+            self._connect()
+        self.active = True
+
+    def write(self, blk):
+        data = np.ascontiguousarray(blk, dtype=np.float32).tobytes()
+        for attempt in (0, 1):
+            try:
+                if self._sock is None:
+                    self._connect()
+                self._sock.sendall(data)
+                return
+            except Exception:
+                self._drop()
+                if attempt:
+                    raise
+
+    def _drop(self):
+        s, self._sock = self._sock, None
+        self.active = False
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def abort(self):
+        self._drop()
+
+    def stop(self):
+        self._drop()
+
+    def close(self):
+        self._drop()
+
+
 def _resolve_output_device():
     global _LAST_DEF_ID
+    if _AUDIO_SINK:
+        return "net:" + _AUDIO_SINK
     if not FOLLOW_OS_DEFAULT:
         return None
     cur = _current_default_endpoint_id()
@@ -257,8 +329,11 @@ def _get_output_stream(dev_idx):
         except Exception:
             pass
         _OUT_STREAM = None
-    _OUT_STREAM = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                                  device=dev_idx)
+    if isinstance(dev_idx, str) and dev_idx.startswith("net:"):
+        _OUT_STREAM = _NetSinkStream(dev_idx[4:])
+    else:
+        _OUT_STREAM = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                                      device=dev_idx)
     _OUT_STREAM.start()
     _OUT_DEV = dev_idx
     return _OUT_STREAM
