@@ -32,6 +32,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -66,6 +67,16 @@ CHIPPER_EXE = Path(r"C:\Program Files\wire-pod\chipper\chipper.exe")
 WIREPOD_OFF_FLAG = _ROOT / "state" / "wirepod_deliberately_off.json"
 WIREPOD_GONE_S = 3 * 60           # Run-key autostarts can lag a minute or two after logon
 WIREPOD_BUDGET = (3, 6 * 3600)
+# F (2026-10-07, Zeke: "let's do 1 and make sure that's on the server as well"): the presence
+# watcher's ONLY launcher was a Windows-LOGON scheduled task, so any stack start without a fresh
+# logon left it dead (10-07 boot: state stale until I ran the task by hand).
+PRESENCE_SCRIPT = _ROOT / "scripts" / "zeke_presence.py"
+PRESENCE_STATE = _ROOT / "state" / "zeke_presence.json"
+PRESENCE_OFF_FLAG = _ROOT / "state" / "zeke_presence_deliberately_off.json"
+PRESENCE_TASK = "Iris-Zeke-Presence"
+PRESENCE_STALE_S = 6 * 60          # it writes last_check every 60 s; a /24 sweep can add ~30 s
+PRESENCE_GRACE_S = 3 * 60          # a freshly started watcher gets time for its first sweep
+PRESENCE_BUDGET = (3, 6 * 3600)
 
 _LOCK = threading.RLock()
 
@@ -149,6 +160,26 @@ def decide_wirepod(obs: dict, st: dict, now: float) -> dict:
     if not _budget_ok(st.setdefault("wirepod_heals", []), WIREPOD_BUDGET, now):
         return {"action": "stand_down", "why": "chipper still absent and the heal budget is spent"}
     return {"action": "start_chipper", "why": f"chipper.exe absent for {now - since:.0f}s"}
+
+
+def decide_presence(obs: dict, st: dict, now: float) -> dict:
+    """F. obs: off (flag), pids (watcher processes), youngest_age_s, state_age_s (None = no file).
+    Heals a watcher that is ABSENT, or present but not writing (hung) — restart = kill + start."""
+    if obs.get("off"):
+        return {"action": "none", "why": "presence watcher deliberately off (flag)"}
+    age = obs.get("state_age_s")
+    if age is not None and age < PRESENCE_STALE_S:
+        return {"action": "none", "why": f"last_check {age:.0f}s ago"}
+    pids = obs.get("pids") or []
+    young = obs.get("youngest_age_s")
+    if pids and young is not None and young < PRESENCE_GRACE_S:
+        return {"action": "none", "why": f"watcher started {young:.0f}s ago — first sweep grace"}
+    if not _budget_ok(st.setdefault("presence_heals", []), PRESENCE_BUDGET, now):
+        return {"action": "stand_down", "why": "presence watcher still stale and the heal budget is spent"}
+    stale = "no state file" if age is None else f"state {age:.0f}s stale"
+    if pids:
+        return {"action": "restart", "why": f"watcher running (pid {pids[0]}) but {stale} — hung"}
+    return {"action": "start", "why": f"watcher not running, {stale}"}
 
 
 def decide_orb(port_ok: bool, st: dict, now: float) -> dict:
@@ -322,6 +353,63 @@ def start_chipper() -> tuple[bool, str]:
     return rc == 0, out[-200:]
 
 
+def presence_procs() -> list[Any]:
+    try:
+        import psutil
+        me = os.getpid()
+        return [p for p in psutil.process_iter(["pid", "cmdline", "create_time"])
+                if p.pid != me and "zeke_presence.py" in " ".join(p.info.get("cmdline") or [])]
+    except Exception:
+        return []
+
+
+def observe_presence() -> dict:
+    procs = presence_procs()
+    now = time.time()
+    young = min((now - (p.info.get("create_time") or now)) for p in procs) if procs else None
+    try:
+        age = now - PRESENCE_STATE.stat().st_mtime
+    except Exception:
+        age = None
+    try:
+        off = bool(json.loads(PRESENCE_OFF_FLAG.read_text(encoding="utf-8")).get("off", True))
+    except FileNotFoundError:
+        off = False
+    except Exception:
+        off = True
+    return {"off": off, "pids": [p.pid for p in procs], "youngest_age_s": young, "state_age_s": age}
+
+
+def kill_presence() -> int:
+    n = 0
+    for p in presence_procs():
+        try:
+            p.kill()
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def start_presence() -> tuple[bool, str]:
+    """Windows: run the existing scheduled task (keeps the watcher OUTSIDE the stack's process
+    tree, so a stack restart doesn't take it down). Fallback / Linux: a detached child."""
+    if os.name == "nt":
+        rc, out = _run(["schtasks", "/run", "/tn", PRESENCE_TASK], 20)
+        if rc == 0:
+            return True, "schtasks: " + out.strip()[-120:]
+        py, flags = str(VENV_PY), NO_WINDOW | 0x00000200   # + CREATE_NEW_PROCESS_GROUP
+    else:
+        py, flags = sys.executable or "python3", 0
+    try:
+        subprocess.Popen([py, "-u", str(PRESENCE_SCRIPT)], cwd=str(_ROOT), stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags,
+                         start_new_session=(os.name != "nt"))
+        return True, f"popen {py}"
+    except Exception as e:  # noqa: BLE001
+        return False, repr(e)[:200]
+
+
 def port_ok(port: int = 5876) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=2.0):
@@ -452,6 +540,7 @@ class Supervisor:
                 self._next_vec = now + 60
                 out["vector"] = self._vector(st, now)
                 out["wirepod"] = self._wirepod(st, now)
+                out["presence"] = self._presence(st, now)
             out["relay"] = self._relay_other_dms(st, now)
             if now >= self._next_hb:                      # tower heartbeat every 120 s
                 self._next_hb = now + HEARTBEAT_EVERY_S
@@ -512,6 +601,30 @@ class Supervisor:
         _log("wirepod_heal", why=d["why"], ok=ok, info=info, ledger=aid)
         self._pending_verify.append((now + 60, "wirepod", aid))
         d.update(ok=ok, info=info, ledger=aid)
+        return d
+
+    # F
+    def _presence(self, st: dict, now: float) -> dict:
+        d = decide_presence(observe_presence(), st, now)
+        if d["action"] == "none":
+            st.pop("presence_stood_down", None)
+            return d
+        if d["action"] == "stand_down":
+            if not st.get("presence_stood_down"):       # log only — Zeke 10-07: no alert spam
+                st["presence_stood_down"] = now
+                _log("presence_stand_down", why=d["why"])
+            return d
+        st.setdefault("presence_heals", []).append(now)
+        aid = _ledger_open("presence_heal", d["action"] + ": " + d["why"],
+                           "state/zeke_presence.json written again after the heal",
+                           {"type": "file", "path": str(PRESENCE_STATE), "newer_than_open": True})
+        killed = kill_presence() if d["action"] == "restart" else 0
+        if killed:
+            time.sleep(2)
+        ok, info = start_presence()
+        _log("presence_heal", action=d["action"], why=d["why"], killed=killed, ok=ok, info=info, ledger=aid)
+        self._pending_verify.append((now + 150, "presence", aid))
+        d.update(ok=ok, info=info, killed=killed, ledger=aid)
         return d
 
     # B
@@ -674,5 +787,7 @@ def status() -> dict:
             "orb_heals_1h": sum(1 for t in st.get("orb_heals", []) if now - t < ORB_BUDGET[1]),
             "pairing_alerted": st.get("pairing_alerted", {}),
             "wirepod_heals_6h": sum(1 for t in st.get("wirepod_heals", []) if now - t < WIREPOD_BUDGET[1]),
-            "stood_down": {k: st[k] for k in ("vector_stood_down", "orb_stood_down", "wirepod_stood_down")
+            "presence_heals_6h": sum(1 for t in st.get("presence_heals", []) if now - t < PRESENCE_BUDGET[1]),
+            "stood_down": {k: st[k] for k in ("vector_stood_down", "orb_stood_down", "wirepod_stood_down",
+                                              "presence_stood_down")
                            if st.get(k)}}

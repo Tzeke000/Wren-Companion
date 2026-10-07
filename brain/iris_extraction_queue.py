@@ -24,6 +24,7 @@ State: state/iris_extraction_queue.jsonl
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -33,6 +34,21 @@ from typing import Any, Optional
 
 _LOCK = threading.Lock()
 _BASE: Path | None = None
+
+# 2026-10-07 (Zeke asked why yesterday's "[ZEKE PRESENCE @ 12:50]" lines reached me at 07:41 today):
+# the queue drains only after a successful inner-monologue thought, so it can sit for ~a day, and
+# the batch text carried NO DATE, so yesterday's times read as future times. And watcher/system log
+# lines were queued as things *Zeke said*. Three guards:
+#   1. machine log lines ("[ZEKE PRESENCE @ ..", "[TOWER SENTINEL ..", "[LLM-BRIDGE ..") never queue;
+#   2. entries older than STALE_S are marked "stale", not extracted (a day-old wifi blip is not a fact);
+#   3. every batch line carries its full date + time, so the extractor can't misplace it in time.
+_SYSTEM_LINE = re.compile(r"^\s*\[[A-Z][A-Z0-9 _/\-]{3,}(?:\s@|\s—|\s-|\])")
+STALE_S = 12 * 3600
+
+
+def is_system_line(text: str) -> bool:
+    """True for automated log/notification text (an ALL-CAPS bracket tag up front)."""
+    return bool(_SYSTEM_LINE.match(str(text or "")))
 
 
 def configure(base_dir: Path | str) -> None:
@@ -50,6 +66,8 @@ def enqueue(turn_text: str, person_id: str = "zeke",
             modality: str = "chat") -> str:
     """Append a pending turn for later fact extraction. Cheap."""
     if not turn_text or not turn_text.strip():
+        return ""
+    if is_system_line(turn_text):
         return ""
     entry = {
         "id": uuid.uuid4().hex[:12],
@@ -114,12 +132,31 @@ def drain_one_batch(g: dict[str, Any], max_turns: int = 8) -> dict[str, Any]:
       remaining: int
     """
     entries = _read_all()
+    now = time.time()
+    retired = 0
+    with _LOCK:
+        for e in entries:
+            if e.get("status") != "pending":
+                continue
+            if is_system_line(e.get("turn_text", "")):
+                e["status"], e["processed_ts"], retired = "skipped_system", now, retired + 1
+            elif now - float(e.get("ts") or now) > STALE_S:
+                e["status"], e["processed_ts"], retired = "stale", now, retired + 1
+        if retired:
+            _rewrite_all(entries)
     pending = [e for e in entries if e.get("status") == "pending"]
     if not pending:
-        return {"processed": 0, "facts_extracted": 0, "remaining": 0}
+        return {"processed": 0, "facts_extracted": 0, "remaining": 0, "retired": retired}
     batch = pending[:max_turns]
+
+    def _when(e: dict[str, Any]) -> str:
+        try:
+            return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(e.get("ts"))))
+        except Exception:
+            return "unknown time"
+
     combined = "\n\n".join(
-        f"[{e.get('modality','?')}] {e.get('person_id','?')}: {e.get('turn_text','')}"
+        f"[{e.get('modality','?')} · said {_when(e)}] {e.get('person_id','?')}: {e.get('turn_text','')}"
         for e in batch
     )
     facts: list[str] = []
@@ -205,6 +242,7 @@ def drain_one_batch(g: dict[str, Any], max_turns: int = 8) -> dict[str, Any]:
         "graph_nodes_added": graph_nodes_added,
         "graph_edges_added": graph_edges_added,
         "remaining": remaining,
+        "retired": retired,
     }
 
 

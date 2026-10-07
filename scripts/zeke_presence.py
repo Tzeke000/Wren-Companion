@@ -35,9 +35,12 @@ from pathlib import Path
 # 2026-09-06 (Zeke, mid-game): every ping/arp/tasklist child spawned a console window that FLASHED on his
 # screen and knocked full-screen Rainbow Six out of focus (the /24 sweep = ~254 flashes every ~5 min).
 # CREATE_NO_WINDOW on every subprocess call. Keep it on anything this watcher ever spawns.
-_NOWIN = 0x08000000  # subprocess.CREATE_NO_WINDOW
+_IS_WIN = os.name == "nt"
+_NOWIN = 0x08000000 if _IS_WIN else 0  # CREATE_NO_WINDOW (must be 0 on POSIX or Popen raises)
 
-REPO = Path(r"D:\Wren-Companion")
+# 2026-10-07 (Zeke: "make sure that's on the server as well"): path + ping/ARP are now
+# platform-aware so the same file runs on the tower (Windows) and iris-home (Linux).
+REPO = Path(__file__).resolve().parents[1]
 STATE = REPO / "state" / "zeke_presence.json"
 LOGF = REPO / "state" / "zeke_presence_log.jsonl"
 CONFIG = REPO / "state" / "zeke_presence_config.json"
@@ -82,6 +85,12 @@ def single_instance() -> bool:
 
 
 def _pid_alive(pid: int) -> bool:
+    if not _IS_WIN:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
     try:
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}"],
@@ -91,9 +100,15 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _ping_cmd(ip: str, timeout_ms: int) -> list:
+    if _IS_WIN:
+        return ["ping", "-n", "1", "-w", str(timeout_ms), ip]
+    return ["ping", "-c", "1", "-W", str(max(1, round(timeout_ms / 1000))), ip]
+
+
 def ping(ip: str, timeout_ms: int = 400) -> None:
     with open(os.devnull, "w") as dn:
-        subprocess.run(["ping", "-n", "1", "-w", str(timeout_ms), ip],
+        subprocess.run(_ping_cmd(ip, timeout_ms),
                        stdout=dn, stderr=dn, timeout=5, creationflags=_NOWIN)
 
 
@@ -102,7 +117,7 @@ def sweep() -> None:
     with open(os.devnull, "w") as dn:
         for i in range(1, 255):
             procs.append(subprocess.Popen(
-                ["ping", "-n", "1", "-w", "250", f"{SUBNET}.{i}"],
+                _ping_cmd(f"{SUBNET}.{i}", 250),
                 stdout=dn, stderr=dn, creationflags=_NOWIN))
     for p in procs:
         try:
@@ -114,18 +129,32 @@ def sweep() -> None:
 ROSTER = REPO / "state" / "network_roster.json"
 
 
+def _arp_pairs() -> list:
+    """[(ip, mac)] from the OS neighbour table, mac normalised to aa-bb-cc-dd-ee-ff.
+    Windows: `arp -a` ("10.0.0.22   aa-bb-cc-dd-ee-ff   dynamic").
+    Linux:   `ip neigh` ("10.0.0.22 dev ens18 lladdr aa:bb:cc:dd:ee:ff REACHABLE")."""
+    cmd = ["arp", "-a"] if _IS_WIN else ["ip", "neigh", "show"]
+    try:
+        raw = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=10, creationflags=_NOWIN).stdout
+    except Exception:
+        return []
+    pat = (r"\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f-]{17})" if _IS_WIN
+           else r"\s*(\d+\.\d+\.\d+\.\d+)\s.*?lladdr\s+([0-9a-f:]{17})")
+    out = []
+    for line in raw.lower().splitlines():
+        m = re.match(pat, line)
+        if m:
+            out.append((m.group(1), m.group(2).replace(":", "-")))
+    return out
+
+
 def _arp_table() -> dict:
     """{mac: ip} for the local /24 from the ARP table."""
     out = {}
-    try:
-        raw = subprocess.run(["arp", "-a"], capture_output=True, text=True,
-                             timeout=10, creationflags=_NOWIN).stdout
-    except Exception:
-        return out
-    for line in raw.lower().splitlines():
-        m = re.match(r"\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f-]{17})", line)
-        if m and m.group(1).startswith(SUBNET + ".") and m.group(2) != "ff-ff-ff-ff-ff-ff":
-            out[m.group(2)] = m.group(1)
+    for ip, mac in _arp_pairs():
+        if ip.startswith(SUBNET + ".") and mac != "ff-ff-ff-ff-ff-ff":
+            out[mac] = ip
     return out
 
 
@@ -153,16 +182,10 @@ def roster_check(seen_unknown: set) -> None:
 
 def find_mac(mac: str) -> str | None:
     """Return the IP currently holding `mac` per the ARP table, else None."""
-    try:
-        out = subprocess.run(["arp", "-a"], capture_output=True, text=True,
-                             timeout=10, creationflags=_NOWIN).stdout
-    except Exception:
-        return None
     want = mac.replace(":", "-").lower()
-    for line in out.splitlines():
-        m = re.match(r"\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f-]{17})", line.lower())
-        if m and m.group(2) == want and m.group(1).startswith(SUBNET + "."):
-            return m.group(1)
+    for ip, m in _arp_pairs():
+        if m == want and ip.startswith(SUBNET + "."):
+            return ip
     return None
 
 
