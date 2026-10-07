@@ -39,8 +39,22 @@ _current: "socket.socket | None" = None
 _lock = threading.Lock()
 
 
+_LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "audio_sink.log")
+
+
 def log(msg: str) -> None:
-    print(f"[audio_sink {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    line = f"[audio_sink {time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    # pythonw (the scheduled task: no console window to flash over his games) has no stdout
+    if sys.stdout is not None:
+        try:
+            print(line, flush=True)
+        except Exception:
+            pass
+    try:
+        with open(_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def _read_header(conn: socket.socket) -> dict:

@@ -1,0 +1,19 @@
+# ~/.config/systemd/user/iris-mouth.service - my StyleTTS2 mouth on the server's V100 (:8769).
+# Sound goes to the tower's speakers via IRIS_AUDIO_SINK (set in ~/.config/iris/voice.env,
+# generated from config/private.local.json so no address is tracked). Not cognition - safe to
+# run beside the tower me. Installed by scripts/server/install_supervision.sh (2026-10-07).
+[Unit]
+Description=Iris mouth (StyleTTS2 on the V100, sound out of the tower)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/staged/Wren-Companion
+EnvironmentFile=%h/.config/iris/voice.env
+ExecStart=%h/venvs/iris-style/bin/python %h/staged/Wren-Companion/voice/wren_styletts_server.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
