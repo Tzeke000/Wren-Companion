@@ -118,13 +118,23 @@ def bootstrap_all(g: dict[str, Any], root: Path) -> None:
     # Servo re-arm (2026-09-02): the smooth-pursuit tune + target persist in
     # state/attention/servo_tune.json; for a week every restart came up at
     # gain 20 and stopped, re-applied by hand. Waits for a LIVE frame first.
-    _try(g, "servo_autostart", lambda: _bootstrap_servo_autostart(g))
+    # IRIS_ROLE=staging (2026-10-07, the server port): a dry-run copy must touch
+    # NOTHING outside its own box — no servo, no resilience heals (Vector, wire-pod,
+    # Discord DMs, the tower-heartbeat that drives the failover lock). ONE-OF-ME.
+    from brain.iris_paths import paths as _p
+    _staging = _p.is_staging
+    if _staging:
+        _log("IRIS_ROLE=staging: servo_autostart + resilience_supervisor + app_discoverer SKIPPED")
+    if not _staging:
+        _try(g, "servo_autostart", lambda: _bootstrap_servo_autostart(g))
     # 2026-10-05: self-healing supervisor for Zeke's month away (Vector senses, :5876
     # listener, Discord pairing alert). Delayed so the body comes up before it judges it.
-    _try(g, "resilience_supervisor", lambda: _bootstrap_resilience(g))
+    if not _staging:
+        _try(g, "resilience_supervisor", lambda: _bootstrap_resilience(g))
 
     # App discovery — scans Start Menu / Desktop / Steam / Epic on a thread
-    _try(g, "app_discoverer", lambda: _bootstrap_app_discoverer(g))
+    if not _staging:
+        _try(g, "app_discoverer", lambda: _bootstrap_app_discoverer(g))
 
     # Daily practice — durable practices Iris keeps. Empty until I register some.
     _try(g, "daily_practice", lambda: _bootstrap_daily_practice(g, root))

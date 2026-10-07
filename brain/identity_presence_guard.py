@@ -41,8 +41,9 @@ from typing import Any
 
 
 # Default auto-memory directory (Iris-specific; CC's project-encoded path).
+from brain.iris_paths import paths as _iris_paths  # 2026-10-07 server port: no drive-letter memory dir
 _DEFAULT_AUTO_MEMORY_DIR = Path(
-    r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory"
+    str(_iris_paths.memory_dir)
 )
 
 # Known entity names that the IDENTITY.md Name: field may carry.

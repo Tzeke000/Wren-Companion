@@ -102,7 +102,7 @@ os.environ.setdefault("AVA_STT_MODEL", "distil-large-v3")
 # HuggingFace model cache — point at D:\ because C:\ is nearly full on this
 # machine (35 MB free at last check). distil-large-v3 alone is ~1.5 GB.
 # Set BEFORE faster_whisper or any HF library imports below.
-os.environ.setdefault("HF_HOME", r"D:\Wren-Companion\.cache\huggingface")
+os.environ.setdefault("HF_HOME", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "huggingface"))  # 2026-10-07: was a D: literal
 
 # Pre-import all heavyweight modules brain.* engines defer to inside their
 # init methods (kokoro, piper, sounddevice, faster_whisper, openwakeword,
@@ -2108,8 +2108,9 @@ def sibling_inbox_list(
 # nothing happens — CC keeps running, Iris notices nothing changed.
 
 _PRE_RESTART_MEMORY_WINDOW_S = 600  # 10 min — pre-restart save must land inside this window
+from brain.iris_paths import paths as _iris_paths  # 2026-10-07 server port: no drive-letter memory dir
 _AUTO_MEMORY_DIR = Path(
-    r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory"
+    str(_iris_paths.memory_dir)
 )
 
 

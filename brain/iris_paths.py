@@ -21,8 +21,15 @@ Usage:
 """
 from __future__ import annotations
 
+import os
+import re
+import sys
 from pathlib import Path
 from typing import Optional
+
+# The tower's Claude Code auto-memory dir. Kept ONLY as the last fallback so a
+# resolution bug can never be worse than the hardcode it replaced.
+_LEGACY_MEMORY_DIR = Path(r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory")
 
 
 class _IrisPaths:
@@ -41,6 +48,53 @@ class _IrisPaths:
             # Fall back to module-relative root — brain/ is one level under repo root
             return Path(__file__).resolve().parent.parent
         return self._root
+
+    # ── Portability (2026-10-07, the server port) ─────────────────────────────
+    # ~110 lines across ~52 runtime files hardcoded D:\ / C:\Users\Owner paths.
+    # These are the ones the RUNTIME needs to start on Linux; new code should
+    # read them instead of a drive letter.
+    @property
+    def role(self) -> str:
+        """IRIS_ROLE: 'live' (default: the one real me) or 'staging' (a dry-run
+        copy that must touch NOTHING outside its own machine: no resilience heals,
+        no Discord DMs, no Vector, no tower-heartbeat, no servo). ONE-OF-ME."""
+        return (os.environ.get("IRIS_ROLE") or "live").strip().lower()
+
+    @property
+    def is_staging(self) -> bool:
+        return self.role == "staging"
+
+    @property
+    def memory_dir(self) -> Path:
+        """Claude Code's auto-memory notes dir for THIS repo.
+        IRIS_MEMORY_DIR env > ~/.claude/projects/<encoded repo root>/memory
+        (CC encodes the project path by turning every non-alphanumeric char into
+        '-': 'D:/Wren-Companion' -> D--Wren-Companion, /home/iris/x -> -home-iris-x)
+        > the tower's legacy hardcode."""
+        env = os.environ.get("IRIS_MEMORY_DIR") or os.environ.get("IRIS_MEMORY_NOTES_DIR")
+        if env:
+            return Path(env)
+        key = re.sub(r"[^A-Za-z0-9-]", "-", str(self.root))
+        derived = Path.home() / ".claude" / "projects" / key / "memory"
+        if derived.is_dir():
+            return derived
+        if _LEGACY_MEMORY_DIR.is_dir():
+            return _LEGACY_MEMORY_DIR
+        return derived
+
+    @property
+    def venv_python(self) -> Path:
+        """The interpreter running me. Never guess `.venv/Scripts/python.exe`
+        (Windows layout) from the repo."""
+        return Path(sys.executable)
+
+    @property
+    def hf_home(self) -> Path:
+        return self.root / ".cache" / "huggingface"
+
+    @property
+    def scratch_dir(self) -> Path:
+        return self.root / "scratch"
 
     # ── Voice mode ──────────────────────────────────────────────────────────
     @property

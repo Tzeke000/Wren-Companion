@@ -35,8 +35,9 @@ from pathlib import Path
 from typing import Optional
 
 _ROOT = Path(__file__).resolve().parents[1]
+from brain.iris_paths import paths as _iris_paths  # 2026-10-07 server port: no drive-letter memory dir
 MEM_DIR = Path(os.environ.get("IRIS_MEMORY_DIR",
-                              r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory"))
+                              str(_iris_paths.memory_dir)))
 CLAUDE_MD = _ROOT / "CLAUDE.md"
 TRANSCRIPT = _ROOT / "state" / "transcript.jsonl"
 _STATE = _ROOT / "state" / "memory_hygiene"

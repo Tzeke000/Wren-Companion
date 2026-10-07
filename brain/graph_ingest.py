@@ -46,9 +46,10 @@ INGEST_INTERVAL_S = 60  # background rescan cadence (mtime stat sweep — cheap)
 # 300→60 2026-07-08: Zeke wants the brain tab live; the tab polls at 3s, so
 # this sweep is the freshness floor for file edits. ~300 stats/min ≈ nothing.
 
+from brain.iris_paths import paths as _iris_paths  # 2026-10-07 server port: no drive-letter memory dir
 _DEFAULT_NOTES_DIR = Path(
     os.environ.get("IRIS_MEMORY_NOTES_DIR")
-    or r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory"
+    or str(_iris_paths.memory_dir)
 )
 
 _SKIP_STEMS = {"memory", "index_archive"}  # MEMORY.md + index_archive.md = index layer

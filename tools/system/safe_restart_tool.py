@@ -28,8 +28,9 @@ from tools.tool_registry import register_tool
 _BASE_DIR = Path(__file__).parent.parent.parent
 _PRE_RESTART_MEMORY_WINDOW_S = 600
 _HEARTBEAT_STALE_S = 30
+from brain.iris_paths import paths as _iris_paths  # 2026-10-07 server port: no drive-letter memory dir
 _AUTO_MEMORY_DIR = Path(
-    r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory"
+    str(_iris_paths.memory_dir)
 )
 
 

@@ -30,8 +30,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # big-Iris's memory (READ-ONLY for little-Iris)
+from brain.iris_paths import paths as _iris_paths  # 2026-10-07 server port: no drive-letter memory dir
 BIG_MEMORY_DIR = Path(
-    r"C:\Users\Owner\.claude\projects\D--Wren-Companion\memory")
+    str(_iris_paths.memory_dir))
 # the CURATED fact base big-Iris maintains for the little brain — clean,
 # fact-dense, bulleted (charger location, sibling roster, battery rules). This
 # is the RIGHT source for fact lookups; the sprawling .md notes are the
