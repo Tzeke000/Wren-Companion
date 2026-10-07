@@ -1,2 +1,4 @@
 scripts/vector_wifi_selfheal.sh text eol=lf
 scripts/vector_wifi_selfheal.service text eol=lf
+# 2026-10-07 server port: shell scripts run on Linux - never let a Windows checkout give them CRLF
+*.sh text eol=lf

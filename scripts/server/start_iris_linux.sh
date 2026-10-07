@@ -54,8 +54,25 @@ log "NOT started on Linux yet: voice watchdog (mouth :8769 + daemon :8770 - wait
 log "  runtime watchdog (-> systemd), post-office :5877 (stays on the tower until cutover),"
 log "  vector brain/nerves/little pilot (Vector moves at cutover), orb (Tauri app stays on the tower)."
 
-log "starting iris_body_host.py in the FOREGROUND (model=$IRIS_MODEL). Host stderr follows in this log."
-"$PY" "$ROOT/iris_body_host.py" 2>>"$LOG"
+log "starting iris_body_host.py (model=$IRIS_MODEL). Host stderr follows in this log."
+# 2026-10-07: run the host as a WAITED child, not a plain foreground command - bash defers traps
+# until a foreground child exits, so a stopped launcher (timeout, systemctl stop, tmux kill)
+# used to leave the host AND its claude running as orphans (seen in the first staging test).
+# fd 8 = the launcher's real stdin, so the host still sees the tmux tty (a background job's
+# stdin would otherwise be /dev/null and the console reader would switch off).
+exec 8<&0
+"$PY" "$ROOT/iris_body_host.py" 0<&8 2>>"$LOG" &
+HPID=$!
+stop_stack() {
+  log "launcher got a stop signal - stopping host $HPID and its children"
+  pkill -TERM -P "$HPID" 2>/dev/null
+  kill -TERM "$HPID" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$HPID" 2>/dev/null || break; sleep 1; done
+  pkill -KILL -P "$HPID" 2>/dev/null; kill -KILL "$HPID" 2>/dev/null
+  pkill -u "$(id -u)" -f "$ROOT/iris_runtime.py" 2>/dev/null
+}
+trap 'stop_stack; log "launcher END (stopped)."; exit 143' TERM INT HUP
+wait "$HPID"
 RC=$?
 log "iris_body_host.py EXITED rc=$RC (if this lands seconds after the start line, the host never really came up)"
 log "launcher END."
