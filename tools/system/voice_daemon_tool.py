@@ -22,6 +22,7 @@ from typing import Any
 
 _DAEMON_PORT = int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770"))
 _MOUTH_PORT = int(os.environ.get("WREN_VOICE_PORT", "8769"))
+_VOICE_HOST = os.environ.get("IRIS_VOICE_HOST", "127.0.0.1")  # 2026-10-07: the tower, when I run on the server
 
 
 def _mouth_up(timeout: float = 2.0) -> bool:
@@ -31,7 +32,7 @@ def _mouth_up(timeout: float = 2.0) -> bool:
     audio played. Speak tools pre-check this so a dead mouth returns a clear error,
     never a false success."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{_MOUTH_PORT}/health",
+        with urllib.request.urlopen(f"http://{_VOICE_HOST}:{_MOUTH_PORT}/health",
                                     timeout=timeout) as r:
             return r.read().decode("utf-8", "replace").strip() == "ok"
     except Exception:
@@ -43,7 +44,7 @@ def _daemon_call(cmd: str, args: dict, timeout: float = 240.0) -> dict:
     stdlib-only (no dependency on the voice/ modules being importable here)."""
     payload = (json.dumps({"cmd": cmd, "args": args}) + "\n").encode("utf-8")
     try:
-        with socket.create_connection(("127.0.0.1", _DAEMON_PORT), timeout=10.0) as s:
+        with socket.create_connection((_VOICE_HOST, _DAEMON_PORT), timeout=10.0) as s:
             s.settimeout(timeout)
             s.sendall(payload)
             buf = b""
@@ -55,7 +56,7 @@ def _daemon_call(cmd: str, args: dict, timeout: float = 240.0) -> dict:
             return json.loads(buf.split(b"\n", 1)[0].decode("utf-8", "replace"))
     except Exception as e:
         return {"ok": False,
-                "error": (f"voice daemon unreachable on 127.0.0.1:{_DAEMON_PORT} ({e!r}). "
+                "error": (f"voice daemon unreachable on {_VOICE_HOST}:{_DAEMON_PORT} ({e!r}). "
                           "Launch it: WREN_VOICE_PORT=8769 .venv python voice/wren_voice_daemon.py")}
 
 

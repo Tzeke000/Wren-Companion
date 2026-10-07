@@ -206,12 +206,14 @@ def _port_open(host: str, port: int, timeout: float = 0.6) -> bool:
 
 
 def probe_voice(mouth_port: int = 8769, daemon_port: int = 8770,
-                off_flag: Optional[Path] = None, host: str = "127.0.0.1") -> dict:
+                off_flag: Optional[Path] = None, host: Optional[str] = None) -> dict:
     """Are the mouth (:8769) and daemon (:8770) TCP ports actually accepting
     connections? Honors the deliberate-off flag first: if voice is deliberately
     off, report 'disabled' (NOT down) so it doesn't drag the verdict and doesn't
     invite healing. Ports are injectable so the test can prove the socket probe
     is real by pointing at a dead port."""
+    if host is None:  # 2026-10-07: the tower, when I run on the server (IRIS_VOICE_HOST)
+        host = os.environ.get("IRIS_VOICE_HOST", "127.0.0.1")
     flag = off_flag if off_flag is not None else (_repo_root() / "state" / "voice_deliberately_off.json")
     # Deliberate-off: flag exists AND does not say {"off": false}. (2026-09-05:
     # absent flag = on; a present flag that says off:false is also on.)

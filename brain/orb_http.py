@@ -1916,7 +1916,7 @@ async def ws(socket: WebSocket) -> None:
 # never crashes iris_runtime.
 _VOICE_STATUS_FILE = Path(r"D:\Wren-Companion\scratch\voice_status.json")
 _VOICE_AMP_FILE = Path(r"D:\Wren-Companion\scratch\voice_amplitude.json")
-_VOICE_DAEMON_ADDR = ("127.0.0.1", int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770")))
+_VOICE_DAEMON_ADDR = (os.environ.get("IRIS_VOICE_HOST", "127.0.0.1"), int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770")))
 # Daemon vocabulary (wren_voice_status.STATES) -> orb voice_loop.state vocabulary (App.tsx).
 _VOICE_STATE_MAP = {
     "idle": "passive", "muted": "passive",

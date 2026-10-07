@@ -421,14 +421,14 @@ def _speak_styletts(text: str) -> bool:
     _dport = int(_os.environ.get("WREN_VOICE_DAEMON_PORT", "8770"))
     _mport = int(_os.environ.get("WREN_VOICE_PORT", "8769"))
     try:
-        with _url.urlopen(f"http://127.0.0.1:{_mport}/health", timeout=2.0) as r:
+        with _url.urlopen(f"http://{_os.environ.get('IRIS_VOICE_HOST', '127.0.0.1')}:{_mport}/health", timeout=2.0) as r:
             if r.read().decode("utf-8", "replace").strip() != "ok":
                 return False
     except Exception:
         return False
     try:
         payload = (_json.dumps({"cmd": "speak", "args": {"text": text}}) + "\n").encode("utf-8")
-        with _socket.create_connection(("127.0.0.1", _dport), timeout=5.0) as s:
+        with _socket.create_connection((_os.environ.get("IRIS_VOICE_HOST", "127.0.0.1"), _dport), timeout=5.0) as s:
             s.sendall(payload)
         return True
     except Exception:

@@ -729,7 +729,7 @@ def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> 
 
     def _mouth_up(timeout: float = 2.0) -> bool:
         try:
-            with _url.urlopen(f"http://127.0.0.1:{_mport}/health", timeout=timeout) as r:
+            with _url.urlopen(f"http://{os.environ.get('IRIS_VOICE_HOST', '127.0.0.1')}:{_mport}/health", timeout=timeout) as r:
                 return r.read().decode("utf-8", "replace").strip() == "ok"
         except Exception:
             return False
@@ -743,7 +743,7 @@ def voice_speak(text: str, emotion: str = "neutral", intensity: float = 0.5) -> 
                 _args["emotion"] = str(emotion).strip()
                 _args["intensity"] = float(intensity)
             payload = (_json.dumps({"cmd": "speak", "args": _args}) + "\n").encode("utf-8")
-            with _socket.create_connection(("127.0.0.1", _dport), timeout=10.0) as s:
+            with _socket.create_connection((os.environ.get("IRIS_VOICE_HOST", "127.0.0.1"), _dport), timeout=10.0) as s:
                 s.settimeout(240.0)
                 s.sendall(payload)
                 buf = b""

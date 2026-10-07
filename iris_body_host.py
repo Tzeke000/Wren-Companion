@@ -102,7 +102,9 @@ except Exception as e:  # pragma: no cover
     _hh = None
 
 # ----------------------------------------------------------------- voice daemon (port/protocol = Wren's)
-DAEMON_ADDR = ("127.0.0.1", int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770")))
+# IRIS_VOICE_HOST (2026-10-07, Zeke's voice choice): on the server this points at the TOWER,
+# which stays my voice node (mouth + ears + his speakers). Unset = this machine, as before.
+DAEMON_ADDR = (os.environ.get("IRIS_VOICE_HOST", "127.0.0.1"), int(os.environ.get("WREN_VOICE_DAEMON_PORT", "8770")))
 SENTENCE_END = re.compile(r"[.!?…](\s|$)")   # candidate sentence boundary (… = ellipsis)
 MIN_SENTENCE = 12                                  # don't speak fragments shorter than this - accumulate
 
