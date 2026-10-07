@@ -15,7 +15,11 @@ import av
 import cv2
 
 
-def transcode(src: str, dst: str, width: int, crf: int) -> int:
+def transcode(src: str, dst: str, width: int, crf: int,
+              t0: float = 0.0, t1: float = float("inf")) -> int:
+    """t0/t1 (seconds) cut a PART out of a long render — 2026-10-07: a 2-min
+    vertical squeezed whole under 10MB is ~500kbps and goes blocky on busy
+    visuals; two parts keep the picture."""
     inp = av.open(src)
     out = av.open(dst, "w")
     v_in = inp.streams.video[0]
@@ -39,6 +43,8 @@ def transcode(src: str, dst: str, width: int, crf: int) -> int:
             continue
         if packet.stream == v_in:
             for frame in packet.decode():
+                if frame.time is not None and not (t0 <= frame.time < t1):
+                    continue
                 img = cv2.resize(frame.to_ndarray(format="bgr24"), (w, h),
                                  interpolation=cv2.INTER_AREA)
                 nf = av.VideoFrame.from_ndarray(img, format="bgr24")
@@ -47,6 +53,8 @@ def transcode(src: str, dst: str, width: int, crf: int) -> int:
                     out.mux(p)
         elif a_in is not None and packet.stream == a_in:
             for frame in packet.decode():
+                if frame.time is not None and not (t0 <= frame.time < t1):
+                    continue
                 frame.pts = None
                 for p in a_out.encode(frame):
                     out.mux(p)
@@ -67,11 +75,15 @@ def main() -> int:
     ap.add_argument("dst")
     ap.add_argument("--mb", type=float, default=9.5, help="target cap in MB")
     ap.add_argument("--width", type=int, default=405)
+    ap.add_argument("--start", type=float, default=0.0, help="part start (s)")
+    ap.add_argument("--end", type=float, default=float("inf"),
+                    help="part end (s)")
     args = ap.parse_args()
 
     cap = args.mb * 1024 * 1024
     for crf in (24, 28, 32, 36):
-        size = transcode(args.src, args.dst, args.width, crf)
+        size = transcode(args.src, args.dst, args.width, crf,
+                         args.start, args.end)
         print(f"[shrink] crf={crf} -> {size / 1024 / 1024:.2f} MB")
         if size <= cap:
             print(f"[shrink] OK: {args.dst} ({size / 1024 / 1024:.2f} MB, "
