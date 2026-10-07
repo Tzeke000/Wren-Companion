@@ -28,15 +28,18 @@ pip install --upgrade pip -q
 
 echo "== [3/5] pinned python stack (cu126 / Volta — do not bump) =="
 # torch <=2.10 cu126: last line with sm_70 kernels. cu128+ drops Volta.
-pip install -q "torch<=2.10" torchvision --index-url https://download.pytorch.org/whl/cu126
+# 2026-10-07: EXACT pins - a loose torchaudio pulled 2.11 (ABI mismatch, transformers import died)
+pip install -q "torch==2.10.0" "torchvision==0.25.0" "torchaudio==2.10.0" --index-url https://download.pytorch.org/whl/cu126
 pip install -q \
   "numpy>=2,<3" \
   "opencv-python~=4.13" \
   "insightface==0.7.3" \
-  "onnxruntime-gpu~=1.26" \
+  "onnxruntime-gpu==1.22.0" \
   "transformers~=5.8" \
   "mediapipe~=0.10" \
   pillow
+# onnxruntime-gpu: 1.29 needed CUDA 13 (libcublasLt.so.13) and its CUDA EP silently fell back to CPU;
+# 1.22.0 VERIFIED on the V100 2026-10-07 (insightface ~9 ms/frame on CUDA EP).
 # NOTE deliberately absent: winsdk (Windows-only PTZ), dlib/face_recognition (legacy, unused).
 
 echo "== [4/5] camera + PTZ probe (UVC) =="
