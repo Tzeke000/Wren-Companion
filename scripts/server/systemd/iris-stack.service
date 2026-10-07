@@ -1,0 +1,19 @@
+# ~/.config/systemd/user/iris-stack.service - start me in tmux session "iris" at boot.
+# Needs `sudo loginctl enable-linger iris` so the user manager runs without a login.
+# Installed by scripts/server/install_supervision.sh (2026-10-07, the server port).
+[Unit]
+Description=Iris stack (ONE-OF-ME gate + launcher, supervised, in tmux "iris")
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/tmux new-session -d -s iris %h/staged/Wren-Companion/scripts/server/iris_supervise.sh opus
+# HUP to everything in the session -> the launcher's trap stops host, claude and runtime cleanly
+ExecStop=-/usr/bin/tmux kill-session -t iris
+TimeoutStopSec=40
+
+[Install]
+WantedBy=default.target

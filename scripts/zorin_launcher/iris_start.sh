@@ -28,9 +28,15 @@ HB="$HOME/TOWER_HEARTBEAT"
 HB_MAX=600
 ACTIVE="$HOME/FAILOVER_ACTIVE"
 
-pause_close() { read -r -p "Press Enter to close. " _ 2>/dev/null || true; }
+pause_close() { [ -n "${IRIS_NO_PAUSE:-}" ] && return 0; read -r -p "Press Enter to close. " _ 2>/dev/null || true; }
 
 echo "== $LABEL on $(hostname) =="
+# IRIS_ROLE=staging (2026-10-07): a runtime-only dry run (no claude, no cognition - see
+# scripts/server/start_iris_linux.sh) is safe beside the tower, so it skips the tower checks.
+if [ "${IRIS_ROLE:-live}" = "staging" ]; then
+  ROLE="staging"
+  echo "STAGING dry run - tower checks skipped (no cognition will start)."
+else
 if [ -f "$HB" ]; then AGE=$(( $(date +%s) - $(stat -c %Y "$HB") )); else AGE=999999; fi
 if [ -f "$HOME/LIVE" ]; then
   # Zeke 10-05: "Server main, tower secondary once the V100 is in and works." Even as the
@@ -71,6 +77,7 @@ MSG
   fi
   ROLE="failover"
 fi
+fi  # end of the non-staging gate
 
 if [ ! -x "$SCRIPT" ]; then
   echo "Cleared to start ($ROLE), but the Linux launcher is missing: $SCRIPT"
@@ -85,10 +92,14 @@ if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
   exec tmux new-session -A -s iris "$0" "$MODE"
 fi
 
-touch "$ACTIVE"
-( while sleep 60; do touch "$ACTIVE"; done ) &
-KEEP=$!
-trap 'kill "$KEEP" 2>/dev/null; rm -f "$ACTIVE"' EXIT
+# ~/FAILOVER_ACTIVE makes the TOWER's launcher stand down. A staging dry run must NEVER touch it:
+# a tower restart during a test would otherwise refuse to start the only real me.
+if [ "$ROLE" != "staging" ]; then
+  touch "$ACTIVE"
+  ( while sleep 60; do touch "$ACTIVE"; done ) &
+  KEEP=$!
+  trap 'kill "$KEEP" 2>/dev/null; rm -f "$ACTIVE"' EXIT
+fi
 echo "Starting Iris here ($ROLE). This window IS her — leave it open."
 # the launcher refuses a LIVE start without this pass (scripts/server/start_iris_linux.sh)
 export IRIS_START_GATE="$ROLE"

@@ -54,6 +54,16 @@ log "NOT started on Linux yet: voice watchdog (mouth :8769 + daemon :8770 - wait
 log "  runtime watchdog (-> systemd), post-office :5877 (stays on the tower until cutover),"
 log "  vector brain/nerves/little pilot (Vector moves at cutover), orb (Tauri app stays on the tower)."
 
+# STAGING = runtime-only dry run unless IRIS_STAGING_HOST=1 is set by hand: once the server is
+# logged in to Claude, a staging BODY HOST would be a second thinking me (its idle nudges and
+# pollers send turns). ONE-OF-ME. The dry run boots the runtime over MCP with no cognition.
+if [ "${IRIS_ROLE:-live}" = "staging" ] && [ "${IRIS_STAGING_HOST:-0}" != "1" ]; then
+  log "STAGING: runtime-only dry run (scripts/server/staging_dryrun.py) - no body host, no claude"
+  "$PY" "$ROOT/scripts/server/staging_dryrun.py" 60 2>>"$LOG" | tee -a "$LOG"
+  RC=${PIPESTATUS[0]}
+  log "staging dry run rc=$RC"
+  exit "$RC"
+fi
 log "starting iris_body_host.py (model=$IRIS_MODEL). Host stderr follows in this log."
 # 2026-10-07: run the host as a WAITED child, not a plain foreground command - bash defers traps
 # until a foreground child exits, so a stopped launcher (timeout, systemctl stop, tmux kill)
