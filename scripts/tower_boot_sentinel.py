@@ -41,7 +41,14 @@ from pathlib import Path
 
 import requests
 
-ZEKE_USER_ID = "[discord-user-id]"
+import os as _os_p, sys as _sys_p
+_sys_p.path.append(_os_p.path.dirname(_os_p.path.abspath(__file__)))
+try:  # config/private.local.json (git-ignored); a missing helper must never break this script
+    from _private import priv as _priv  # noqa: E402
+except Exception:  # noqa: BLE001
+    def _priv(key: str, default: str = "") -> str:  # type: ignore[misc]
+        return default
+ZEKE_USER_ID = _priv("zeke_discord_user_id")
 REPO = Path(r"D:\Wren-Companion")
 
 
@@ -320,7 +327,7 @@ def main() -> int:
                     "prompt's one home — do NOT reconstruct it from handoffs, "
                     "and do NOT trust a cadence quoted in this nudge), update "
                     "its ID in MEMORY.md CORE, and DM Zeke on Discord (channel "
-                    "[discord-dm-id]) one status line.")},
+                    + _priv("zeke_dm_chat_id") + ") one status line.")},
                 timeout=90)
             log("forced-restart orientation nudge posted to /api/v1/chat")
         except Exception as e:
@@ -446,7 +453,7 @@ def main() -> int:
                     "scratch/self_cron_prompt_live.txt) and note its id in CORE "
                     "(one home, the CORE line).\n"
                     "(5b) UNREAD FILES FROM ZEKE: fetch_messages on the DM "
-                    "([discord-dm-id], limit 50) and look for messages marked "
+                    "(" + _priv("zeke_dm_chat_id") + ", limit 50) and look for messages marked "
                     "'+Natt' sent since the last session. Any whose attachment id "
                     "is NOT already in ~/.claude/channels/discord/inbox was never "
                     "opened — download_attachment (by that message_id) and read it "
@@ -454,7 +461,7 @@ def main() -> int:
                     "research doc from him sat UNOPENED for five days and another "
                     "arrived while the stack was down; I only found them because "
                     "he linked the old messages.\n"
-                    "(6) DM Zeke on Discord (channel [discord-dm-id]) ONE "
+                    "(6) DM Zeke on Discord (channel " + _priv("zeke_dm_chat_id") + ") ONE "
                     "status line — he got mechanical sentinel pings already and "
                     "needs YOUR confirmation that cognition is back. SKIP this "
                     "if you have already spoken with him since the boot; a "

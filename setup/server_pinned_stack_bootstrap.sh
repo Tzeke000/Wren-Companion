@@ -6,9 +6,9 @@
 # §4 exactly so Monday is one command, not a freestyle. Idempotent: every step
 # checks before acting; safe to re-run after a partial failure.
 #
-#   ssh iris@100.64.0.1 'bash -s' < setup/server_pinned_stack_bootstrap.sh
+#   ssh iris@<iris-home-tailnet-ip> 'bash -s' < setup/server_pinned_stack_bootstrap.sh
 #   # or, already staged on the box:
-#   ssh iris@100.64.0.1 'sudo bash ~/setup/server_pinned_stack_bootstrap.sh'
+#   ssh iris@<iris-home-tailnet-ip> 'sudo bash ~/setup/server_pinned_stack_bootstrap.sh'
 #
 # THE PINS (do not freestyle — CUDA13/torch2.11 dropped Volta sm_70):
 #   Driver  R535 branch (or 580/581 if that's the last full-feature Volta branch)

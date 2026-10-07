@@ -18,7 +18,7 @@ What "study" means here, mechanically:
   4. write study.json with what the sensors said (bbox, confidence, the
      InsightFace age/gender GUESS — labelled a guess, never a fact),
   5. hand it back. Cognition looks, describes, and DMs Zeke the crop on
-     Discord (chat_id [discord-dm-id]). Speaking to them is ALLOWED
+     Discord (his DM chat_id). Speaking to them is ALLOWED
      (Zeke 09-02 13:3x: "you can try and speak to a stranger, they might not hear
      you because you're in headphones") — ask who they are; never announce he's out.
   6. PHOTOGRAPHIC MEMORY (Zeke 09-02: "learn photographic memory in the ways you
@@ -48,7 +48,7 @@ SHEET_MAX_W = 900
 SHEET_MAX_BYTES = 150_000
 CAPTURE_TIMEOUT_S = 25.0
 BUSY_WAIT_S = 20.0
-DISCORD_CHAT_ID = "[discord-dm-id]"
+DISCORD_CHAT_ID = __import__("brain.private_config", fromlist=["get"]).get("zeke_dm_chat_id")
 
 
 def _split(faces: list[dict[str, Any]]) -> tuple[list[dict], list[dict]]:

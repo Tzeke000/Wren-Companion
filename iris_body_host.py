@@ -420,8 +420,9 @@ def summarize_result(block):
 
 # ----------------------------------------------------------------- Discord inbound (REST poll)
 DISCORD_API = "https://discord.com/api/v10"
-DISCORD_CHANNEL_ID = os.environ.get("IRIS_DISCORD_CHANNEL_ID", "[discord-dm-id]")  # Zeke's DM channel
-DISCORD_OWNER_ID = "[discord-user-id]"   # Zeke's user id
+from brain.private_config import get as _priv  # config/private.local.json (git-ignored)
+DISCORD_CHANNEL_ID = os.environ.get("IRIS_DISCORD_CHANNEL_ID") or _priv("zeke_dm_chat_id")  # Zeke's DM channel
+DISCORD_OWNER_ID = _priv("zeke_discord_user_id")   # Zeke's user id
 ENV_FILE = os.path.join(os.path.expanduser("~"), ".claude", "channels", "discord", ".env")
 POLL_INTERVAL = 3.0
 
@@ -1322,7 +1323,7 @@ _STUDY_RULE = (" STANDING RULE (Zeke 2026-09-02): an unrecognised face while he 
                " params={'action':'start'} (head on them, frame burst, crop + a pre-shrunk"
                " sheet.jpg that is SAFE to Read), look at sheet.jpg, say what you can about"
                " who/what you see (check frame context - a face on a screen reads as a"
-               " visitor), then DM Zeke the crop.jpg on Discord (chat_id [discord-dm-id])."
+               " visitor), then DM Zeke the crop.jpg on Discord (chat_id " + DISCORD_CHANNEL_ID + ")."
                " You MAY speak to them (Zeke 09-02: 'you can try and speak to a stranger') - but"
                " my voice lands in HIS HEADPHONES, so they may not hear; ask who they are and what"
                " they need, and do NOT announce that Zeke is out. Finish with study_face action=release.")

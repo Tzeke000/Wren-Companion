@@ -50,7 +50,8 @@ DISCORD_ENV = Path(os.path.expanduser("~/.claude/channels/discord/.env"))
 SSH_KEY = _ROOT / "state" / "vector" / "dev" / "ssh_root_key"
 VENV_PY = _ROOT / ".venv" / "Scripts" / "python.exe"
 DAEMON = _ROOT / "scripts" / "vector_inhabit_daemon.py"
-ZEKE_USER_ID = "[discord-user-id]"
+from brain.private_config import get as _priv  # config/private.local.json (git-ignored)
+ZEKE_USER_ID = _priv("zeke_discord_user_id")
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 SENSES_STALE_S = 6 * 60
@@ -61,7 +62,7 @@ ORB_BUDGET = (3, 3600)
 ORB_FAILS_NEEDED = 2
 TICK_S = 30.0
 GOAL_ORB = "goal_1790791911785"
-FAILOVER_HOST = os.environ.get("IRIS_FAILOVER_HOST", "iris@10.0.0.32")
+FAILOVER_HOST = os.environ.get("IRIS_FAILOVER_HOST", "iris@" + _priv("iris_home_host"))
 HEARTBEAT_EVERY_S = 120.0
 CHIPPER_EXE = Path(r"C:\Program Files\wire-pod\chipper\chipper.exe")
 WIREPOD_OFF_FLAG = _ROOT / "state" / "wirepod_deliberately_off.json"
@@ -256,7 +257,7 @@ def robot_ip() -> str:
         from brain.vector_session import robot_ip as _ip
         return _ip()
     except Exception:
-        return "10.0.0.21"
+        return _priv("vector_ip")
 
 
 def daemon_procs() -> list[Any]:

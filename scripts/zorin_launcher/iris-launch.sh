@@ -6,9 +6,10 @@
 #   * `--check` = headless dry run (status + reachability, no GUI) for testing over SSH.
 # Written by Iris 2026-09-10 at Zeke's ask ("a launcher from Zorin for you").
 set -u
-PVE="https://10.0.0.31:8006"
+[ -f "$HOME/.iris_private.env" ] && . "$HOME/.iris_private.env"  # IRIS_PVE_HOST / IRIS_VM_IP (not in git)
+PVE="https://${IRIS_PVE_HOST:?set IRIS_PVE_HOST in ~/.iris_private.env}:8006"
 VMID=100
-VM_IP="10.0.0.32"
+VM_IP="${IRIS_VM_IP:?set IRIS_VM_IP in ~/.iris_private.env}"
 TOKEN_JSON="$HOME/.config/iris/pve_token.json"
 KEY="$HOME/.ssh/id_ed25519_iris"
 ORB_URL="http://$VM_IP:5876/"

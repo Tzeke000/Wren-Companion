@@ -124,7 +124,7 @@ These apply to every work order in this repo, regardless of who's asking. Groupe
 For Wren (on the other machine), this still applies — multi-step work orders ping Zeke on Discord at start, end of each task, and final summary:
 
 ```powershell
-py -3.11 scripts\discord_dm_user.py [discord-user-id] "<message>"
+py -3.11 scripts\discord_dm_user.py <zeke_discord_user_id from config\private.local.json> "<message>"
 ```
 
 When already in a Discord channel session, the `reply` MCP tool is acceptable. Format:

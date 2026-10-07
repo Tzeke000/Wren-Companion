@@ -21,8 +21,9 @@ case "$MODE" in
   cli)   LABEL="Iris (CLI)";        SCRIPT="$HOME/staged/Wren-Companion/start_iris.sh" ;;
   *) echo "unknown mode: $MODE (fable|opus|cli)"; exit 2 ;;
 esac
-TOWER_LAN="${IRIS_TOWER_LAN:-10.0.0.20}"
-TOWER_TS="${IRIS_TOWER_TS:-100.64.0.1}"
+[ -f "$HOME/.iris_private.env" ] && . "$HOME/.iris_private.env"  # IRIS_TOWER_LAN / IRIS_TOWER_TS (not in git)
+TOWER_LAN="${IRIS_TOWER_LAN:?set IRIS_TOWER_LAN in ~/.iris_private.env}"
+TOWER_TS="${IRIS_TOWER_TS:?set IRIS_TOWER_TS in ~/.iris_private.env}"
 HB="$HOME/TOWER_HEARTBEAT"
 HB_MAX=600
 ACTIVE="$HOME/FAILOVER_ACTIVE"

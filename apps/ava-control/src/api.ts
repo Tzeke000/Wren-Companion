@@ -4,7 +4,8 @@
 export type Backend = "tower" | "server";
 export const BACKENDS: Record<Backend, string> = {
   tower: "http://127.0.0.1:5876",
-  server: "http://10.0.0.32:5876",
+  // From the git-ignored apps/ava-control/.env.local (VITE_IRIS_SERVER_URL) — the repo is public.
+  server: import.meta.env.VITE_IRIS_SERVER_URL || "",
 };
 export const BACKEND_KEY = "iris.backend";
 export function readBackend(): Backend {

@@ -67,7 +67,8 @@ def robot_ip() -> str:
             return ip.strip()
     except Exception:
         pass
-    return "10.0.0.21"
+    from brain.private_config import get as _priv  # git-ignored config
+    return _priv("vector_ip")
 FRAME_DIR = REPO / "state" / "vector"
 NERVES = FRAME_DIR / "nerves.json"
 # big-Iris's body commands, logged so the little brain (watch-mode) sees my ACTUAL

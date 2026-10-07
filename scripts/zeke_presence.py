@@ -45,8 +45,14 @@ STATE = REPO / "state" / "zeke_presence.json"
 LOGF = REPO / "state" / "zeke_presence_log.jsonl"
 CONFIG = REPO / "state" / "zeke_presence_config.json"
 PIDFILE = REPO / "state" / "zeke_presence.pid"
-SUBNET = "10.0.0"
-DEFAULT_MAC = "aa-bb-cc-dd-ee-ff"   # fingerprinted 2026-07-19 while Zeke home
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+try:  # config/private.local.json (git-ignored)
+    from _private import priv as _priv  # noqa: E402
+except Exception:  # noqa: BLE001
+    def _priv(key: str, default: str = "") -> str:  # type: ignore[misc]
+        return default
+SUBNET = _priv("lan_subnet", "192.168.1")
+DEFAULT_MAC = _priv("phone_mac")   # fingerprinted 2026-07-19 while Zeke home (now in the private config)
 POLL_S = 60          # ARP check cadence
 SWEEP_EVERY = 5      # full /24 ping sweep every N polls (~5 min)
 MISS_N = 5           # consecutive misses before ABSENT (~5 min grace)
@@ -131,8 +137,8 @@ ROSTER = REPO / "state" / "network_roster.json"
 
 def _arp_pairs() -> list:
     """[(ip, mac)] from the OS neighbour table, mac normalised to aa-bb-cc-dd-ee-ff.
-    Windows: `arp -a` ("10.0.0.22   aa-bb-cc-dd-ee-ff   dynamic").
-    Linux:   `ip neigh` ("10.0.0.22 dev ens18 lladdr aa:bb:cc:dd:ee:ff REACHABLE")."""
+    Windows: `arp -a` ("192.168.1.22   aa-bb-cc-dd-ee-ff   dynamic").
+    Linux:   `ip neigh` ("192.168.1.22 dev ens18 lladdr aa:bb:cc:dd:ee:ff REACHABLE")."""
     cmd = ["arp", "-a"] if _IS_WIN else ["ip", "neigh", "show"]
     try:
         raw = subprocess.run(cmd, capture_output=True, text=True,

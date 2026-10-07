@@ -13,12 +13,32 @@ use tauri::Manager;
 //
 // The token never touches a command line or this binary: curl reads the Authorization header from a
 // file (`-H @file`). Default path below; override with IRIS_PVE_HEADER.
-const PVE_API: &str = "https://10.0.0.31:8006/api2/json";
-const PVE_UI: &str = "https://10.0.0.31:8006/";
-const IRIS_HOME: &str = "iris@10.0.0.32";
+//
+// Host addresses come from the git-ignored config/private.local.json (2026-10-07: the repo is
+// PUBLIC, so the home network layout stays out of source). Override the path with IRIS_PRIVATE_CONFIG.
+const PRIVATE_CFG: &str = r"D:\Wren-Companion\config\private.local.json";
 const DEFAULT_HEADER: &str = r"D:\Wren-Companion\state\secrets\pve_tower.hdr";
 const ALLOWED_VMS: [u32; 3] = [100, 101, 102];
 const CREATE_NO_WINDOW: u32 = 0x0800_0000; // background helpers must never flash a console over his game
+
+/// `"key": "value"` from the private config — a tiny flat-JSON read, no serde dependency needed.
+fn private(key: &str) -> String {
+    let path = std::env::var("IRIS_PRIVATE_CONFIG").unwrap_or_else(|_| PRIVATE_CFG.to_string());
+    let txt = std::fs::read_to_string(path).unwrap_or_default();
+    let pat = format!("\"{key}\"");
+    txt.find(&pat)
+        .and_then(|i| txt[i + pat.len()..].split('"').nth(1))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn pve_host() -> String {
+    private("proxmox_host")
+}
+
+fn iris_home() -> String {
+    format!("iris@{}", private("iris_home_host"))
+}
 
 fn header_file() -> String {
     std::env::var("IRIS_PVE_HEADER").unwrap_or_else(|_| DEFAULT_HEADER.to_string())
@@ -29,7 +49,7 @@ fn pve(method: &str, path: &str) -> Result<String, String> {
     if !std::path::Path::new(&hdr).is_file() {
         return Err(format!("Proxmox token file missing ({hdr})"));
     }
-    let url = format!("{PVE_API}{path}");
+    let url = format!("https://{}:8006/api2/json{path}", pve_host());
     let out = Command::new("curl.exe")
         .args(["-sk", "-m", "12", "-X", method, "-H", &format!("@{hdr}"), "-w", "\n%{http_code}", &url])
         .creation_flags(CREATE_NO_WINDOW)
@@ -82,9 +102,9 @@ fn reach(addr: &str) -> bool {
 fn server_reach() -> String {
     format!(
         "{{\"proxmox\":{},\"iris_home_ssh\":{},\"iris_home_runtime\":{}}}",
-        reach("10.0.0.31:8006"),
-        reach("10.0.0.32:22"),
-        reach("10.0.0.32:5876")
+        reach(&format!("{}:8006", pve_host())),
+        reach(&format!("{}:22", private("iris_home_host"))),
+        reach(&format!("{}:5876", private("iris_home_host")))
     )
 }
 
@@ -92,11 +112,13 @@ fn server_reach() -> String {
 #[tauri::command]
 fn server_open(kind: String) -> Result<(), String> {
     let ssh = r"C:\Windows\System32\OpenSSH\ssh.exe";
+    let home = iris_home();
+    let pve_ui = format!("https://{}:8006/", pve_host());
     let mut cmd = Command::new("cmd.exe");
     match kind.as_str() {
-        "ssh" => cmd.args(["/c", "start", "Iris - server shell", ssh, "-t", IRIS_HOME]),
-        "console" => cmd.args(["/c", "start", "Iris - my console", ssh, "-t", IRIS_HOME, "~/iris_console.sh"]),
-        "proxmox" => cmd.args(["/c", "start", "", PVE_UI]),
+        "ssh" => cmd.args(["/c", "start", "Iris - server shell", ssh, "-t", home.as_str()]),
+        "console" => cmd.args(["/c", "start", "Iris - my console", ssh, "-t", home.as_str(), "~/iris_console.sh"]),
+        "proxmox" => cmd.args(["/c", "start", "", pve_ui.as_str()]),
         _ => return Err(format!("unknown target {kind}")),
     };
     // `start` opens the visible window we WANT; the helper cmd itself stays hidden.

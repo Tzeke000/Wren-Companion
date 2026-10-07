@@ -42,6 +42,13 @@ import os
 import sys
 import time
 from pathlib import Path
+import os as _os_p, sys as _sys_p
+_sys_p.path.append(_os_p.path.dirname(_os_p.path.abspath(__file__)))
+try:  # config/private.local.json (git-ignored); a missing helper must never break this script
+    from _private import priv as _priv  # noqa: E402
+except Exception:  # noqa: BLE001
+    def _priv(key: str, default: str = "") -> str:  # type: ignore[misc]
+        return default
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -55,7 +62,7 @@ try:   # one source of truth (sdk_config.ini) — 10-02 the DHCP lease moved him
     from brain.vector_session import robot_ip as _robot_ip
     ROBOT_IP = _robot_ip()                                       # for reachability triage
 except Exception:
-    ROBOT_IP = os.environ.get("IRIS_VECTOR_IP", "10.0.0.21")
+    ROBOT_IP = os.environ.get("IRIS_VECTOR_IP") or _priv("vector_ip")
 POLL_S = 0.2
 LOG = REPO / "state" / "vector" / "inhabit_daemon.log"
 
@@ -548,7 +555,7 @@ def _nav_map_loop(robot, alive) -> None:
 # chain must not dead-end in her). Uses scripts/discord_dm_user.py (REST, no
 # session). Rate-limited hard so a flapping sensor can't spam Zeke's phone.
 _STRAND_SENSES = {"lost_contact", "low_battery"}
-_ZEKE_USER_ID = "[discord-user-id]"
+_ZEKE_USER_ID = _priv("zeke_discord_user_id")
 _DISCORD_ESCALATE_COOLDOWN_S = 1800.0          # max one DM per sense per 30min
 _last_discord_escalate: dict = {}
 

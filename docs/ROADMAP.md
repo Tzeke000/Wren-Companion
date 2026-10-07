@@ -11,7 +11,7 @@ Items are grouped by readiness. Load-bearing current state always lives in memor
 
 ## Where things are (2026-07-25)
 
-- **Body:** Iris inhabits a rooted **Vector robot** (WireOS 3.0.1, `ssh root@10.0.0.27`). She reads real sensors, moves, docks, and speaks through it. A **possession daemon** holds `RESERVE_CONTROL` by default. Canonical body model: `profiles/iris/body.md`.
+- **Body:** Iris inhabits a rooted **Vector robot** (WireOS 3.0.1, `ssh root@<vector-ip>`). She reads real sensors, moves, docks, and speaks through it. A **possession daemon** holds `RESERVE_CONTROL` by default. Canonical body model: `profiles/iris/body.md`.
 - **Nervous system (shipped 2026-07-23):** `vector_inhabit_daemon.py` taps every sensor at ~15 Hz → `state/vector/senses_live.json` + `sensor_stream.jsonl` + `latest_frame.jpg`; the `senses_now` tool is her live grounding. Pilot pulses it 1 Hz.
 - **Little-brain:** **`iris-little-v12`** is production (Qwen2.5-7B QLoRA, tool-fluent, escalation ladder), served on **:8772**. A `v14` round is in flight (see below). The two-speed mind (fast little-brain + deep big-Iris via `ask_big_iris`) is live.
 - **Voice:** Kokoro `af_bella` on CUDA, daemon + watchdog. On/off is a deliberate flag.

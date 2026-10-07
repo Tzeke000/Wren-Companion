@@ -32,6 +32,13 @@ import os
 import re
 import sys
 from pathlib import Path
+import os as _os_p, sys as _sys_p
+_sys_p.path.append(_os_p.path.dirname(_os_p.path.abspath(__file__)))
+try:  # config/private.local.json (git-ignored); a missing helper must never break this script
+    from _private import priv as _priv  # noqa: E402
+except Exception:  # noqa: BLE001
+    def _priv(key: str, default: str = "") -> str:  # type: ignore[misc]
+        return default
 from urllib import request as _req
 
 try:
@@ -368,12 +375,12 @@ def _check_and_auto_forward(transcript_path: str) -> None:
         return
     # Fire update_zeke_contact() on Discord-from-Zeke arrivals (added 2026-05-19,
     # §2a substrate counters Phase 2). Guard on user_id to avoid firing on the
-    # bot's own outgoing messages — only Zeke's user_id ([discord-user-id])
+    # bot's own outgoing messages — only Zeke's user_id (config/private.local.json)
     # counts as actual Zeke-touched-the-system. Best-effort; iris_time may be
     # unavailable in fresh-clone test contexts.
     if source.startswith("plugin:discord"):
         user_id = tag.get("user_id", "")
-        if user_id == "[discord-user-id]":
+        if user_id and user_id == _priv("zeke_discord_user_id"):
             try:
                 import sys as _sys
                 _here = os.path.dirname(os.path.abspath(__file__))
@@ -894,7 +901,7 @@ def _escalation_rewake(esc: dict) -> str:
         f"Filed at: {ts}\n"
         f"HER REQUEST: \"{req}\"\n\n"
         "Handle it now: resolve what you can yourself; if it needs Zeke, DM him "
-        "on Discord (chat_id [discord-dm-id]). THEN clear it so it stops "
+        "on Discord (chat_id " + _priv("zeke_dm_chat_id") + "). THEN clear it so it stops "
         "re-waking you:\n"
         "  D:\\Wren-Companion\\.venv\\Scripts\\python.exe "
         "D:\\Wren-Companion\\scripts\\check_escalations.py --resolve-all "

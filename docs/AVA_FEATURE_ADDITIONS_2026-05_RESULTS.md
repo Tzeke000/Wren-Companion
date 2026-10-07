@@ -33,7 +33,7 @@ For each test the path used (`voice` via audio loopback, `inject_transcript` ove
 | F7 | On-time wake discipline | DEFERRED | — | Implementation: Phase 2 yields at `wake_target - wind_down_duration`. Wind-down default 5 min, calibrates from `temporal_sense.calibrate_from_history(kind="sleep_phase3")` after 3+ samples. Self-interrupt fires on Phase 3 overrun. Real test needs at least one full sleep cycle; deferred for next session. |
 | F8 | Wake provocation mid-sleep | DEFERRED | — | `_cmd_wake` voice handler calls `request_wake(reason="voice_provocation")`. Verified on path; full mid-sleep voice provocation test requires audio loop. |
 | F9 | Clipboard tool | **PASS** | tool_call | `cu_type_clipboard` paste of 80-char paragraph in 2.18 s (vs ~4 s for `cu_type` per-char baseline). |
-| F9b | Close-app cleanup | **PASS** | tool_call | `cu_close_app(name="notepad", target="all")` closed 1 window cleanly (per Zeke notes about not leaving apps open). |
+| F9b | Close-app cleanup | **PASS** | tool_call | `cu_close_app(name="notepad", target="all")` closed 1 window cleanly (per Zeke's notes about not leaving apps open). |
 | F10 | Curriculum availability | **PASS** | synthetic | 25 entries indexed; `read_curriculum_entry` returns body; `consolidation_hook` callable. |
 | F11 | New-person temporal filter | **PASS** | synthetic | 5s unknown → not promoted; 15s unknown → promoted. |
 | F12 | Onboarding flow end-to-end | DEFERRED-VOICE | — | Voice-first onboarding requires Ava's mic = CABLE Output and a way to capture face frames during the photo-pose stages. The voice-command parser path is verified (F-aux below). Full-flow test deferred to next session. |

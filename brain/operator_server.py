@@ -2373,7 +2373,7 @@ def create_app():
                 if summary_text:
                     import subprocess as _sub
                     _sub.Popen(
-                        ["py", "-3.11", "scripts/discord_dm_user.py", "[discord-user-id]", summary_text],
+                        ["py", "-3.11", "scripts/discord_dm_user.py", __import__("brain.private_config", fromlist=["get"]).get("zeke_discord_user_id"), summary_text],
                         cwd=str((_g().get("BASE_DIR") or ".")),
                         stdout=_sub.DEVNULL,
                         stderr=_sub.DEVNULL,

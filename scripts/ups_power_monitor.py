@@ -70,7 +70,14 @@ try:
 except Exception:  # notification is best-effort; monitoring still works
     requests = None
 
-ZEKE_USER_ID = "[discord-user-id]"
+import os as _os_p, sys as _sys_p
+_sys_p.path.append(_os_p.path.dirname(_os_p.path.abspath(__file__)))
+try:  # config/private.local.json (git-ignored); a missing helper must never break this script
+    from _private import priv as _priv  # noqa: E402
+except Exception:  # noqa: BLE001
+    def _priv(key: str, default: str = "") -> str:  # type: ignore[misc]
+        return default
+ZEKE_USER_ID = _priv("zeke_discord_user_id")
 REPO = Path(r"D:\Wren-Companion")
 LOG = REPO / "state" / "ups_power.log"
 LEDGER = REPO / "state" / "ups_power_events.jsonl"

@@ -37,6 +37,13 @@ import os
 import sys
 import time
 from pathlib import Path
+import os as _os_p, sys as _sys_p
+_sys_p.path.append(_os_p.path.dirname(_os_p.path.abspath(__file__)))
+try:  # config/private.local.json (git-ignored); a missing helper must never break this script
+    from _private import priv as _priv  # noqa: E402
+except Exception:  # noqa: BLE001
+    def _priv(key: str, default: str = "") -> str:  # type: ignore[misc]
+        return default
 
 REPO = Path(__file__).resolve().parent.parent
 MUTEX_NAME = r"Global\IrisCognitionOwnerClaim"
@@ -207,7 +214,7 @@ def main() -> int:
                     help="ownership claim path (overridable for tests)")
     ap.add_argument("--no-server-check", action="store_true",
                     help="skip the iris-home failover check (tests / server unreachable by design)")
-    ap.add_argument("--server-host", default=os.environ.get("IRIS_FAILOVER_HOST", "iris@10.0.0.32"))
+    ap.add_argument("--server-host", default=os.environ.get("IRIS_FAILOVER_HOST", "iris@" + _priv("iris_home_host")))
     ap.add_argument("--server-max-age", type=float, default=300.0,
                     help="FAILOVER_ACTIVE younger than this on the server = server-me is live")
     ap.add_argument("--force", action="store_true",
