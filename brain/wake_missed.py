@@ -15,7 +15,7 @@ Vale's blind spot, made a READER. Every source already writes; nothing read them
 Then the cross-checks that no single log can show:
   * host_eyes_dead: runtime-camera situations (the runtime saw a face) while the host logged NO eyes_raw row
     within ±60 s — the host's poller is dead or stalled (found 2026-10-01: dead 2.2 h while Zeke was home).
-  * arrivals_unseen: a wifi JOIN with no host eyes commit within 10 min.
+  * arrivals_unseen: a wifi JOIN with no host eyes commit within ±10 min (symmetric: the camera usually sees him first).
   * unowned: situations the arbiter has no ownership entry for (fail-open wakes nobody reads).
 Pure functions over files; paths injectable for tests. Never raises — returns {"ok": False, "error"} instead.
 """
@@ -162,8 +162,12 @@ def missed(hours: float = 3.0, *, now: float | None = None, body_log: str = BODY
                               "verdict": "the runtime saw faces the host's eye poller never logged — the host's eyes were dead or stalled in this window"}
         joins = [p for p in pres if str(p.get("kind") or "") in ("join", "joined", "arrived", "present")]
         commit_ts = sorted(_ts(c) for c in commits)
+        # 2026-10-07: the window is SYMMETRIC. The camera usually names him
+        # BEFORE the phone rejoins the wifi (10-07 15:32: eyes 15:32:11, wifi
+        # join 15:32:47) — a forward-only window reported that arrival as
+        # "never seen" by the very eyes that saw it first.
         arrivals_unseen = [{"join": _iso(_ts(j)), "note": "no host eyes commit within %d min" % int(ARRIVAL_SEEN_WITHIN_S // 60)}
-                           for j in joins if not any(0 <= c - _ts(j) <= ARRIVAL_SEEN_WITHIN_S for c in commit_ts)]
+                           for j in joins if not any(abs(c - _ts(j)) <= ARRIVAL_SEEN_WITHIN_S for c in commit_ts)]
         unowned: dict[str, int] = {}
         for r in sits:
             if str(r.get("role") or "") == "unowned":
